@@ -154,3 +154,6 @@ data/
 # CC per-developer local permission allowlist
 .claude/settings.local.json
 
+# Live-test scratch dir for sub-agent runs
+tmp/
+
