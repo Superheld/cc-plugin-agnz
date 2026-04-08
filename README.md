@@ -11,18 +11,39 @@ Parent Claude talks to it over MCP. The sub-agent does the heavy file work — r
 - **Stay in control.** The sub-agent runs inside a sandbox: locked to a single working directory, tiered permissions (read-only by default, mutating tools require approval, shell is denied).
 - **Concurrency for free.** Sub-agents run in parallel via Node's event loop — no workers, no IPC. Two parallel runs measured at ~5.5s vs. ~10s sequential.
 
-## Status (v0.2.1)
+## Status (v0.4.0-pre)
 
-Working end-to-end and verified live against LM Studio + Devstral:
+This branch is mid-refactor toward a **workspace-first architecture** (see the ADRs below). What works today:
 
-- MCP boot, `tools/list`, the full `agent_*` toolset
+- MCP boot, `tools/list`, the lifecycle-only `agent_*` toolset (6 tools)
 - `agent_start` → `agent_send` → final answer (sub-agent does `list_dir` → `read_file` → response on its own)
 - Approval pause + resume via `agent_approve` (with `persist=true` to upgrade the policy for the rest of the thread)
 - `ask_user` pause + resume via `agent_answer`
-- Two parallel sub-agents finishing concurrently
-- Profiles, project + global memory, thread persistence in a version-stable XDG data dir
+- Detached runs via `agent_send(detach=true)` + `agent_wait`, two parallel sub-agents finishing concurrently
+- Per-project workspace at `<cwd>/.claude/agnz/` with threads, user-wide profiles at `~/.claude/agnz/`
+
+What has moved or gone since 0.3.x:
+
+- The data dir is now split. Per-project state (threads, future workspace.json, board, messages) lives under `<cwd>/.claude/agnz/`. User-wide state (profiles) lives under `~/.claude/agnz/` (with a transitional read-fallback to `~/.local/share/agnz/`).
+- The MCP surface shrank from 11 tools to 6. Everything read-only (status, list threads, memory) is gone from MCP; parent Claude reads workspace state directly with its own `Read`/`Grep` tools.
+- **Memory is removed.** The old project/global `.md` memory scopes no longer exist. Persistent context now belongs in the workspace itself — see ADRs 0001 and 0004.
 
 **Zero npm dependencies.** The MCP stdio server is hand-rolled (~150 lines). The plugin ships as pure source — Claude Code copies it to its cache on every install and there is no `npm install` step.
+
+## The current MCP tools
+
+Only six, all about process lifecycle:
+
+| Tool | Purpose |
+|---|---|
+| `agent_start` | Create a thread locked to a cwd. |
+| `agent_send` | Send a message. Sync by default; `detach=true` returns immediately. |
+| `agent_wait` | Block on a detached run until the next event (final / pause / error). |
+| `agent_approve` | Resolve an approval pause (allow/deny, optional `persist`). |
+| `agent_answer` | Resolve an `ask_user` pause with a free-text answer. |
+| `agent_stop` | Kill a live thread. Transcripts remain on disk. |
+
+Anything else — inspecting a thread, listing threads, reading transcripts — the parent does by opening files under `<cwd>/.claude/agnz/threads/` directly.
 
 ## Architecture at a glance
 
@@ -30,15 +51,16 @@ Working end-to-end and verified live against LM Studio + Devstral:
 Claude Code (Parent)
     │
     ▼  MCP stdio JSON-RPC
-mcp/server.mjs        ← exposes the agent_* tools
+mcp/server.mjs             ← 6 agent_* lifecycle tools
     │
     ▼
-agent/loop.mjs        ← LLM ↔ tool loop, persists transcript
+agent/loop.mjs             ← LLM ↔ tool loop, persists transcript
     │
-    ├──▶ tools/       (read_file, edit_file, write_file, grep, list_dir, ask_user)
-    ├──▶ sandbox.mjs  (cwd lock + tiered permission policy)
-    ├──▶ threads.mjs + memory.mjs   (persistence)
-    ├──▶ profiles.mjs                (named LLM endpoint configs)
+    ├──▶ tools/            (read_file, edit_file, write_file, grep, list_dir, ask_user)
+    ├──▶ sandbox.mjs       (cwd lock + tiered permission policy)
+    ├──▶ workspace-store   (<cwd>/.claude/agnz/ — threads, workspace.json)
+    ├──▶ thread-index      (user-wide id → cwd map)
+    ├──▶ profiles.mjs      (named LLM endpoint configs, user-wide)
     └──▶ llm/openai-compatible.mjs   (native fetch, no SDK)
 ```
 
@@ -71,40 +93,45 @@ The active profile is what `agent_start` uses when no profile is named explicitl
 
 ## Data layout
 
-Persistence lives in `$AGNZ_DATA_DIR` (default: `~/.local/share/agnz`). Intentionally version-independent so that threads, profiles, and memory survive plugin upgrades.
+Two independent roots:
+
+**User-wide** — profiles and other cross-project settings. Default: `~/.claude/agnz/`. Override with `$AGNZ_DATA_DIR`. If the new location is empty but the old `~/.local/share/agnz/` has content, the old one is still read as a transitional courtesy for 0.3.x upgrades.
 
 ```
-~/.local/share/agnz/
+~/.claude/agnz/
 ├── profiles.json
-├── memory/
-│   ├── global.md
-│   └── projects/<hash>.md
+└── thread-index.json        ← thread_id → cwd map
+```
+
+**Per-project** — one workspace per cwd, living under the project itself:
+
+```
+<cwd>/.claude/agnz/
+├── workspace.json           ← shared workspace metadata (skeleton today)
 └── threads/
     ├── <thread-id>.meta.json
     └── <thread-id>.jsonl
 ```
 
-## Roadmap — where this is going
+The per-project layout is co-located with other Claude Code project state under `.claude/`, and is intentionally editable and version-controllable by the user.
 
-The current build is a working foundation. The direction from here:
+## Where this is going
 
-- **Todo-list tool.** Give the sub-agent its own task list so it can break work into steps, track progress mid-run, and report a structured outcome instead of a free-form summary.
-- **Skills.** Reusable, named capability bundles the sub-agent can load on demand — same idea as Claude Code's skills, but scoped to the sub-agent.
-- **Messaging.** A channel for the parent and the sub-agent (and eventually sub-agents to each other) to exchange messages mid-run without tearing down the loop.
-- **Multi-agents / teams.** Named sub-agents with different profiles and roles, coordinated by the parent. The concurrency primitives are already in place (`run-tracker.mjs`, parallel `kick`s verified) — this is about making it ergonomic to spin up a team and have them collaborate. E.g. one cheap model doing bulk reads, a stronger one doing the writes.
-- **`bash` tool, sandboxed.** The biggest gap. Without it the sub-agent can't run tests, use git, or invoke build tools — which limits realistic use. Will be gated behind `ask` at minimum, with an allow-list and a `deny`-by-default policy for destructive operations.
-- **Sub-agent self-write to memory.** A `remember(note)` tool so the sub-agent can persist learnings to project/global memory itself, instead of only via the parent.
-- **Streaming / progress events.** Today `agent_send` returns one outcome at a time. Some way to surface intermediate progress without forcing the parent to poll. (Not via an outbox channel — the bar is "the sub-agent should just work and report at the end" unless there is a real reason to break that.)
-- **Slash commands beyond `/agnz:setup`.** `/agnz:threads`, `/agnz:memory` for inspecting state from the parent without round-tripping through MCP tool calls.
-- **Tests.** Real `node:test` coverage for the sandbox path-escape protection, the loop's drain/resume logic, and the three memory scopes.
-- **License.** Pick one before publishing more widely.
+The design trajectory is captured in four ADRs under [`docs/adr/`](./docs/adr/). Only ADR 0001 has been partially implemented on this branch (the data-dir split, workspace store, thread index, and MCP shrink). The rest are designed but not yet built.
+
+- **[ADR 0001 — Workspace-first architecture.](./docs/adr/0001-workspace-first-architecture.md)** Workspace as a directory under `<cwd>/.claude/agnz/`. MCP shrinks to process lifecycle. Parent reads state directly from files. *Partially implemented: user/project dir split, workspace store, thread index, 6-tool MCP surface.*
+- **[ADR 0002 — Communication: mailboxes and events.](./docs/adr/0002-communication-mailbox-and-events.md)** Per-recipient mailboxes, a `messages.jsonl` durable log, an in-process event bus, and parent notification through `UserPromptSubmit` / `SessionStart` hooks plus OS notifications for urgent traffic. *Designed, not implemented.*
+- **[ADR 0003 — Agent definitions.](./docs/adr/0003-agent-definitions.md)** Roles on top of profiles: `.md` files with YAML frontmatter under `<cwd>/.claude/agnz/agents/`, referenced by name at `agent_start` time. *Designed, not implemented.*
+- **[ADR 0004 — Board: mini-scrum for shared work.](./docs/adr/0004-board-mini-scrum.md)** A small kanban board on `workspace.json`, replacing flat todos, with columns, owners, dependencies, a review gate, and a planning-mode flag. *Designed, not implemented.*
+
+There is no `bash` tool today and adding one is intentionally outside the current branch.
 
 ## Conventions
 
 - **Native Node only.** No npm dependencies in the plugin.
 - **Comments explain *why*, not what.**
 - **JSONL for streams, JSON for snapshots.** Thread transcripts are append-only; thread metadata is rewritten in place.
-- **The data dir is version-stable on purpose.** Don't move it under the plugin cache.
+- **User-wide data survives plugin upgrades.** Per-project data lives with the project.
 
 ## License
 
