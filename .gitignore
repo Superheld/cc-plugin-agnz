@@ -148,6 +148,9 @@ vite.config.ts.timestamp-*
 
 output/
 
-# agnt plugin runtime data (threads, memory, profiles)
-plugins/agnt/data/
+# agnz plugin runtime data (threads, memory, profiles) — legacy in-tree path
+data/
+
+# CC per-developer local permission allowlist
+.claude/settings.local.json
 

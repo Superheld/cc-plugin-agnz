@@ -1,4 +1,4 @@
-# agnt — Sandboxed local-model agent for Claude Code
+# agnz — Sandboxed local-model agent for Claude Code
 
 A Claude Code plugin that exposes a **locally-hosted LLM** (LM Studio, Ollama, etc.) as a sandboxed sub-agent. Parent Claude talks to it via MCP. The sub-agent does the heavy file work; Parent Claude orchestrates and only sees the distilled outcome — keeping its context window small.
 
@@ -15,10 +15,10 @@ A Claude Code plugin that exposes a **locally-hosted LLM** (LM Studio, Ollama, e
 Claude Code (Parent)
     │
     ▼  MCP stdio JSON-RPC
-plugins/agnt/mcp/server.mjs    ← exposes 11 agent_* tools
+mcp/server.mjs    ← exposes 11 agent_* tools
     │
     ▼
-plugins/agnt/agent/loop.mjs    ← LLM ↔ tool loop, persists transcript
+agent/loop.mjs    ← LLM ↔ tool loop, persists transcript
     │
     ├──▶ tools/  (read_file, edit_file, write_file, grep, list_dir, ask_user)
     ├──▶ sandbox.mjs  (cwd lock + permission policy)
@@ -41,19 +41,19 @@ plugins/agnt/agent/loop.mjs    ← LLM ↔ tool loop, persists transcript
 | `agent/memory.mjs` | Persistence: thread JSONL transcripts, project memory (.md per cwd), global memory (.md). Three scopes. |
 | `agent/profiles.mjs` | Named `{baseUrl, apiKey, model, temperature, defaultPolicy, ...}` bundles. CRUD + ping test. |
 | `agent/run-tracker.mjs` | In-memory `Map<threadId, Promise>` for the detach/wait model. Two functions: `kick`, `wait`. |
-| `agent/data-dir.mjs` | Resolves the data directory. Defaults to `~/.local/share/agnt` (XDG-style). **Critical**: this is intentionally version-INDEPENDENT so threads/profiles survive plugin updates. |
+| `agent/data-dir.mjs` | Resolves the data directory. Defaults to `~/.local/share/agnz` (XDG-style). **Critical**: this is intentionally version-INDEPENDENT so threads/profiles survive plugin updates. |
 | `agent/llm/openai-compatible.mjs` | Native-fetch HTTP client for `/v1/chat/completions`. Works with LM Studio, Ollama, OpenRouter, anything OpenAI-compatible. |
 | `agent/tools/registry.mjs` | Tool registry. Wraps tool descriptors, serialises to OpenAI tools[] schema. |
 | `agent/tools/{list_dir,read_file,grep}.mjs` | Read-only tools. Default policy `allow`. |
 | `agent/tools/{edit_file,write_file}.mjs` | Mutating tools. Default policy `ask`. |
 | `agent/tools/ask_user.mjs` | Special tool: never actually executed; the loop intercepts it in `dispatchToolCall` and pauses with `kind="question"`. |
-| `scripts/companion.mjs` | Slash-command dispatcher. Currently only handles `/agnt:setup`. |
-| `commands/setup.md` | The `/agnt:setup` slash command markdown. |
+| `scripts/companion.mjs` | Slash-command dispatcher. Currently only handles `/agnz:setup`. |
+| `commands/setup.md` | The `/agnz:setup` slash command markdown. |
 | `.mcp.json` | Tells CC how to spawn the MCP server. Uses `${CLAUDE_PLUGIN_ROOT}` (verified to expand). |
 | `.claude-plugin/plugin.json` | Plugin manifest. |
 
-Repo root:
-- `.claude-plugin/marketplace.json` — marketplace manifest
+Repo layout follows the standard Claude Code plugin layout: `.claude-plugin/plugin.json` at the root, with `agent/`, `mcp/`, `commands/`, `scripts/` as siblings. This repo is a **pure plugin repo** — no marketplace manifest. The marketplace lives elsewhere.
+
 - `tmp/` — gitignored scratch dir for live tests with the sub-agent
 
 ## The agent loop in one paragraph
@@ -91,7 +91,7 @@ bash: deny
 ## Persistence layout
 
 ```
-$AGNT_DATA_DIR  (or ~/.local/share/agnt by default)
+$AGNZ_DATA_DIR  (or ~/.local/share/agnz by default)
 ├── profiles.json                     ← profile store
 ├── memory/
 │   ├── global.md                     ← global memory scope
@@ -105,26 +105,25 @@ The data dir is **version-independent on purpose**. Earlier we made the mistake 
 
 ## Plugin development workflow
 
-CC caches each installed plugin version under `~/.claude/plugins/cache/agnt/agnt/<VERSION>/`. There is no live-reload; **every code change requires a version bump and reinstall**. Cycle:
+CC caches each installed plugin version under `~/.claude/plugins/cache/agnz/agnz/<VERSION>/`. There is no live-reload; **every code change requires a version bump and reinstall**. Cycle:
 
-1. Edit source under `plugins/agnt/...`
-2. Bump version in **all three** places:
-   - `.claude-plugin/marketplace.json` (marketplace version + plugin entry version)
-   - `plugins/agnt/.claude-plugin/plugin.json`
-   - `plugins/agnt/mcp/server.mjs` (the `runStdioServer` call's `version` field)
+1. Edit source at the repo root (`agent/`, `mcp/`, `commands/`, ...)
+2. Bump version in **both** places:
+   - `.claude-plugin/plugin.json`
+   - `mcp/server.mjs` (the `runStdioServer` call's `version` field)
 3. In Claude Code:
    ```
-   /plugin marketplace update agnt
-   /plugin install agnt@agnt
+   /plugin marketplace update agnz
+   /plugin install agnz@agnz
    /reload-plugins
    ```
-4. Verify with `/mcp` — agnt should show as connected and the `agent_*` tools should be visible.
+4. Verify with `/mcp` — agnz should show as connected and the `agent_*` tools should be visible.
 
-`/plugin uninstall agnt` is **broken** in current CC for local marketplace plugins (it actually re-enables instead of removing). Bump-and-reinstall is the working path.
+`/plugin uninstall agnz` is **broken** in current CC for local marketplace plugins (it actually re-enables instead of removing). Bump-and-reinstall is the working path.
 
 ## Profile setup (LM Studio example)
 
-LM Studio default endpoint is `http://localhost:1234/v1`. After installing the plugin, run `/agnt:setup add` (interactive) or directly:
+LM Studio default endpoint is `http://localhost:1234/v1`. After installing the plugin, run `/agnz:setup add` (interactive) or directly:
 ```bash
 node ${CLAUDE_PLUGIN_ROOT}/scripts/companion.mjs setup add lmstudio-devstral http://localhost:1234/v1 mistralai/devstral-small-2-2512
 ```
@@ -142,7 +141,7 @@ The active profile is what `agent_start` picks up if no profile is named.
 
 - **No `bash` tool** — sub-agent cannot run commands, run tests, use git. This is intentional for safety but limits realistic use. When added, gate behind `ask` at minimum.
 - **No streaming** — `agent_send` returns one outcome at a time. Status updates *during* a turn aren't possible (we explicitly chose not to build polling/outbox channels — the sub-agent should just work and report at the end).
-- **No `/agnt:threads`, `/agnt:memory` slash commands** — `companion.mjs` has only the `setup` group wired up.
+- **No `/agnz:threads`, `/agnz:memory` slash commands** — `companion.mjs` has only the `setup` group wired up.
 - **No tests** — sandbox path-escape, loop drain/resume, memory scopes all need real `node:test` coverage.
 - **Sub-agent self-write to memory** — currently only Parent Claude can write to project/global memory via `agent_memory_write`. The sub-agent has no `remember(note)` tool. Would be a small addition.
 - **License** — repo has no LICENSE file (the old fork's MIT/whatever was deleted). Pick one before publishing.
@@ -151,19 +150,19 @@ The active profile is what `agent_start` picks up if no profile is named.
 
 ```bash
 # Manually run the MCP server (for debugging — it'll wait on stdin)
-AGNT_DATA_DIR=/tmp/scratch node plugins/agnt/mcp/server.mjs
+AGNZ_DATA_DIR=/tmp/scratch node mcp/server.mjs
 
 # Smoke-test JSON-RPC handshake
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"x","version":"0"}}}' \
               '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
               '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-  | AGNT_DATA_DIR=/tmp/scratch node plugins/agnt/mcp/server.mjs
+  | AGNZ_DATA_DIR=/tmp/scratch node mcp/server.mjs
 
-# E2E test scripts (if /tmp/agnt-e2e/ still exists from earlier work)
-node /tmp/agnt-e2e/driver.mjs              # basic list+read+respond
-node /tmp/agnt-e2e/driver-approval.mjs     # approval pause + resume
-node /tmp/agnt-e2e/driver-ask.mjs          # ask_user pause + resume
-node /tmp/agnt-e2e/driver-parallel.mjs    # two parallel sub-agents
+# E2E test scripts (if /tmp/agnz-e2e/ still exists from earlier work)
+node /tmp/agnz-e2e/driver.mjs              # basic list+read+respond
+node /tmp/agnz-e2e/driver-approval.mjs     # approval pause + resume
+node /tmp/agnz-e2e/driver-ask.mjs          # ask_user pause + resume
+node /tmp/agnz-e2e/driver-parallel.mjs    # two parallel sub-agents
 ```
 
 ## Conventions

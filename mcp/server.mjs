@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// MCP server: exposes the agnt agent to Claude Code as a set of tools.
+// MCP server: exposes the agnz agent to Claude Code as a set of tools.
 // Claude (the parent session) calls these tools to hold a conversation
 // with a locally-hosted sub-agent that runs in its own sandbox.
 //
@@ -18,8 +18,8 @@ import { kick, wait, forget } from "../agent/run-tracker.mjs";
 
 // ---- data dir ----
 //
-// Versionsunabhängig: ~/.local/share/agnt (oder $XDG_DATA_HOME/agnt,
-// oder $AGNT_DATA_DIR override). Wichtig: jeder Plugin-Update legt einen
+// Versionsunabhängig: ~/.local/share/agnz (oder $XDG_DATA_HOME/agnz,
+// oder $AGNZ_DATA_DIR override). Wichtig: jeder Plugin-Update legt einen
 // neuen Cache-Ordner an, aber unsere Threads/Profiles/Memory bleiben
 // wo sie sind. Siehe agent/data-dir.mjs für Details.
 
@@ -72,7 +72,7 @@ const tools = [
         cwd: { type: "string", description: "Absolute path to the sandbox root for this thread." },
         profile: {
           type: "string",
-          description: "Profile name (from /agnt:setup). Defaults to active profile.",
+          description: "Profile name (from /agnz:setup). Defaults to active profile.",
         },
         system_prompt: {
           type: "string",
@@ -87,8 +87,8 @@ const tools = [
         if (!profile) {
           return errorResult(
             args.profile
-              ? `no profile named '${args.profile}'. Run /agnt:setup add.`
-              : "no active profile configured. Run /agnt:setup add.",
+              ? `no profile named '${args.profile}'. Run /agnz:setup add.`
+              : "no active profile configured. Run /agnz:setup add.",
           );
         }
         const thread = await threadMgr.createThread({
@@ -544,11 +544,11 @@ async function recoverStaleRuns() {
   } catch (err) {
     // Don't fail boot just because recovery had a hiccup; log to stderr
     // (which CC captures into plugin logs).
-    process.stderr.write(`agnt: recovery scan failed: ${err.message}\n`);
+    process.stderr.write(`agnz: recovery scan failed: ${err.message}\n`);
   }
 }
 
 // ---- boot -----------------------------------------------------------------
 
 await recoverStaleRuns();
-await runStdioServer({ name: "agnt", version: "0.2.0", tools });
+await runStdioServer({ name: "agnz", version: "0.2.1", tools });

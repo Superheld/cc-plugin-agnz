@@ -1,10 +1,10 @@
 ---
-description: Configure local-model profiles for the agnt agent (list, add, remove, use, test).
+description: Configure local-model profiles for the agnz agent (list, add, remove, use, test).
 argument-hint: "[list|add|remove|use|test] [name] [...]"
 allowed-tools: Bash(node:*), AskUserQuestion
 ---
 
-Profile management for the **agnt** plugin. Profiles are named `{baseUrl, apiKey, model, ...}` bundles stored in `plugins/agnt/data/profiles.json`. The agent uses the *active* profile when a thread is started without specifying one.
+Profile management for the **agnz** plugin. Profiles are named `{baseUrl, apiKey, model, ...}` bundles stored in `$AGNZ_DATA_DIR/profiles.json` (default `~/.local/share/agnz/profiles.json`). The agent uses the *active* profile when a thread is started without specifying one.
 
 ## Sub-commands
 
@@ -16,7 +16,7 @@ Profile management for the **agnt** plugin. Profiles are named `{baseUrl, apiKey
 
 ## Instructions
 
-The user invoked `/agnt:setup $ARGUMENTS`.
+The user invoked `/agnz:setup $ARGUMENTS`.
 
 1. Parse `$ARGUMENTS` into a sub-command and any positional args.
 2. If no sub-command is given, default to `list`.
