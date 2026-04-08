@@ -6,7 +6,7 @@
 // No npm dependencies — we implement the minimal JSON-RPC subset MCP
 // needs in ./jsonrpc.mjs so the plugin ships zero node_modules.
 
-import { runStdioServer } from "./jsonrpc.mjs";
+import { runStdioServer, log } from "./jsonrpc.mjs";
 import { createSandbox, Decision } from "../agent/sandbox.mjs";
 import { createRegistry } from "../agent/tools/registry.mjs";
 import { createMemoryStore } from "../agent/memory.mjs";
@@ -45,27 +45,79 @@ function sandboxFor(thread) {
 }
 
 // ---- result helpers ----
+//
+// jsonResult returns BOTH `content` (text fallback for old clients) and
+// `structuredContent` (parseable JSON for MCP 2025-06-18 clients). If the
+// payload is naturally an array or scalar, wrap it in `{ value: ... }`
+// because the spec requires structuredContent to be an object.
 
 function textResult(text) {
   return { content: [{ type: "text", text }] };
 }
 function jsonResult(obj) {
-  return { content: [{ type: "text", text: JSON.stringify(obj, null, 2) }] };
+  const structured = obj && typeof obj === "object" && !Array.isArray(obj) ? obj : { value: obj };
+  return {
+    content: [{ type: "text", text: JSON.stringify(obj, null, 2) }],
+    structuredContent: structured,
+  };
 }
 function errorResult(message) {
   return { content: [{ type: "text", text: `Error: ${message}` }], isError: true };
 }
 
+// ---- server-level instructions ----
+//
+// Surfaced to the parent model via the MCP `initialize` response. This is
+// the ONE place where we get to frame the whole server — the tool
+// descriptions can only speak about themselves. Keep it tight (<400 words),
+// lead with the use case, explain the workflow, mention sandbox + memory.
+
+const INSTRUCTIONS = `agnz exposes a sandboxed, locally-hosted LLM as a sub-agent you (the parent) can delegate work to. The sub-agent runs its own tool loop against a model you control (LM Studio, Ollama, any OpenAI-compatible endpoint) and only reports the final outcome back to you.
+
+WHEN TO USE: delegate read-heavy or mechanically-repetitive file work — bulk reads, grep-and-summarize, find-and-replace across many files, code navigation — instead of doing it yourself. The sub-agent's intermediate tool calls don't count against your context window; only its final summary does. This is the same value model as your built-in Agent tool, but with a model the user hosts locally (free, private, no rate limits).
+
+WHAT THE SUB-AGENT CAN DO: inside its sandbox it has list_dir, read_file, grep, edit_file, write_file, and ask_user. It is locked to a single cwd and cannot escape. edit_file and write_file are gated by default — the sub-agent will pause and require your approval via agent_approve before running them (set persist=true on the first approval to auto-allow for the rest of the thread).
+
+TYPICAL WORKFLOW:
+  1. agent_start(cwd) — create a thread locked to a directory. Returns thread_id.
+  2. agent_send(thread_id, message) — give it a task; blocks until it finishes, pauses, or hits max_turns.
+  3. If paused: use agent_approve (for tool-call approval pauses) or agent_answer (for ask_user question pauses). Check thread.pending.kind via agent_status to tell them apart.
+  4. agent_stop when done (optional; transcripts persist).
+
+CONCURRENCY: set detach=true on agent_send / agent_approve / agent_answer to run the sub-agent in the background, then agent_wait(thread_id) for the next event. Multiple sub-agents run in parallel freely — Node's event loop gives you real concurrency while they're waiting on their LLM endpoints.
+
+MEMORY: agent_memory_read / agent_memory_write give you scoped persistent notes (thread, project, global) that survive across runs and plugin upgrades.`;
+
 // ---- tool schemas ----
 //
 // Hand-written JSON Schemas — no zod needed. We keep them concise and
-// rely on runtime validation inside handlers.
+// rely on runtime validation inside handlers. Annotations (readOnlyHint
+// etc.) are MCP 2025-03-26 hints — clients use them for UX like
+// auto-approve of safe reads.
 
 const tools = [
   {
     name: "agent_start",
     description:
       "Create a new conversation thread with the local agent. The agent will operate strictly inside `cwd` and use the given profile (or the active profile if omitted). Returns the thread id and initial policy.",
+    annotations: {
+      title: "Start agent thread",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        thread_id: { type: "string" },
+        cwd: { type: "string" },
+        profile: { type: "string" },
+        model: { type: "string" },
+        policy: { type: "object", additionalProperties: { type: "string" } },
+      },
+      required: ["thread_id", "cwd", "profile", "model", "policy"],
+    },
     inputSchema: {
       type: "object",
       properties: {
@@ -98,6 +150,7 @@ const tools = [
           systemPrompt: args.system_prompt || null,
         });
         sandboxFor(thread); // fail fast on bad cwd
+        log("info", { event: "thread_started", thread_id: thread.id, cwd: thread.cwd, profile: profile.name, model: profile.model }, "agnz.mcp");
         return jsonResult({
           thread_id: thread.id,
           cwd: thread.cwd,
@@ -106,6 +159,7 @@ const tools = [
           policy: thread.policy,
         });
       } catch (err) {
+        log("error", { event: "thread_start_failed", error: err.message }, "agnz.mcp");
         return errorResult(err.message);
       }
     },
@@ -115,6 +169,13 @@ const tools = [
     name: "agent_send",
     description:
       "Send a user message to a thread. Default mode (detach=false) blocks until the sub-agent finishes, pauses, or hits max_turns. With detach=true the sub-agent runs in the background and the call returns immediately with {status: 'started'} — use agent_wait to retrieve the outcome later. Detach mode lets you run multiple sub-agents concurrently or do other work while one is thinking.",
+    annotations: {
+      title: "Send message to agent",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
     inputSchema: {
       type: "object",
       properties: {
@@ -167,6 +228,11 @@ const tools = [
     name: "agent_wait",
     description:
       "Block until a detached sub-agent reaches its next event (final response, pause, error). Use this after agent_send(detach=true) or agent_approve(detach=true). Optional timeout returns {status: 'still_running'} if nothing happens in time. Multiple concurrent waits on the same thread are safe.",
+    annotations: {
+      title: "Wait for agent event",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     inputSchema: {
       type: "object",
       properties: {
@@ -214,6 +280,13 @@ const tools = [
     name: "agent_approve",
     description:
       "Resolve a pending APPROVAL pause (sub-agent wants to run a tool that requires consent). Allow or deny the call. Set persist=true to apply the decision to all future calls of the same tool in this thread. Set detach=true to let the sub-agent continue in the background — use agent_wait afterwards. For ask_user pauses, use agent_answer instead.",
+    annotations: {
+      title: "Approve pending tool call",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
     inputSchema: {
       type: "object",
       properties: {
@@ -265,6 +338,13 @@ const tools = [
     name: "agent_answer",
     description:
       "Resolve a pending QUESTION pause (sub-agent called ask_user and is waiting for clarification). Provide a free-text answer; the sub-agent will see it as the tool result and continue. Set detach=true to let the sub-agent continue in the background — use agent_wait afterwards.",
+    annotations: {
+      title: "Answer agent question",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
     inputSchema: {
       type: "object",
       properties: {
@@ -313,6 +393,11 @@ const tools = [
   {
     name: "agent_status",
     description: "Get the current status and meta of a thread.",
+    annotations: {
+      title: "Get thread status",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     inputSchema: {
       type: "object",
       properties: { thread_id: { type: "string" } },
@@ -328,11 +413,37 @@ const tools = [
   {
     name: "agent_list_threads",
     description: "List all known threads with their status.",
+    annotations: {
+      title: "List agent threads",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        threads: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string" },
+              cwd: { type: "string" },
+              profile: { type: "string" },
+              status: { type: "string" },
+              createdAt: { type: "string" },
+              updatedAt: { type: "string" },
+            },
+            required: ["id", "cwd", "profile", "status"],
+          },
+        },
+      },
+      required: ["threads"],
+    },
     inputSchema: { type: "object", properties: {} },
     async handler() {
       const threads = await threadMgr.listThreads();
-      return jsonResult(
-        threads.map((t) => ({
+      return jsonResult({
+        threads: threads.map((t) => ({
           id: t.id,
           cwd: t.cwd,
           profile: t.profile,
@@ -340,7 +451,7 @@ const tools = [
           createdAt: t.createdAt,
           updatedAt: t.updatedAt,
         })),
-      );
+      });
     },
   },
 
@@ -348,6 +459,13 @@ const tools = [
     name: "agent_stop",
     description:
       "Mark a thread as stopped. In-memory sandbox state is dropped; persisted transcript is kept.",
+    annotations: {
+      title: "Stop agent thread",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     inputSchema: {
       type: "object",
       properties: { thread_id: { type: "string" } },
@@ -367,6 +485,11 @@ const tools = [
     name: "agent_memory_read",
     description:
       "Read from the agent's persistent memory. Scope 'thread' needs a thread_id key, scope 'project' needs a project path key, scope 'global' ignores key.",
+    annotations: {
+      title: "Read agent memory",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     inputSchema: {
       type: "object",
       properties: {
@@ -392,6 +515,13 @@ const tools = [
     name: "agent_memory_write",
     description:
       "Write to the agent's persistent memory (project or global scope only). Overwrites existing content.",
+    annotations: {
+      title: "Write agent memory",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     inputSchema: {
       type: "object",
       properties: {
@@ -417,6 +547,30 @@ const tools = [
   {
     name: "agent_profiles_list",
     description: "List all configured profiles and the currently active one.",
+    annotations: {
+      title: "List agent profiles",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        active: { type: ["string", "null"] },
+        profiles: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              name: { type: "string" },
+              baseUrl: { type: "string" },
+              model: { type: "string" },
+            },
+            required: ["name", "baseUrl", "model"],
+          },
+        },
+      },
+      required: ["active", "profiles"],
+    },
     inputSchema: { type: "object", properties: {} },
     async handler() {
       const summary = await profileStore.list();
@@ -481,6 +635,7 @@ function previewArgs(args) {
 
 function formatOutcome(outcome, threadId) {
   if (outcome.status === "final") {
+    log("info", { event: "thread_final", thread_id: threadId, finish_reason: outcome.finishReason, content_length: outcome.content?.length ?? 0 }, "agnz.mcp");
     return jsonResult({
       status: "final",
       thread_id: threadId,
@@ -491,6 +646,7 @@ function formatOutcome(outcome, threadId) {
   if (outcome.status === "awaiting_input") {
     const p = outcome.pending;
     if (p?.kind === "question") {
+      log("info", { event: "thread_paused", thread_id: threadId, kind: "question", tool_call_id: p.toolCallId }, "agnz.mcp");
       return jsonResult({
         status: "awaiting_input",
         kind: "question",
@@ -504,6 +660,7 @@ function formatOutcome(outcome, threadId) {
       });
     }
     // approval (default)
+    log("info", { event: "thread_paused", thread_id: threadId, kind: "approval", tool: p.name, tool_call_id: p.toolCallId }, "agnz.mcp");
     return jsonResult({
       status: "awaiting_input",
       kind: "approval",
@@ -516,8 +673,10 @@ function formatOutcome(outcome, threadId) {
     });
   }
   if (outcome.status === "max_turns") {
+    log("warning", { event: "thread_max_turns", thread_id: threadId }, "agnz.mcp");
     return jsonResult({ status: "max_turns", thread_id: threadId, note: outcome.content });
   }
+  log("warning", { event: "thread_unknown_outcome", thread_id: threadId, status: outcome.status }, "agnz.mcp");
   return jsonResult({ status: "unknown", thread_id: threadId, outcome });
 }
 
@@ -531,6 +690,7 @@ function formatOutcome(outcome, threadId) {
 async function recoverStaleRuns() {
   try {
     const threads = await threadMgr.listThreads();
+    let recovered = 0;
     for (const t of threads) {
       if (t.status === ThreadStatus.RUNNING) {
         await threadMgr.setStatus(t.id, ThreadStatus.ERROR, {
@@ -539,7 +699,11 @@ async function recoverStaleRuns() {
           },
           pending: null,
         });
+        recovered++;
       }
+    }
+    if (recovered > 0) {
+      log("notice", { event: "stale_runs_recovered", count: recovered }, "agnz.mcp");
     }
   } catch (err) {
     // Don't fail boot just because recovery had a hiccup; log to stderr
@@ -551,4 +715,4 @@ async function recoverStaleRuns() {
 // ---- boot -----------------------------------------------------------------
 
 await recoverStaleRuns();
-await runStdioServer({ name: "agnz", version: "0.2.2", tools });
+await runStdioServer({ name: "agnz", version: "0.3.0", instructions: INSTRUCTIONS, tools });
