@@ -16,9 +16,10 @@
 import { createInterface } from "node:readline";
 
 /**
- * Protocol version we advertise. Matches what the reference TS SDK uses.
+ * Protocol version we advertise. 2025-03-26 introduced the `instructions`
+ * field on initialize and tool annotations (readOnlyHint etc.).
  */
-const PROTOCOL_VERSION = "2024-11-05";
+const PROTOCOL_VERSION = "2025-03-26";
 
 /**
  * Create and run an MCP server on stdio. Returns a promise that resolves
@@ -27,19 +28,26 @@ const PROTOCOL_VERSION = "2024-11-05";
  * @param {Object} opts
  * @param {string} opts.name           — server name
  * @param {string} opts.version        — server version
+ * @param {string} [opts.instructions] — server-level guidance surfaced to
+ *                                        the model via initialize result.
+ *                                        Tell the agent what this server is
+ *                                        for and how to use it.
  * @param {Array<ToolDef>} opts.tools  — tool definitions
  *
  * @typedef {Object} ToolDef
  * @property {string} name
  * @property {string} description
  * @property {Object} inputSchema       — JSON Schema (draft-07)
+ * @property {Object} [annotations]     — MCP tool annotations: title,
+ *                                         readOnlyHint, destructiveHint,
+ *                                         idempotentHint, openWorldHint
  * @property {(args: object) => Promise<ToolResult>} handler
  *
  * @typedef {Object} ToolResult
  * @property {Array<{type: "text", text: string}>} content
  * @property {boolean} [isError]
  */
-export async function runStdioServer({ name, version, tools }) {
+export async function runStdioServer({ name, version, instructions, tools }) {
   const byName = new Map();
   for (const t of tools) {
     if (!t?.name) throw new Error("tool missing name");
@@ -73,6 +81,7 @@ export async function runStdioServer({ name, version, tools }) {
           tools: { listChanged: false },
         },
         serverInfo: { name, version },
+        ...(instructions ? { instructions } : {}),
       });
     }
 
@@ -85,6 +94,7 @@ export async function runStdioServer({ name, version, tools }) {
         name: t.name,
         description: t.description,
         inputSchema: t.inputSchema,
+        ...(t.annotations ? { annotations: t.annotations } : {}),
       }));
       return okResponse(id, { tools: list });
     }
