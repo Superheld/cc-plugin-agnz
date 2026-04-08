@@ -11,6 +11,14 @@ import { resolveProjectDir } from "./data-dir.mjs";
 
 const MESSAGES_FILE = "messages.jsonl";
 
+// Per-workspace serialisation chain for appendMessage. Without this, two
+// concurrent publish() calls can both await nextMessageId(), both read the
+// same last id, and both assign the same new id. Node is single-threaded
+// but async reads interleave. We keep one promise per cwd and chain each
+// new append behind the previous one. Serialisation is per-workspace so
+// parallel workspaces do not block each other.
+const appendChains = new Map(); // cwd -> Promise<void>
+
 /**
  * Generate the next monotonic message ID.
  * Reads the last line of messages.jsonl to find the highest existing ID,
@@ -56,12 +64,23 @@ async function nextMessageId(cwd) {
 export async function appendMessage(cwd, partial) {
   if (!cwd || !partial) throw new Error("appendMessage: cwd and partial are required");
 
+  // Chain behind any in-flight append for this workspace so id allocation
+  // and file append happen atomically from the caller's perspective.
+  const previous = appendChains.get(cwd) || Promise.resolve();
+  const next = previous.then(() => doAppend(cwd, partial));
+  // Swallow errors in the chain link so a single failure does not poison
+  // every subsequent append. Callers still see the rejection via `next`.
+  appendChains.set(cwd, next.catch(() => {}));
+  return next;
+}
+
+async function doAppend(cwd, partial) {
   const root = resolveProjectDir(cwd);
   await mkdir(root, { recursive: true });
 
   const id = await nextMessageId(cwd);
   const at = new Date().toISOString();
-  const message = { id, at, ...partial };
+  const message = { ...partial, id, at };
 
   const filePath = join(root, MESSAGES_FILE);
   const line = JSON.stringify(message) + "\n";
