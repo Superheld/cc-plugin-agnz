@@ -6,7 +6,7 @@
 // No npm dependencies — we implement the minimal JSON-RPC subset MCP
 // needs in ./jsonrpc.mjs so the plugin ships zero node_modules.
 
-import { runStdioServer } from "./jsonrpc.mjs";
+import { runStdioServer, log } from "./jsonrpc.mjs";
 import { createSandbox, Decision } from "../agent/sandbox.mjs";
 import { createRegistry } from "../agent/tools/registry.mjs";
 import { createMemoryStore } from "../agent/memory.mjs";
@@ -45,12 +45,21 @@ function sandboxFor(thread) {
 }
 
 // ---- result helpers ----
+//
+// jsonResult returns BOTH `content` (text fallback for old clients) and
+// `structuredContent` (parseable JSON for MCP 2025-06-18 clients). If the
+// payload is naturally an array or scalar, wrap it in `{ value: ... }`
+// because the spec requires structuredContent to be an object.
 
 function textResult(text) {
   return { content: [{ type: "text", text }] };
 }
 function jsonResult(obj) {
-  return { content: [{ type: "text", text: JSON.stringify(obj, null, 2) }] };
+  const structured = obj && typeof obj === "object" && !Array.isArray(obj) ? obj : { value: obj };
+  return {
+    content: [{ type: "text", text: JSON.stringify(obj, null, 2) }],
+    structuredContent: structured,
+  };
 }
 function errorResult(message) {
   return { content: [{ type: "text", text: `Error: ${message}` }], isError: true };
@@ -98,6 +107,17 @@ const tools = [
       idempotentHint: false,
       openWorldHint: false,
     },
+    outputSchema: {
+      type: "object",
+      properties: {
+        thread_id: { type: "string" },
+        cwd: { type: "string" },
+        profile: { type: "string" },
+        model: { type: "string" },
+        policy: { type: "object", additionalProperties: { type: "string" } },
+      },
+      required: ["thread_id", "cwd", "profile", "model", "policy"],
+    },
     inputSchema: {
       type: "object",
       properties: {
@@ -130,6 +150,7 @@ const tools = [
           systemPrompt: args.system_prompt || null,
         });
         sandboxFor(thread); // fail fast on bad cwd
+        log("info", { event: "thread_started", thread_id: thread.id, cwd: thread.cwd, profile: profile.name, model: profile.model }, "agnz.mcp");
         return jsonResult({
           thread_id: thread.id,
           cwd: thread.cwd,
@@ -138,6 +159,7 @@ const tools = [
           policy: thread.policy,
         });
       } catch (err) {
+        log("error", { event: "thread_start_failed", error: err.message }, "agnz.mcp");
         return errorResult(err.message);
       }
     },
@@ -396,11 +418,32 @@ const tools = [
       readOnlyHint: true,
       openWorldHint: false,
     },
+    outputSchema: {
+      type: "object",
+      properties: {
+        threads: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string" },
+              cwd: { type: "string" },
+              profile: { type: "string" },
+              status: { type: "string" },
+              createdAt: { type: "string" },
+              updatedAt: { type: "string" },
+            },
+            required: ["id", "cwd", "profile", "status"],
+          },
+        },
+      },
+      required: ["threads"],
+    },
     inputSchema: { type: "object", properties: {} },
     async handler() {
       const threads = await threadMgr.listThreads();
-      return jsonResult(
-        threads.map((t) => ({
+      return jsonResult({
+        threads: threads.map((t) => ({
           id: t.id,
           cwd: t.cwd,
           profile: t.profile,
@@ -408,7 +451,7 @@ const tools = [
           createdAt: t.createdAt,
           updatedAt: t.updatedAt,
         })),
-      );
+      });
     },
   },
 
@@ -509,6 +552,25 @@ const tools = [
       readOnlyHint: true,
       openWorldHint: false,
     },
+    outputSchema: {
+      type: "object",
+      properties: {
+        active: { type: ["string", "null"] },
+        profiles: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              name: { type: "string" },
+              baseUrl: { type: "string" },
+              model: { type: "string" },
+            },
+            required: ["name", "baseUrl", "model"],
+          },
+        },
+      },
+      required: ["active", "profiles"],
+    },
     inputSchema: { type: "object", properties: {} },
     async handler() {
       const summary = await profileStore.list();
@@ -573,6 +635,7 @@ function previewArgs(args) {
 
 function formatOutcome(outcome, threadId) {
   if (outcome.status === "final") {
+    log("info", { event: "thread_final", thread_id: threadId, finish_reason: outcome.finishReason, content_length: outcome.content?.length ?? 0 }, "agnz.mcp");
     return jsonResult({
       status: "final",
       thread_id: threadId,
@@ -583,6 +646,7 @@ function formatOutcome(outcome, threadId) {
   if (outcome.status === "awaiting_input") {
     const p = outcome.pending;
     if (p?.kind === "question") {
+      log("info", { event: "thread_paused", thread_id: threadId, kind: "question", tool_call_id: p.toolCallId }, "agnz.mcp");
       return jsonResult({
         status: "awaiting_input",
         kind: "question",
@@ -596,6 +660,7 @@ function formatOutcome(outcome, threadId) {
       });
     }
     // approval (default)
+    log("info", { event: "thread_paused", thread_id: threadId, kind: "approval", tool: p.name, tool_call_id: p.toolCallId }, "agnz.mcp");
     return jsonResult({
       status: "awaiting_input",
       kind: "approval",
@@ -608,8 +673,10 @@ function formatOutcome(outcome, threadId) {
     });
   }
   if (outcome.status === "max_turns") {
+    log("warning", { event: "thread_max_turns", thread_id: threadId }, "agnz.mcp");
     return jsonResult({ status: "max_turns", thread_id: threadId, note: outcome.content });
   }
+  log("warning", { event: "thread_unknown_outcome", thread_id: threadId, status: outcome.status }, "agnz.mcp");
   return jsonResult({ status: "unknown", thread_id: threadId, outcome });
 }
 
@@ -623,6 +690,7 @@ function formatOutcome(outcome, threadId) {
 async function recoverStaleRuns() {
   try {
     const threads = await threadMgr.listThreads();
+    let recovered = 0;
     for (const t of threads) {
       if (t.status === ThreadStatus.RUNNING) {
         await threadMgr.setStatus(t.id, ThreadStatus.ERROR, {
@@ -631,7 +699,11 @@ async function recoverStaleRuns() {
           },
           pending: null,
         });
+        recovered++;
       }
+    }
+    if (recovered > 0) {
+      log("notice", { event: "stale_runs_recovered", count: recovered }, "agnz.mcp");
     }
   } catch (err) {
     // Don't fail boot just because recovery had a hiccup; log to stderr

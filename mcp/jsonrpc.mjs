@@ -1,19 +1,64 @@
 // Minimal MCP stdio server: JSON-RPC 2.0 over newline-delimited JSON on
 // stdin/stdout. The MCP protocol itself is just a small set of methods:
 //
-//   initialize            — handshake, returns server info + capabilities
+//   initialize                — handshake, returns server info + capabilities
 //   notifications/initialized — client ack (no response)
-//   tools/list            — enumerate tools
-//   tools/call            — invoke a tool with validated args
-//   ping                  — health check
+//   tools/list                — enumerate tools
+//   tools/call                — invoke a tool with validated args
+//   ping                      — health check
+//   logging/setLevel          — client sets minimum log level
 //
-// We implement exactly these. Tool definitions are supplied by the caller
-// as { name, description, inputSchema, handler } objects.
+// We implement exactly these, plus server → client notifications for
+// logging (notifications/message). Tool definitions are supplied by the
+// caller as { name, description, inputSchema, outputSchema?, annotations?,
+// handler } objects.
 //
 // This replaces @modelcontextprotocol/sdk so the plugin can ship without
 // any node_modules.
 
 import { createInterface } from "node:readline";
+
+// ---- logging ----
+//
+// MCP standard levels (RFC 5424 subset). Lower index = less severe.
+// Clients call logging/setLevel to raise or lower the threshold.
+
+const LOG_LEVELS = [
+  "debug",
+  "info",
+  "notice",
+  "warning",
+  "error",
+  "critical",
+  "alert",
+  "emergency",
+];
+const LOG_LEVEL_INDEX = Object.fromEntries(LOG_LEVELS.map((l, i) => [l, i]));
+
+let currentLogLevel = "info";
+
+function writeNotification(method, params) {
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", method, params }) + "\n");
+}
+
+/**
+ * Emit an MCP logging notification to the client. Silently drops messages
+ * below the currently configured level. Safe to call before initialize
+ * (will just write; clients that don't support logging ignore it).
+ *
+ * @param {"debug"|"info"|"notice"|"warning"|"error"|"critical"|"alert"|"emergency"} level
+ * @param {unknown} data       — any JSON-serialisable payload
+ * @param {string} [loggerName] — optional logger name (e.g. "agnz.loop")
+ */
+export function log(level, data, loggerName) {
+  if (LOG_LEVEL_INDEX[level] === undefined) level = "info";
+  if (LOG_LEVEL_INDEX[level] < LOG_LEVEL_INDEX[currentLogLevel]) return;
+  writeNotification("notifications/message", {
+    level,
+    ...(loggerName ? { logger: loggerName } : {}),
+    data,
+  });
+}
 
 /**
  * Protocol version we advertise. 2025-03-26 introduced the `instructions`
@@ -38,6 +83,9 @@ const PROTOCOL_VERSION = "2025-03-26";
  * @property {string} name
  * @property {string} description
  * @property {Object} inputSchema       — JSON Schema (draft-07)
+ * @property {Object} [outputSchema]    — JSON Schema describing the
+ *                                         shape of structuredContent in
+ *                                         the tool's result (MCP 2025-06-18)
  * @property {Object} [annotations]     — MCP tool annotations: title,
  *                                         readOnlyHint, destructiveHint,
  *                                         idempotentHint, openWorldHint
@@ -45,6 +93,8 @@ const PROTOCOL_VERSION = "2025-03-26";
  *
  * @typedef {Object} ToolResult
  * @property {Array<{type: "text", text: string}>} content
+ * @property {Object} [structuredContent] — optional JSON object
+ *                                            (mirrors outputSchema)
  * @property {boolean} [isError]
  */
 export async function runStdioServer({ name, version, instructions, tools }) {
@@ -79,6 +129,7 @@ export async function runStdioServer({ name, version, instructions, tools }) {
         protocolVersion: PROTOCOL_VERSION,
         capabilities: {
           tools: { listChanged: false },
+          logging: {},
         },
         serverInfo: { name, version },
         ...(instructions ? { instructions } : {}),
@@ -89,11 +140,21 @@ export async function runStdioServer({ name, version, instructions, tools }) {
       return okResponse(id, {});
     }
 
+    if (method === "logging/setLevel") {
+      const level = params?.level;
+      if (typeof level !== "string" || LOG_LEVEL_INDEX[level] === undefined) {
+        return errorResponse(id, -32602, `invalid log level: ${level}`);
+      }
+      currentLogLevel = level;
+      return okResponse(id, {});
+    }
+
     if (method === "tools/list") {
       const list = [...byName.values()].map((t) => ({
         name: t.name,
         description: t.description,
         inputSchema: t.inputSchema,
+        ...(t.outputSchema ? { outputSchema: t.outputSchema } : {}),
         ...(t.annotations ? { annotations: t.annotations } : {}),
       }));
       return okResponse(id, { tools: list });
