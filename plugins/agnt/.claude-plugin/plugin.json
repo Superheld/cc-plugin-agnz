@@ -1,0 +1,8 @@
+{
+  "name": "agnt",
+  "version": "0.2.0",
+  "description": "Sandboxed local-model agent for Claude Code. Exposes an MCP server so Claude can converse with a locally-hosted LLM (LM Studio, Ollama, any OpenAI-compatible endpoint) that has its own scoped file-system access and memory.",
+  "author": {
+    "name": "Roland"
+  }
+}
