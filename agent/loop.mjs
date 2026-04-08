@@ -32,7 +32,6 @@ const DEFAULT_MAX_TURNS = 40;
  * @param {object} ctx.threadMgr
  * @param {object} ctx.sandbox
  * @param {object} ctx.registry
- * @param {object} ctx.memory
  * @param {object} ctx.profile
  * @param {string|null} ctx.userMessage  — new user message, or null when resuming
  * @param {object} [ctx.resumeInput]     — resolution payload for a pending pause:
@@ -46,7 +45,6 @@ export async function runThread(ctx) {
     threadMgr,
     sandbox,
     registry,
-    memory,
     profile,
     userMessage,
     resumeInput,
@@ -68,7 +66,6 @@ export async function runThread(ctx) {
         threadMgr,
         sandbox,
         registry,
-        memory,
         resume: resumeInput,
       });
       // resolvePending may itself surface a new pause (e.g. another
@@ -86,11 +83,10 @@ export async function runThread(ctx) {
         threadMgr,
         sandbox,
         registry,
-        memory,
       });
       if (leftover?.status === "awaiting_input") return leftover;
 
-      const messages = await buildMessages({ thread, threadMgr, memory, profile });
+      const messages = await buildMessages({ thread, threadMgr, profile });
       const tools = registry.toOpenAISchema();
 
       const { message, finishReason } = await chat({
@@ -127,7 +123,6 @@ export async function runThread(ctx) {
           call,
           sandbox,
           registry,
-          memory,
           thread,
           threadMgr,
         });
@@ -167,7 +162,7 @@ export async function runThread(ctx) {
  * only some were answered, process the unanswered ones in order. If one
  * triggers a pause, surface it. If all are answered, this is a no-op.
  */
-async function drainLeftoverToolCalls({ thread, threadMgr, sandbox, registry, memory }) {
+async function drainLeftoverToolCalls({ thread, threadMgr, sandbox, registry }) {
   const history = await threadMgr.readMessages(thread.id);
   let lastAsstIdx = -1;
   for (let i = history.length - 1; i >= 0; i--) {
@@ -193,7 +188,6 @@ async function drainLeftoverToolCalls({ thread, threadMgr, sandbox, registry, me
       call,
       sandbox,
       registry,
-      memory,
       thread,
       threadMgr,
     });
@@ -202,16 +196,11 @@ async function drainLeftoverToolCalls({ thread, threadMgr, sandbox, registry, me
   return null;
 }
 
-async function buildMessages({ thread, threadMgr, memory, profile }) {
+async function buildMessages({ thread, threadMgr, profile }) {
   const messages = [];
 
   const system = profile.systemPrompt || thread.systemPrompt || defaultSystemPrompt(thread);
   messages.push({ role: "system", content: system });
-
-  const memoryPreamble = await composeMemoryPreamble({ thread, memory });
-  if (memoryPreamble) {
-    messages.push({ role: "system", content: memoryPreamble });
-  }
 
   const history = await threadMgr.readMessages(thread.id);
   for (const m of history) {
@@ -219,15 +208,6 @@ async function buildMessages({ thread, threadMgr, memory, profile }) {
     messages.push(rest);
   }
   return messages;
-}
-
-async function composeMemoryPreamble({ thread, memory }) {
-  const parts = [];
-  const global = (await memory.readGlobalMemory()).trim();
-  if (global) parts.push(`# Global memory\n${global}`);
-  const project = (await memory.readProjectMemory(thread.cwd)).trim();
-  if (project) parts.push(`# Project memory (${thread.cwd})\n${project}`);
-  return parts.length ? parts.join("\n\n") : null;
 }
 
 function defaultSystemPrompt(thread) {
@@ -252,7 +232,7 @@ function defaultSystemPrompt(thread) {
  *   { status: "ok" }                       — tool ran (or was denied), result appended
  *   { status: "awaiting_input", pending }  — paused, caller must resume
  */
-async function dispatchToolCall({ call, sandbox, registry, memory, thread, threadMgr }) {
+async function dispatchToolCall({ call, sandbox, registry, thread, threadMgr }) {
   const name = call?.function?.name;
   const toolCallId = call?.id || `call_${Date.now()}`;
   const tool = registry.get(name);
@@ -315,12 +295,12 @@ async function dispatchToolCall({ call, sandbox, registry, memory, thread, threa
     return { status: "awaiting_input", pending };
   }
 
-  return runToolAndAppend({ tool, args, toolCallId, sandbox, memory, thread, threadMgr });
+  return runToolAndAppend({ tool, args, toolCallId, sandbox, thread, threadMgr });
 }
 
-async function runToolAndAppend({ tool, args, toolCallId, sandbox, memory, thread, threadMgr }) {
+async function runToolAndAppend({ tool, args, toolCallId, sandbox, thread, threadMgr }) {
   try {
-    const result = await tool.run(args, { sandbox, memory, thread });
+    const result = await tool.run(args, { sandbox, thread });
     const content = typeof result?.content === "string" ? result.content : JSON.stringify(result);
     await appendToolResult(threadMgr, thread.id, toolCallId, content);
     return { status: "ok" };
@@ -355,7 +335,7 @@ async function appendToolResult(threadMgr, threadId, toolCallId, content) {
  * the loop should continue, or another { status: "awaiting_input" } if
  * resolving it surfaces another pause.
  */
-async function resolvePending({ thread, threadMgr, sandbox, registry, memory, resume }) {
+async function resolvePending({ thread, threadMgr, sandbox, registry, resume }) {
   const pending = thread.pending;
   if (!pending || pending.toolCallId !== resume.toolCallId) {
     throw new Error(
@@ -408,7 +388,7 @@ async function resolvePending({ thread, threadMgr, sandbox, registry, memory, re
   }
 
   try {
-    const result = await tool.run(pending.args, { sandbox, memory, thread });
+    const result = await tool.run(pending.args, { sandbox, thread });
     const content = typeof result?.content === "string" ? result.content : JSON.stringify(result);
     await appendToolResult(threadMgr, thread.id, pending.toolCallId, content);
   } catch (err) {

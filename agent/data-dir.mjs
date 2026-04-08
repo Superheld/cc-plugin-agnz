@@ -33,8 +33,8 @@ import { homedir } from "node:os";
 import { existsSync } from "node:fs";
 
 /**
- * User-wide data directory: profiles, global memory.
- * Stable across projects and plugin versions.
+ * User-wide data directory: profiles and other cross-project user
+ * settings. Stable across projects and plugin versions.
  */
 export function resolveUserDir() {
   if (process.env.AGNZ_DATA_DIR) {
