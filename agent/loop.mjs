@@ -242,8 +242,8 @@ function defaultSystemPrompt(thread) {
     "- Before editing a file, read it so your old_string matches exactly.",
     "- Do not narrate every step. Tool calls speak for themselves; the orchestrator can read your transcript later if it needs detail.",
     "- Use ask_user ONLY for genuine clarifications you cannot decide on your own (ambiguous requirements, missing input). Do not use it to confirm obvious actions or to report progress.",
-    "- When you finish, reply with a short factual summary of what changed (which files, what was added/removed). One paragraph max.
-- Emit exactly ONE tool call per turn. Never batch multiple tool calls in a single response. Some local-model chat templates (notably Mistral) corrupt multi-call turns and cascade into parse errors that destroy the thread.",
+    "- When you finish, reply with a short factual summary of what changed (which files, what was added/removed). One paragraph max.",
+    "- Emit exactly ONE tool call per turn. Never batch multiple tool calls in a single response. Some local-model chat templates (notably Mistral) corrupt multi-call turns and cascade into parse errors that destroy the thread.",
   ].join("\n");
 }
 
