@@ -46,11 +46,11 @@ For the deep dive — module map, agent loop, detach/wait model, sandbox semanti
 
 ## Install
 
-This is a plugin repo, not a marketplace. Install it via your local marketplace pointing at this directory, then in Claude Code:
+This repo is a plain Claude Code plugin — **not** a marketplace. Claude Code can only install plugins through a marketplace, so you first register one that lists `agnz`, then install from it. The canonical marketplace for this plugin is [`Superheld/claude-bauchladen`](https://github.com/Superheld/claude-bauchladen):
 
 ```
-/plugin marketplace update agnz
-/plugin install agnz@agnz
+/plugin marketplace add Superheld/claude-bauchladen
+/plugin install agnz@claude-bauchladen
 /reload-plugins
 ```
 
