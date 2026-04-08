@@ -20,8 +20,14 @@
 //   └── scratch/
 
 import { mkdir, readFile, writeFile, appendFile, readdir } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { resolveProjectDir } from "./data-dir.mjs";
+
+/**
+ * Current schema version for workspace.json. Bump when the shape
+ * changes and provide a migration path from the previous version.
+ */
+export const WORKSPACE_SCHEMA_VERSION = 1;
 
 /**
  * Create a workspace store for a specific project cwd.
@@ -29,11 +35,63 @@ import { resolveProjectDir } from "./data-dir.mjs";
  */
 export function createWorkspaceStore(cwd) {
   if (!cwd) throw new Error("workspace-store: cwd is required");
-  const root = resolveProjectDir(resolve(cwd));
+  const absCwd = resolve(cwd);
+  const root = resolveProjectDir(absCwd);
   const threadsDir = join(root, "threads");
+  const workspaceFile = join(root, "workspace.json");
 
   async function ensureDirs() {
     await mkdir(threadsDir, { recursive: true });
+  }
+
+  // ---- workspace.json ----
+  //
+  // The shared state for the workspace. Today this is a bare skeleton;
+  // ADR 0002 adds `messages.jsonl` alongside it, ADR 0004 will populate
+  // the `items`, `mode`, `reviewRequired` fields.
+
+  function defaultWorkspace() {
+    return {
+      schemaVersion: WORKSPACE_SCHEMA_VERSION,
+      name: basename(absCwd),
+      cwd: absCwd,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      members: [],
+    };
+  }
+
+  async function readWorkspace() {
+    try {
+      const raw = await readFile(workspaceFile, "utf8");
+      return JSON.parse(raw);
+    } catch (err) {
+      if (err.code === "ENOENT") return null;
+      throw err;
+    }
+  }
+
+  async function writeWorkspace(ws) {
+    await ensureDirs();
+    const next = { ...ws, updatedAt: Date.now() };
+    await writeFile(workspaceFile, JSON.stringify(next, null, 2), "utf8");
+    return next;
+  }
+
+  /**
+   * Load workspace.json, creating a default one if missing. This is
+   * the entry point used by agent_start — the first thread in a new
+   * project automatically initialises the workspace.
+   */
+  async function ensureWorkspace() {
+    const existing = await readWorkspace();
+    if (existing) return existing;
+    return writeWorkspace(defaultWorkspace());
+  }
+
+  async function updateWorkspace(patch) {
+    const current = (await readWorkspace()) || defaultWorkspace();
+    return writeWorkspace({ ...current, ...patch });
   }
 
   // ---- threads ----
@@ -101,7 +159,13 @@ export function createWorkspaceStore(cwd) {
 
   return {
     root,
-    cwd: resolve(cwd),
+    cwd: absCwd,
+    // workspace
+    readWorkspace,
+    writeWorkspace,
+    ensureWorkspace,
+    updateWorkspace,
+    // threads
     writeThreadMeta,
     readThreadMeta,
     appendThreadMessage,

@@ -73,6 +73,13 @@ export function createThreadManager() {
     const store = storeFor(cwd);
     await store.writeThreadMeta(id, meta);
     await registerThread(id, cwd);
+    // Ensure the workspace skeleton exists and register this thread
+    // as a member. Idempotent: existing workspaces are preserved.
+    const ws = await store.ensureWorkspace();
+    const members = Array.isArray(ws.members) ? ws.members : [];
+    if (!members.includes(id)) {
+      await store.updateWorkspace({ members: [...members, id] });
+    }
     return meta;
   }
 
