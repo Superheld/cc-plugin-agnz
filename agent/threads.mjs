@@ -1,7 +1,8 @@
-// Thread lifecycle on top of the memory store. A thread is a conversation
-// with an agent instance scoped to a cwd, a profile, and a permission
-// policy. Threads are persistent: the driving Claude session can come
-// back to a thread by id, read its status, resume the conversation.
+// Thread lifecycle, per-project. ADR 0001 moved thread state into
+// <cwd>/.claude/agnz/threads/, so each thread's persistence is routed
+// through the workspace store for its own cwd. A lightweight index in
+// the user dir resolves thread ids back to their cwds for tool calls
+// that only carry an id (agent_send, agent_status, ...).
 //
 // Status values:
 //   idle           — waiting for the next user message
@@ -14,6 +15,8 @@
 
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
+import { createWorkspaceStore } from "./workspace-store.mjs";
+import { registerThread, lookupThreadCwd, forgetThread, listIndex } from "./thread-index.mjs";
 
 export const ThreadStatus = Object.freeze({
   IDLE: "idle",
@@ -23,14 +26,37 @@ export const ThreadStatus = Object.freeze({
   ERROR: "error",
 });
 
-export function createThreadManager({ memory }) {
-  if (!memory) throw new Error("threads: memory store is required");
+export function createThreadManager() {
+  // Cache workspace stores by cwd so we don't re-construct them on
+  // every call. Stores are lightweight but the cache is free.
+  const storeCache = new Map();
+  function storeFor(cwd) {
+    const abs = resolve(cwd);
+    let s = storeCache.get(abs);
+    if (!s) {
+      s = createWorkspaceStore(abs);
+      storeCache.set(abs, s);
+    }
+    return s;
+  }
 
   /**
-   * Create a new thread and persist its metadata. Returns the meta record.
-   * The caller is expected to supply a valid, existing cwd and profile name.
+   * Given a thread id, resolve the store it belongs to via the index.
+   * Returns null if the id is unknown.
+   */
+  async function storeForThreadId(threadId) {
+    const cwd = await lookupThreadCwd(threadId);
+    if (!cwd) return null;
+    return storeFor(cwd);
+  }
+
+  /**
+   * Create a new thread rooted at the given cwd. The cwd is recorded
+   * in the cross-workspace index so later tool calls can resolve the
+   * thread id back to its store.
    */
   async function createThread({ cwd, profile, policy, systemPrompt }) {
+    if (!cwd) throw new Error("threads: cwd is required");
     const id = randomUUID();
     const meta = {
       id,
@@ -44,19 +70,25 @@ export function createThreadManager({ memory }) {
       error: null,
       pending: null, // when status=awaiting_input: { toolCallId, kind, ... }
     };
-    await memory.writeThreadMeta(id, meta);
+    const store = storeFor(cwd);
+    await store.writeThreadMeta(id, meta);
+    await registerThread(id, cwd);
     return meta;
   }
 
   async function getThread(id) {
-    return memory.readThreadMeta(id);
+    const store = await storeForThreadId(id);
+    if (!store) return null;
+    return store.readThreadMeta(id);
   }
 
   async function updateThread(id, patch) {
-    const current = await memory.readThreadMeta(id);
+    const store = await storeForThreadId(id);
+    if (!store) throw new Error(`threads: no such thread: ${id}`);
+    const current = await store.readThreadMeta(id);
     if (!current) throw new Error(`threads: no such thread: ${id}`);
     const next = { ...current, ...patch, updatedAt: Date.now() };
-    await memory.writeThreadMeta(id, next);
+    await store.writeThreadMeta(id, next);
     return next;
   }
 
@@ -65,25 +97,50 @@ export function createThreadManager({ memory }) {
   }
 
   async function stopThread(id) {
-    return setStatus(id, ThreadStatus.STOPPED);
-  }
-
-  async function listThreads() {
-    return memory.listThreads();
+    const result = await setStatus(id, ThreadStatus.STOPPED);
+    // Intentionally do NOT forget() from the index on stop — stopped
+    // threads can still be inspected via agent_status. forget() runs
+    // only when the user explicitly deletes a thread (future op).
+    return result;
   }
 
   /**
-   * Append a message to the thread transcript. Messages are whatever the
-   * agent loop wants to persist — user turns, assistant turns, tool calls,
-   * tool results. Keeping them in one stream simplifies replay.
+   * List threads across all known workspaces. Walks the index and
+   * reads each workspace store. Stale index entries (workspace dir
+   * gone) are skipped, not pruned — prune is a housekeeping op.
    */
+  async function listThreads() {
+    const index = await listIndex();
+    const results = [];
+    const stores = new Map();
+    for (const [id, entry] of Object.entries(index)) {
+      let store = stores.get(entry.cwd);
+      if (!store) {
+        store = storeFor(entry.cwd);
+        stores.set(entry.cwd, store);
+      }
+      try {
+        const meta = await store.readThreadMeta(id);
+        if (meta) results.push(meta);
+      } catch {
+        // Workspace dir gone or unreadable — silently skip.
+      }
+    }
+    results.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    return results;
+  }
+
   async function appendMessage(id, message) {
-    await memory.appendThreadMessage(id, message);
+    const store = await storeForThreadId(id);
+    if (!store) throw new Error(`threads: no such thread: ${id}`);
+    await store.appendThreadMessage(id, message);
     await updateThread(id, {}); // bump updatedAt
   }
 
   async function readMessages(id) {
-    return memory.readThreadMessages(id);
+    const store = await storeForThreadId(id);
+    if (!store) return [];
+    return store.readThreadMessages(id);
   }
 
   return {
@@ -95,5 +152,7 @@ export function createThreadManager({ memory }) {
     listThreads,
     appendMessage,
     readMessages,
+    // Expose for housekeeping / explicit deletion flows:
+    forgetThread,
   };
 }

@@ -28,7 +28,7 @@ const DATA_DIR = resolveDataDir();
 // ---- singletons (one per MCP server process) ----
 
 const memory = createMemoryStore({ dataDir: DATA_DIR });
-const threadMgr = createThreadManager({ memory });
+const threadMgr = createThreadManager();
 const profileStore = createProfileStore({ dataDir: DATA_DIR });
 const registry = createRegistry();
 
