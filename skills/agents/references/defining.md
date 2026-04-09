@@ -17,37 +17,38 @@ Per-project only — no user-wide fallback. If you want a library of reusable ro
 
 Markdown with YAML frontmatter. The frontmatter holds structured fields; the body (everything after the closing `---`) is the agent's system prompt, which gets concatenated onto the default sandbox-framing prompt.
 
+agnz agent files follow the same format as Claude Code's built-in agent definitions, so files can be copied and adapted between the two systems. The main difference is the `tools` field: CC uses an array of tool names to grant access; agnz uses a policy map `{toolName: allow|ask|deny}`.
+
 ```markdown
 ---
 name: researcher
+description: |
+  Use this agent when the user asks to investigate code, find where something
+  is used, or summarise a module. Examples:
+
+  <example>
+  Context: User wants to understand the codebase structure.
+  user: "How does request logging work in this project?"
+  assistant: "I'll delegate this to the researcher agent."
+  <commentary>
+  Read-heavy investigation with no file edits needed.
+  </commentary>
+  </example>
+model: inherit
+color: blue
 profile: lmstudio-devstral
-description: >
-  Read-heavy code investigation. Good for bulk reads, grep sweeps,
-  "find everywhere X is used", summaries of large modules.
 tools:
-  list_dir: allow
-  read_file: allow
-  grep: allow
   edit_file: deny
   write_file: deny
-  ask_user: allow
-  send_message: allow
 temperature: 0.2
 maxTurns: 40
-reviewRequired: true
 ---
 
-You are a research sub-agent in the agnz workspace. Your role is to
-investigate code: read files, search for patterns, and produce concise,
-factual summaries. You do not modify files.
+You are a research sub-agent. Investigate code, search for patterns,
+and produce concise, factual summaries. You do not modify files.
 
-When you take on an item, post a brief `status` message with your plan.
-When you finish, write your findings into the item's `notes` and move it
-to `review` — the parent signs off on `done`.
-
-If you need information you cannot determine from the code alone, use
-`ask_user`. If another agent's work would help, send them a `handoff`
-message.
+When finished, reply with a one-paragraph summary of what you found
+and, if relevant, a bullet list of file:line references.
 ```
 
 ## Frontmatter fields
@@ -55,24 +56,43 @@ message.
 | Field | Required | Type | Meaning |
 |---|---|---|---|
 | `name` | yes | `[a-z][a-z0-9_-]*` | Unique within the workspace. Used in mailbox addressing and appears in logs. |
-| `profile` | yes | string | Name of an existing profile in the user-wide profile store. See the `workspace` skill. |
-| `description` | yes | string (1–2 sentences) | Used by Parent Claude to route tasks. **Be specific.** Vague descriptions route nothing. |
-| `tools` | no | map `{toolName: "allow"\|"ask"\|"deny"}` | Per-tool override layered on top of the profile's `defaultPolicy`. See below. |
-| `temperature` | no | number | Overrides the profile's `temperature` for this role (e.g. `0.1` for a picky editor). |
+| `description` | yes | string | How Parent Claude routes tasks to this role. Use `\|` for multi-line with `<example>` blocks (see below). **Be specific.** |
+| `profile` | no | string | Name of an existing agnz profile. If absent, the active profile is used. |
+| `model` | no | string | CC-compatible field (`inherit`/`sonnet`/`opus`/`haiku`). Stored but currently ignored — profile controls the model. |
+| `color` | no | string | CC-compatible visual identifier (`blue`/`cyan`/`green`/`yellow`/`magenta`/`red`). Stored for future use. |
+| `tools` | no | map `{toolName: "allow"\|"ask"\|"deny"}` | Per-tool policy override on top of the profile's `defaultPolicy`. Note: different from CC's array format. |
+| `skills` | no | list | Allowlist of project-local skills the agent may load via `use_skill`. If absent, all skills are available. |
+| `temperature` | no | number | Overrides the profile's `temperature` for this role. |
 | `maxTurns` | no | positive integer | Overrides the profile's `maxTurns`. |
-| `reviewRequired` | no | boolean | Whether the board (ADR 0004) requires items worked on by this role to go through `review` before `done`. Defaults to true when unset — currently advisory, not yet enforced. |
+| `reviewRequired` | no | boolean | Advisory flag for the board (ADR 0004). Not yet enforced. |
 
-### The folded `>` block scalar
+### Multi-line description with `<example>` blocks
 
-`description` (or any string field) can use YAML's folded form when it spans multiple lines:
+Use `|` (literal block) to preserve newlines in the description — required for CC-style `<example>` blocks:
+
+```yaml
+description: |
+  Use this agent when [conditions]. Examples:
+
+  <example>
+  Context: [Scenario]
+  user: "[What the user says]"
+  assistant: "[How Claude should respond]"
+  <commentary>
+  [Why this agent fits]
+  </commentary>
+  </example>
+```
+
+Use `>` (folded block) when you want a simple prose description without newlines:
 
 ```yaml
 description: >
-  First line.
-  Second line that will be joined with the first.
+  Read-heavy code investigation. Bulk reads, grep sweeps,
+  summaries of large modules.
 ```
 
-The parser only supports scalars, the folded `>` form, and one-level `tools:` maps. Quoted keys, JSON-in-YAML, arrays at the top level, and other YAML gymnastics are intentionally unsupported and will raise a clear parse error.
+The parser also supports plain one-line scalars for short descriptions.
 
 ### The markdown body = system prompt
 

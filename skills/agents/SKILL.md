@@ -37,8 +37,18 @@ Minimal example — create `<cwd>/.claude/agnz/agents/researcher.md`:
 ```markdown
 ---
 name: researcher
-profile: lmstudio-devstral
-description: Read-heavy code investigation. Bulk reads, grep sweeps, summaries.
+description: |
+  Use this agent when the user asks to investigate code, find usages,
+  or summarise a module. Examples:
+
+  <example>
+  Context: User wants to understand the codebase.
+  user: "How does request logging work?"
+  assistant: "I'll delegate this to the researcher agent."
+  <commentary>Read-heavy, no edits needed.</commentary>
+  </example>
+model: inherit
+color: blue
 tools:
   edit_file: deny
   write_file: deny
@@ -64,17 +74,21 @@ agent_send({ thread_id: "abc...", message: "Summarise how request logging works.
 
 ## Agent file — frontmatter fields
 
-| Field | Required | Type | Notes |
-|---|---|---|---|
-| `name` | yes | `[a-z][a-z0-9_-]*` | Unique in the workspace. Used in mailbox addressing. |
-| `profile` | yes | string | Must match a profile in `~/.claude/agnz/profiles.json`. |
-| `description` | yes | string | How Parent Claude picks this role. **Be specific** — vague descriptions route nothing. |
-| `tools` | no | map | Per-tool override on top of the profile's policy. Profile is the upper bound: the agent can only restrict, never expand. |
-| `temperature` | no | number | Overrides the profile's temperature for this role. |
-| `maxTurns` | no | integer | Overrides the profile's maxTurns. |
-| `skills` | no | list | Allowlist of project-local skills the agent may load via `use_skill`. If absent, all skills are available. |
+agnz agent files follow the same format as CC's built-in agent definitions. The main difference is `tools`: CC uses an array of names to grant access; agnz uses a policy map `{toolName: allow|ask|deny}`.
 
-**Critical rule:** The profile's `defaultPolicy` is the ceiling. Setting `edit_file: allow` in an agent def when the profile says `edit_file: ask` has no effect — `ask` wins. To unlock a tool, update the profile first.
+| Field | Required | Notes |
+|---|---|---|
+| `name` | yes | `[a-z][a-z0-9_-]*`. Unique in the workspace. |
+| `description` | yes | How Parent Claude picks this role. Use `\|` for multi-line with `<example>` blocks (CC style). **Be specific.** |
+| `model` | no | CC-compatible (`inherit`/`sonnet`/`haiku`/`opus`). Stored; `profile` controls the actual endpoint. |
+| `color` | no | CC-compatible (`blue`/`cyan`/`green`/`yellow`/`magenta`/`red`). Stored for future use. |
+| `profile` | no | agnz profile name. Falls back to active profile if absent. |
+| `tools` | no | Policy map `{toolName: allow\|ask\|deny}`. Profile is the upper bound — the agent can only restrict, never expand. |
+| `skills` | no | Allowlist for `use_skill`. Absent = all project-local skills available. |
+| `temperature` | no | Overrides the profile's temperature. |
+| `maxTurns` | no | Overrides the profile's maxTurns. |
+
+**Critical rule:** The profile's `defaultPolicy` is the ceiling. To unlock a tool, update the profile — not the agent def.
 
 ## The six MCP tools
 
