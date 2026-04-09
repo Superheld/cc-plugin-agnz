@@ -24,7 +24,7 @@ import { readMessagesSince } from "./messages-log.mjs";
  * possible without introducing a new createThread parameter yet.
  */
 function agentNameFor(thread) {
-  return thread.agentName || `agent-${thread.id.slice(0, 8)}`;
+  return thread.agentDef?.name || thread.agentName || `agent-${thread.id.slice(0, 8)}`;
 }
 
 /**
@@ -74,7 +74,7 @@ export async function runThread(ctx) {
     signal,
   } = ctx;
 
-  const maxTurns = profile.maxTurns ?? DEFAULT_MAX_TURNS;
+  const maxTurns = thread.agentDef?.maxTurns ?? profile.maxTurns ?? DEFAULT_MAX_TURNS;
 
   await threadMgr.setStatus(thread.id, ThreadStatus.RUNNING, { pending: null, error: null });
 
@@ -129,7 +129,7 @@ export async function runThread(ctx) {
         model: profile.model,
         messages,
         tools,
-        temperature: profile.temperature,
+        temperature: thread.agentDef?.temperature ?? profile.temperature,
         maxTokens: profile.maxTokens,
         signal,
       });
@@ -275,7 +275,14 @@ async function drainMailbox({ thread, threadMgr }) {
 async function buildMessages({ thread, threadMgr, profile }) {
   const messages = [];
 
-  const system = profile.systemPrompt || thread.systemPrompt || defaultSystemPrompt(thread);
+  // An agent def's body is concatenated onto the default sandbox-framing
+  // prompt (ADR 0003 §4); when no agent def is in play, fall back to the
+  // profile/thread override or the default. The agent def path does
+  // NOT honor profile.systemPrompt or thread.systemPrompt — the role is
+  // meant to own its voice entirely.
+  const system = thread.agentDef?.body
+    ? `${defaultSystemPrompt(thread)}\n\n${thread.agentDef.body}`
+    : (profile.systemPrompt || thread.systemPrompt || defaultSystemPrompt(thread));
   messages.push({ role: "system", content: system });
 
   const history = await threadMgr.readMessages(thread.id);
