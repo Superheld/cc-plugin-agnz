@@ -22,7 +22,7 @@ mcp/server.mjs          ← 6 agent_* lifecycle tools
     ▼
 lib/loop.mjs          ← LLM ↔ tool loop, persists transcript
     │
-    ├──▶ tools/         (read_file, edit_file, write_file, grep, list_dir, ask_user)
+    ├──▶ tools/         (list_dir, read_file, grep, edit_file, write_file, bash, ask_user, send_message)
     ├──▶ sandbox.mjs    (cwd lock + permission policy)
     ├──▶ workspace-store.mjs  (per-project state under <cwd>/.claude/agnz/)
     ├──▶ thread-index.mjs     (user-wide thread_id → cwd map)
@@ -54,6 +54,7 @@ lib/loop.mjs          ← LLM ↔ tool loop, persists transcript
 | `lib/tools/registry.mjs` | Tool registry. Wraps tool descriptors, serialises to OpenAI `tools[]` schema. |
 | `lib/tools/{list_dir,read_file,grep}.mjs` | Read-only tools. Default policy `allow`. |
 | `lib/tools/{edit_file,write_file}.mjs` | Mutating tools. Default policy `ask`. |
+| `lib/tools/bash.mjs` | Shell execution via `/bin/sh -c` inside the sandbox cwd. Default policy `ask`. Hard limits: 30 s default timeout and 1 MiB output cap — oversized stdout/stderr triggers SIGKILL and a `content: "Error: ..."` result. |
 | `lib/tools/ask_user.mjs` | Special tool: never actually executed; the loop intercepts it in `dispatchToolCall` and pauses with `kind="question"`. |
 | `lib/tools/send_message.mjs` | The sub-agent's one publishing tool under ADR 0002. Validates the fixed `kind` vocabulary (say/question/answer/handoff/status/error/directive), normalizes `to` as string-or-array, delegates to `event-bus.publish`. Default policy `allow`. |
 | `lib/agent-defs.mjs` | ADR 0003 loader. Parses the tiny YAML-frontmatter subset used by agent-def files (`<cwd>/.claude/agnz/agents/*.md`) — zero-dep, supports scalars, folded `>` block, one-level `tools:` map. Exports `parseAgentDefSource`, `validateAgentDef`, `mergeEffectivePolicy` (profile is upper bound, strictest of profile/agent wins with deny > ask > allow), `loadAgentDef`, `listAgentDefs`. Consumed by `mcp/server.mjs` at `agent_start` time and snapshotted onto the thread meta. |
@@ -89,6 +90,8 @@ Six tools, all about things the parent cannot do by reading files itself:
 
 The old `agent_status`, `agent_list_threads`, `agent_memory_read`, `agent_memory_write`, `agent_profiles_list` are gone. Their read equivalents are just `Read`/`Grep` on files under `<cwd>/.claude/agnz/`; profile management is a slash command (`/agnz:setup`) that operates on the user-wide profile file directly.
 
+All six tools return structured JSON via an `outputSchema` declaration — `mcp/server.mjs` has one shared `OUTCOME_SCHEMA` for the four tools that go through `formatOutcome()` (send/wait/approve/answer) and per-tool schemas for `agent_start` and `agent_stop`. The `jsonResult()` helper emits both a plain-text `content` fallback and `structuredContent` so MCP 2025-06-18 clients can validate.
+
 ## The agent loop in one paragraph
 
 `runThread(ctx)` accepts either a new user message or a resume payload. It loops up to `maxTurns` (default 20): build the message array (system prompt + persisted history), call the LLM, persist the assistant message, dispatch tool calls one by one. A tool call can trigger a pause: either an *approval pause* (tool's policy is `ask`) or a *question pause* (tool name is `ask_user`). Both set thread status to `awaiting_input` with a `pending: {toolCallId, kind, ...}` payload, and return without waiting. When resumed via `agent_approve` or `agent_answer`, the loop injects a tool result for the pending call (the actual tool's output if approved, a denial message if denied, the user's answer if a question) and continues. Every turn starts with a `drainLeftoverToolCalls` pass that handles any unanswered tool calls from the previous assistant turn — important when an assistant message had multiple tool calls and one of them paused.
@@ -116,12 +119,12 @@ This is the critical decision for parent context efficiency. `agent_send` defaul
 
 `defaultPolicy()` is the source of truth:
 ```js
-list_dir: allow,  read_file: allow,  grep: allow,  ask_user: allow,
-edit_file: ask,   write_file: ask,
-bash: deny
+list_dir: allow,  read_file: allow,  grep: allow,
+ask_user: allow,  send_message: allow,
+edit_file: ask,   write_file: ask,   bash: ask
 ```
 
-`bash` doesn't exist as a tool yet. It's in the policy as a placeholder so that *if* someone adds it later, the default is to refuse — fail-safe, not fail-open.
+`bash` runs `/bin/sh -c <command>` inside the sandbox cwd with a 30 s default timeout and a 1 MiB cap on stdout/stderr (oversized output SIGKILLs the child). It is gated behind `ask` so Parent Claude explicitly approves each shell invocation — the pattern is the same as `edit_file`/`write_file`: approve once with `persist=true` to unblock the rest of the thread.
 
 ## Persistence layout
 
@@ -219,7 +222,6 @@ When implementing any of 0002–0004, follow the ADR as the spec and keep deviat
 
 ## Known gaps / TODO
 
-- **No `bash` tool.** Intentional for safety; will be gated behind `ask` at minimum when added.
 - **No streaming.** `agent_send` returns one outcome at a time. Intermediate progress is not observable to the parent. ADR 0002 changes this picture for agent-to-parent communication via `messages.jsonl`.
 - **No tests.** Sandbox path-escape, loop drain/resume, and the new workspace-store/thread-index plumbing all need real `node:test` coverage.
 - **No 0.3.x → 0.4.0 migration helper.** Users with threads under the old XDG `threads/` directory lose their in-flight runs. Only profiles are read-forwarded by `resolveUserDir()`.
