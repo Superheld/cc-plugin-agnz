@@ -17,7 +17,7 @@ Per-project only — no user-wide fallback. If you want a library of reusable ro
 
 Markdown with YAML frontmatter. The frontmatter holds structured fields; the body (everything after the closing `---`) is the agent's system prompt, which gets concatenated onto the default sandbox-framing prompt.
 
-agnz agent files follow the same format as Claude Code's built-in agent definitions, so files can be copied and adapted between the two systems. The main difference is the `tools` field: CC uses an array of tool names to grant access; agnz uses a policy map `{toolName: allow|ask|deny}`.
+agnz agent files follow the same format as Claude Code's built-in agent definitions, so files can be copied and adapted between the two systems. The `tools` and `disallowedTools` fields are compatible — both CC and agnz use string arrays.
 
 ```markdown
 ---
@@ -34,12 +34,12 @@ description: |
   Read-heavy investigation with no file edits needed.
   </commentary>
   </example>
-model: inherit
+model: lmstudio-devstral
 color: blue
-profile: lmstudio-devstral
-tools:
-  edit_file: deny
-  write_file: deny
+disallowedTools:
+  - Edit
+  - Write
+  - Bash
 temperature: 0.2
 maxTurns: 40
 ---
@@ -57,14 +57,13 @@ and, if relevant, a bullet list of file:line references.
 |---|---|---|---|
 | `name` | yes | `[a-z][a-z0-9_-]*` | Unique within the workspace. Used in mailbox addressing and appears in logs. |
 | `description` | yes | string | How Parent Claude routes tasks to this role. Use `\|` for multi-line with `<example>` blocks (see below). **Be specific.** |
-| `profile` | no | string | Name of an existing agnz profile. If absent, the active profile is used. |
-| `model` | no | string | CC-compatible field (`inherit`/`sonnet`/`opus`/`haiku`). Stored but currently ignored — profile controls the model. |
+| `model` | no | string | agnz profile name (e.g. `lmstudio-devstral`). Falls back to the active profile if absent. |
 | `color` | no | string | CC-compatible visual identifier (`blue`/`cyan`/`green`/`yellow`/`magenta`/`red`). Stored for future use. |
-| `tools` | no | map `{toolName: "allow"\|"ask"\|"deny"}` | Per-tool policy override on top of the profile's `defaultPolicy`. Note: different from CC's array format. |
-| `skills` | no | list | Allowlist of project-local skills the agent may load via `use_skill`. If absent, all skills are available. |
+| `tools` | no | string array — **whitelist** | Only listed tools are available; all others denied. Profile is the upper bound — listing a tool can never promote it beyond what the profile allows. |
+| `disallowedTools` | no | string array — **blacklist** | Listed tools are denied regardless of the whitelist or profile. |
+| `skills` | no | string array | Allowlist of project-local skills the agent may load via the `Skill` tool. If absent, all skills are available. |
 | `temperature` | no | number | Overrides the profile's `temperature` for this role. |
 | `maxTurns` | no | positive integer | Overrides the profile's `maxTurns`. |
-| `reviewRequired` | no | boolean | Advisory flag for the board (ADR 0004). Not yet enforced. |
 
 ### Multi-line description with `<example>` blocks
 
@@ -102,15 +101,29 @@ Keep it in prose with concrete instructions. Avoid vague "you are helpful" langu
 
 ## The tool policy model — profile is the upper bound
 
+The available tools in agnz (PascalCase, matching CC naming):
+
+| Tool | Default policy | Description |
+|---|---|---|
+| `LS` | allow | List directory contents |
+| `Read` | allow | Read file contents |
+| `Grep` | allow | Search file contents with regex |
+| `AskUser` | allow | Pause and ask the parent a question |
+| `SendMessage` | allow | Send a message to another agent or parent |
+| `Skill` | allow | Discover and load project-local skills |
+| `Edit` | ask | Edit a file (pauses for approval) |
+| `Write` | ask | Write a file (pauses for approval) |
+| `Bash` | ask | Run a shell command (pauses for approval) |
+
 For every tool, the effective policy is `strictest(profile[T], agent[T])`, with strictness ordering `deny > ask > allow`.
 
-This cuts in two unexpected directions:
+- **`tools` (whitelist): Agent def can only restrict.** If the profile says `Edit: ask` and `tools` does not list `Edit`, the effective policy is `deny`. Listing `Edit` in `tools` restores it to the profile's level (`ask`) — it cannot be promoted to `allow`.
+- **`disallowedTools` (blacklist): Always denied.** Overrides both whitelist and profile.
+- **Profile `deny` wins absolutely.** If the profile says `Bash: deny`, no agent definition can unlock it. Upgrade the profile first.
 
-- **Agent def can only restrict.** If the profile says `edit_file: ask`, and you set `edit_file: allow` in an agent def, the effective policy is still `ask`. You cannot relax the profile from inside an agent file.
-- **Profile `deny` wins absolutely.** If the profile says `bash: deny`, no agent definition can unlock it. Upgrade the profile first.
-- **Agent-only tools.** If a tool appears in the agent def but not the profile's `defaultPolicy`, it gets the agent's decision (treated as if the profile said `allow`). This is how you give a role access to an optional tool the profile doesn't mention.
+### Note on `Skill` + `tools` whitelist
 
-The rationale: the profile is the user's trust setting for the whole endpoint ("what can this model's process touch at all?"). Role definitions are never a way to expand that — only to narrow it for a specific job.
+If you use a `tools:` whitelist **and** a `skills:` list, add `Skill` to the whitelist or the sub-agent will see the skills hint in its system prompt but won't be able to call the tool. agnz auto-adds `Skill` to the effective policy when `skills:` is set, so omitting it from `tools:` is caught automatically — but being explicit is clearer.
 
 ## Example roles
 
@@ -119,13 +132,15 @@ The rationale: the profile is the user's trust setting for the whole endpoint ("
 ```markdown
 ---
 name: researcher
-profile: lmstudio-devstral
 description: >
   Read-heavy code investigation. Bulk reads, grep sweeps,
   "find everywhere X is used", summaries of large modules.
-tools:
-  edit_file: deny
-  write_file: deny
+model: lmstudio-devstral
+color: blue
+disallowedTools:
+  - Edit
+  - Write
+  - Bash
 ---
 
 You investigate code and produce concise, factual summaries.
@@ -142,21 +157,19 @@ file:line references.
 ```markdown
 ---
 name: editor
-profile: lmstudio-devstral
 description: >
   Mechanical edits across many files — renames, format changes,
   adding a field to a type in every import site. Not for design
   work or refactoring that requires judgement.
-tools:
-  edit_file: ask
-  write_file: ask
+model: lmstudio-devstral
+color: green
 temperature: 0.1
 ---
 
 You perform precise, mechanical edits. Before editing a file,
 read it so your old_string matches exactly. Make ONE change per
 turn; do not batch edits. After each change, confirm what you
-changed in one sentence. Ask the user (`ask_user`) if the
+changed in one sentence. Ask the user (AskUser) if the
 instructions are ambiguous — do not guess.
 ```
 
@@ -167,10 +180,14 @@ Note the `temperature: 0.1` — editors are the one role where low entropy is wo
 ```markdown
 ---
 name: tester
-profile: lmstudio-devstral
 description: >
   Runs project tests and reports results. Knows this project's
   test commands and how to interpret their output.
+model: lmstudio-devstral
+color: yellow
+tools:
+  - Read
+  - Bash
 ---
 
 You run `npm test` (or the project's equivalent — check
@@ -180,7 +197,7 @@ error message. Do not attempt to fix failures — that's not
 your job; just report.
 ```
 
-Note: `bash` is typically `deny` in the default profile so this role currently cannot actually run commands — it is included as an example of what a role *description* looks like for a future capability.
+Note: `Bash` has policy `ask` by default so the first run will pause for approval. Approve with `persist: true` to unblock for the rest of the thread.
 
 ## Snapshot-on-spawn — what that means for you
 

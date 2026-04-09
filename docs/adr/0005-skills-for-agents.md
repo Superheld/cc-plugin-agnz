@@ -1,6 +1,6 @@
 # ADR 0005: Skills for agents — composable instruction sets via tool call
 
-- **Status:** Proposed
+- **Status:** Superseded by [ADR 0006](./0006-agentic-system-skills-memory-initialprompt.md)
 - **Date:** 2026-04-09
 - **Depends on:** [ADR 0003](./0003-agent-definitions.md)
 

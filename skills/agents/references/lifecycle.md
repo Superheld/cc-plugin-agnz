@@ -22,7 +22,7 @@ agent_start({
   cwd: "/abs/path/to/project",
   profile: "lmstudio-devstral",
   model: "mistralai/devstral-small-2-2512",
-  policy: { read_file: "allow", edit_file: "deny", ... },
+  policy: { Read: "allow", Edit: "deny", ... },
   agent: "researcher" | null
 }
 ```
@@ -57,11 +57,11 @@ agent_approve({
 })
 ```
 
-`persist: true` is how you stop being paged for every single `edit_file` after you've decided "yes this agent can edit".
+`persist: true` is how you stop being paged for every single `Edit` after you've decided "yes this agent can edit".
 
 ### `agent_answer`
 
-Resolve an `awaiting_input` / `kind: "question"` pause. The sub-agent called `ask_user` because it genuinely could not decide something on its own.
+Resolve an `awaiting_input` / `kind: "question"` pause. The sub-agent called `AskUser` because it genuinely could not decide something on its own.
 
 ```
 agent_answer({
@@ -118,7 +118,7 @@ Free text. The sub-agent finished its turn and is idle. You can send again (foll
   kind: "approval",
   thread_id: "abc...",
   tool_call_id: "...",
-  tool: "edit_file",
+  tool: "Edit",
   args: {
     path: "src/logger.js",
     old_string: "<string: 245 chars, head: \"function log(level, msg)...\">",
@@ -128,7 +128,7 @@ Free text. The sub-agent finished its turn and is idle. You can send again (foll
 }
 ```
 
-The sub-agent wanted to run a gated tool (usually `edit_file` or `write_file`). Long string args are truncated to a length-annotated preview to protect your context — the full args are always readable in `<cwd>/.claude/agnz/threads/<id>.meta.json` under `pending.args` if you need to audit.
+The sub-agent wanted to run a gated tool (usually `Edit` or `Write`). Long string args are truncated to a length-annotated preview to protect your context — the full args are always readable in `<cwd>/.claude/agnz/threads/<id>.meta.json` under `pending.args` if you need to audit.
 
 Resolve with `agent_approve`. If you deny, the denial is injected as the tool result and the sub-agent continues — it may try a different approach.
 
@@ -146,7 +146,7 @@ Resolve with `agent_approve`. If you deny, the denial is injected as the tool re
 }
 ```
 
-The sub-agent called `ask_user`. `options` and `context` may be missing. Resolve with `agent_answer`.
+The sub-agent called `AskUser`. `options` and `context` may be missing. Resolve with `agent_answer`.
 
 ## The detach + wait pattern — concurrency
 
@@ -195,7 +195,7 @@ If you just want to know where the sub-agent is right now without blocking, Read
 
 ## Messages and mailboxes — agent↔agent communication
 
-Sub-agents can send messages to each other (and to the parent) via the `send_message` tool. The messages land in `<cwd>/.claude/agnz/messages.jsonl`. Each sub-agent automatically drains its inbox at the top of every turn — messages addressed to it get injected as synthetic user messages, and the thread's `inboxCursor` advances so the same message is not redelivered.
+Sub-agents can send messages to each other (and to the parent) via the `SendMessage` tool. The messages land in `<cwd>/.claude/agnz/messages.jsonl`. Each sub-agent automatically drains its inbox at the top of every turn — messages addressed to it get injected as synthetic user messages, and the thread's `inboxCursor` advances so the same message is not redelivered.
 
 Key vocabulary on a message: `kind` ∈ `say | question | answer | handoff | status | error | directive`. The schema is in the `workspace` skill's reference.
 
@@ -205,5 +205,5 @@ For the parent to see mail, enable the `UserPromptSubmit` and `SessionStart` hoo
 
 - **No streaming.** Outcomes are single events. Intermediate tool calls are invisible to the parent until the sub-agent pauses or finishes.
 - **No `agent_status` / `agent_list_threads`.** Read the files; the MCP surface is for live-process operations only.
-- **No `bash` tool.** Policy ships as `deny` so even if you add it to an agent def it won't execute. It's a placeholder for a future gated-shell tool.
+- **`Bash` is gated.** Policy ships as `ask` — the first call pauses for parent approval. Use `persist: true` on the first `agent_approve` to unlock for the rest of the thread.
 - **No runtime reload of agent definitions.** A running thread keeps its snapshot. Start a new thread to pick up edits.

@@ -56,7 +56,7 @@ Then either re-send with a continuation message or handle what was completed so 
 - `agent_approve({ thread_id, decision: "allow", persist: true })` — allow for the rest of the thread
 - `agent_approve({ thread_id, decision: "deny" })` — deny
 
-**Question pause** (`kind: "question"`): the sub-agent called `ask_user`. Read the question in the return value and call:
+**Question pause** (`kind: "question"`): the sub-agent called `AskUser`. Read the question in the return value and call:
 - `agent_answer({ thread_id, answer: "<your answer>" })`
 
 ## Parallel runs

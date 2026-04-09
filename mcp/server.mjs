@@ -79,7 +79,7 @@ WHEN NOT TO DELEGATE: quick one-liners you can do in one tool call, tasks that n
 
 AGENT DEFINITIONS: if the project has .claude/agnz/agents/*.md files, read them first. Each file describes a named role (researcher, editor, tester…) with a system prompt and tool policy. Pick the agent whose description matches the task, then pass agent: "<name>" to agent_start. Without a definition, the sub-agent runs with a generic prompt.
 
-WHAT THE SUB-AGENT CAN DO: inside its sandbox it has list_dir, read_file, grep, edit_file, write_file, bash, ask_user, send_message, use_skill. Locked to a single cwd. edit_file/write_file/bash are gated by default — the sub-agent pauses and you approve via agent_approve (persist=true to auto-allow for the rest of the thread). use_skill lets the agent discover and load project-local skills from <cwd>/.claude/skills/.
+WHAT THE SUB-AGENT CAN DO: inside its sandbox it has LS, Read, Grep, Edit, Write, Bash, AskUser, SendMessage, Skill. Locked to a single cwd. Edit/Write/Bash are gated by default — the sub-agent pauses and you approve via agent_approve (persist=true to auto-allow for the rest of the thread). Skill is a framework tool: when skills: is set in the agent def, the agent sees a catalog in its system prompt and calls Skill({action:'load', name:'...'}) to pull in full content on demand.
 
 WORKSPACE LAYOUT: per-project state at <cwd>/.claude/agnz/. Read workspace.json, threads/*.meta.json, and the messages.jsonl log with your own Read/Glob/Grep — no MCP call needed. MCP tools are for live process operations only (start, send, approve, answer, wait, stop).
 
@@ -361,7 +361,7 @@ const tools = [
   {
     name: "agent_approve",
     description:
-      "Resolve a pending APPROVAL pause (sub-agent wants to run a tool that requires consent). Allow or deny the call. Set persist=true to apply the decision to all future calls of the same tool in this thread. Set detach=true to let the sub-agent continue in the background — use agent_wait afterwards. For ask_user pauses, use agent_answer instead.",
+      "Resolve a pending APPROVAL pause (sub-agent wants to run a tool that requires consent). Allow or deny the call. Set persist=true to apply the decision to all future calls of the same tool in this thread. Set detach=true to let the sub-agent continue in the background — use agent_wait afterwards. For AskUser pauses, use agent_answer instead.",
     annotations: {
       title: "Approve pending tool call",
       readOnlyHint: false,
@@ -419,7 +419,7 @@ const tools = [
   {
     name: "agent_answer",
     description:
-      "Resolve a pending QUESTION pause (sub-agent called ask_user and is waiting for clarification). Provide a free-text answer; the sub-agent will see it as the tool result and continue. Set detach=true to let the sub-agent continue in the background — use agent_wait afterwards.",
+      "Resolve a pending QUESTION pause (sub-agent called AskUser and is waiting for clarification). Provide a free-text answer; the sub-agent will see it as the tool result and continue. Set detach=true to let the sub-agent continue in the background — use agent_wait afterwards.",
     annotations: {
       title: "Answer agent question",
       readOnlyHint: false,
@@ -543,8 +543,8 @@ async function loadPaused(threadId, expectedKind) {
   return { thread, profile, sandbox };
 }
 
-// Strip bulky string fields from approval args so write_file contents
-// and edit_file hunks don't blow up Parent Claude's context on every
+// Strip bulky string fields from approval args so Write contents
+// and Edit hunks don't blow up Parent Claude's context on every
 // pause. Short strings pass through untouched; long ones get replaced
 // with a sentinel that shows total length and a short head preview,
 // enough to decide allow/deny without transferring the whole payload.
