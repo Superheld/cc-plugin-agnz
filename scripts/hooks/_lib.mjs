@@ -11,7 +11,7 @@
 // `agent/` so that the plugin's hook scripts keep working even if the
 // surrounding module layout is refactored.
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { resolve } from "node:path";
 
 /**
@@ -70,12 +70,47 @@ export function readParentCursor(ws) {
 }
 
 /**
- * Persist the parent cursor. Creates the cursors/ dir if missing.
+ * Persist the parent cursor atomically via tmp-file + rename. The rename
+ * is an atomic operation on POSIX so a crash mid-write cannot leave a
+ * half-written cursor file behind. Callers must ONLY invoke this AFTER
+ * stdout has been flushed to Claude — see flushStdoutThen() — otherwise
+ * the cursor would advance past messages that never made it into the
+ * parent's context (silent data loss).
  */
 export function writeParentCursor(ws, cursor) {
   const dir = resolve(ws, "cursors");
   mkdirSync(dir, { recursive: true });
-  writeFileSync(resolve(dir, "parent.json"), JSON.stringify({ cursor }), "utf8");
+  const finalPath = resolve(dir, "parent.json");
+  const tmpPath = resolve(dir, `parent.json.tmp.${process.pid}`);
+  writeFileSync(tmpPath, JSON.stringify({ cursor }), "utf8");
+  renameSync(tmpPath, finalPath);
+}
+
+/**
+ * Write a string to stdout, then invoke `then` only after Node reports
+ * the write has drained. Guards against the "cursor advanced but stdout
+ * never reached Claude" race: the write callback fires after the OS has
+ * accepted the bytes, so we're safe to mark the messages as delivered.
+ *
+ * If Node reports `false` from the initial write (kernel buffer full),
+ * we wait for the 'drain' event before proceeding.
+ */
+export function flushStdoutThen(text, then) {
+  const ok = process.stdout.write(text, (err) => {
+    if (err) {
+      // Write failed — do NOT advance the cursor; the messages will be
+      // redelivered next turn. Surface the error so the outer hook can
+      // decide how loud to be.
+      then(err);
+      return;
+    }
+    then(null);
+  });
+  if (!ok) {
+    // Buffer was full; wait for drain so 'then' isn't called prematurely
+    // by a sync exit.
+    process.stdout.once("drain", () => {});
+  }
 }
 
 /**
