@@ -3,13 +3,13 @@
 // they shell out here with `node companion.mjs <group> <subcommand> ...`
 // and print whatever we write to stdout.
 //
-// Currently only `setup` is implemented. /threads and /memory commands
-// will hook in here later.
+// Currently only `setup` is implemented. Future /agnz:* sub-commands
+// (threads, board, etc.) will hook in here.
 
-import { createProfileStore } from "../agent/profiles.mjs";
-import { resolveDataDir } from "../agent/data-dir.mjs";
+import { createProfileStore } from "../lib/profiles.mjs";
+import { resolveUserDir } from "../lib/data-dir.mjs";
 
-const DATA_DIR = resolveDataDir();
+const DATA_DIR = resolveUserDir();
 
 const argv = process.argv.slice(2);
 

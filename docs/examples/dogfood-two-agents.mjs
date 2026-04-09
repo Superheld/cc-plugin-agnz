@@ -22,13 +22,13 @@
 import { rm, mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 
-import { createThreadManager } from "../../agent/threads.mjs";
-import { createSandbox, defaultPolicy } from "../../agent/sandbox.mjs";
-import { createRegistry } from "../../agent/tools/registry.mjs";
-import { runThread } from "../../agent/loop.mjs";
-import { createProfileStore } from "../../agent/profiles.mjs";
-import { readAllMessages } from "../../agent/messages-log.mjs";
-import { resolveUserDir } from "../../agent/data-dir.mjs";
+import { createThreadManager } from "../../lib/threads.mjs";
+import { createSandbox, defaultPolicy } from "../../lib/sandbox.mjs";
+import { createRegistry } from "../../lib/tools/registry.mjs";
+import { runThread } from "../../lib/loop.mjs";
+import { createProfileStore } from "../../lib/profiles.mjs";
+import { readAllMessages } from "../../lib/messages-log.mjs";
+import { resolveUserDir } from "../../lib/data-dir.mjs";
 
 const TEST_CWD = "/tmp/agnz-dogfood";
 

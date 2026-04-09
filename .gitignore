@@ -154,6 +154,9 @@ data/
 # CC per-developer local permission allowlist
 .claude/settings.local.json
 
+# CC cron / scheduled task state from /loop and similar
+.claude/scheduled_tasks*
+
 # Live sub-agent workspace state when running agnz against this repo itself
 # (threads, messages, cursors — generated at runtime, not source)
 .claude/agnz/

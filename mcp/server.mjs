@@ -7,14 +7,14 @@
 // needs in ./jsonrpc.mjs so the plugin ships zero node_modules.
 
 import { runStdioServer, log } from "./jsonrpc.mjs";
-import { createSandbox, Decision } from "../agent/sandbox.mjs";
-import { createRegistry } from "../agent/tools/registry.mjs";
-import { createThreadManager, ThreadStatus } from "../agent/threads.mjs";
-import { createProfileStore } from "../agent/profiles.mjs";
-import { runThread } from "../agent/loop.mjs";
-import { resolveUserDir } from "../agent/data-dir.mjs";
-import { loadAgentDef, mergeEffectivePolicy } from "../agent/agent-defs.mjs";
-import { kick, wait, forget } from "../agent/run-tracker.mjs";
+import { createSandbox, Decision } from "../lib/sandbox.mjs";
+import { createRegistry } from "../lib/tools/registry.mjs";
+import { createThreadManager, ThreadStatus } from "../lib/threads.mjs";
+import { createProfileStore } from "../lib/profiles.mjs";
+import { runThread } from "../lib/loop.mjs";
+import { resolveUserDir } from "../lib/data-dir.mjs";
+import { loadAgentDef, mergeEffectivePolicy } from "../lib/agent-defs.mjs";
+import { kick, wait, forget } from "../lib/run-tracker.mjs";
 
 // ---- data dirs ----
 //

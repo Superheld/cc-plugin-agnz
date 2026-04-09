@@ -8,7 +8,7 @@
 // are responsible for writing to stdout / stderr.
 //
 // Self-contained by design: these hooks must not import anything from
-// `agent/` so that the plugin's hook scripts keep working even if the
+// `lib/` so that the plugin's hook scripts keep working even if the
 // surrounding module layout is refactored.
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";

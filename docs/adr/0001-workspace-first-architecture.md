@@ -115,5 +115,5 @@ These are deliberately left open in this ADR and will be resolved in follow-up A
 
 ## References
 
-- Current code: `agent/data-dir.mjs`, `agent/threads.mjs`, `agent/memory.mjs`, `mcp/server.mjs`
+- Current code: `lib/data-dir.mjs`, `lib/threads.mjs`, `lib/memory.mjs` (removed in v0.4.0), `mcp/server.mjs`
 - Prior framing: `README.md` (pre-refactor version), `CLAUDE.md`
