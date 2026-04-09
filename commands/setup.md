@@ -1,10 +1,11 @@
 ---
 description: Configure local-model profiles for the agnz agent (list, add, remove, use, test).
-argument-hint: "[list|add|remove|use|test] [name] [...]"
-allowed-tools: Bash(node:*), AskUserQuestion
+argument-hint: "list | add <name> | remove <name> | use <name> | test [name]"
+allowed-tools: Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/companion.mjs:*), AskUserQuestion
+model: haiku
 ---
 
-Profile management for the **agnz** plugin. Profiles are named `{baseUrl, apiKey, model, ...}` bundles stored in `$AGNZ_DATA_DIR/profiles.json` (default `~/.local/share/agnz/profiles.json`). The agent uses the *active* profile when a thread is started without specifying one.
+Profile management for the **agnz** plugin. Profiles are named `{baseUrl, apiKey, model, ...}` bundles stored in `$AGNZ_DATA_DIR/profiles.json` (default `~/.claude/agnz/profiles.json`, with a transitional read-fallback to `~/.local/share/agnz/profiles.json` for 0.3.x users). The agent uses the *active* profile when a thread is started without specifying one.
 
 ## Sub-commands
 
@@ -28,3 +29,15 @@ The user invoked `/agnz:setup $ARGUMENTS`.
 5. Print the companion's output verbatim. It will be JSON for structured responses or plain text for errors.
 
 Do **not** run the command in the background — setup is interactive and finishes quickly.
+
+## Examples
+
+```
+/agnz:setup                               → defaults to `list`
+/agnz:setup list                          → show profiles + active
+/agnz:setup add lmstudio-devstral         → interactive add (asks baseUrl, model, apiKey)
+/agnz:setup use lmstudio-devstral         → set active profile
+/agnz:setup test                          → ping the active profile
+/agnz:setup test lmstudio-devstral        → ping a specific profile
+/agnz:setup remove old-profile            → delete a profile
+```

@@ -20,9 +20,9 @@ Claude Code (Parent)
 mcp/server.mjs          ← 6 agent_* lifecycle tools
     │
     ▼
-agent/loop.mjs          ← LLM ↔ tool loop, persists transcript
+lib/loop.mjs          ← LLM ↔ tool loop, persists transcript
     │
-    ├──▶ tools/         (read_file, edit_file, write_file, grep, list_dir, ask_user)
+    ├──▶ tools/         (list_dir, read_file, grep, edit_file, write_file, bash, ask_user, send_message)
     ├──▶ sandbox.mjs    (cwd lock + permission policy)
     ├──▶ workspace-store.mjs  (per-project state under <cwd>/.claude/agnz/)
     ├──▶ thread-index.mjs     (user-wide thread_id → cwd map)
@@ -39,38 +39,41 @@ agent/loop.mjs          ← LLM ↔ tool loop, persists transcript
 |---|---|
 | `mcp/server.mjs` | MCP server entrypoint. Defines the 6 lifecycle `agent_*` tools (start, send, wait, approve, answer, stop), their schemas, handlers. |
 | `mcp/jsonrpc.mjs` | Hand-rolled JSON-RPC 2.0 stdio server (no SDK dep). |
-| `agent/loop.mjs` | The agent loop. `runThread(ctx)` is the main entry. Handles new messages, resume from pause, drain leftover tool calls, and drains the mailbox (ADR 0002) at the top of every turn — delivering messages addressed to `agentName` as synthetic user messages and advancing `inboxCursor`. |
-| `agent/sandbox.mjs` | Path resolution, symlink-escape protection, tiered permission policy. `defaultPolicy()` is the source of truth for tool tiers. |
-| `agent/threads.mjs` | Thread lifecycle routed through a per-project workspace store. Status enum: `idle`, `running`, `awaiting_input`, `stopped`, `error`. Creates a workspace store for the thread's cwd and registers the id in the thread index. |
-| `agent/workspace-store.mjs` | Owns per-project state under `<cwd>/.claude/agnz/`. Today: `workspace.json` (shared metadata, initialised on first thread) and `threads/` (meta + jsonl transcripts). Still the future home for board fields (ADR 0004). |
-| `agent/messages-log.mjs` | Durable append-only `messages.jsonl` at the workspace root. `appendMessage`, `readMessagesSince(cursor)`, `readAllMessages`. Monotonic `m000001`-style ids. Per-workspace append mutex so concurrent `publish()` calls cannot race on id allocation. |
-| `agent/event-bus.mjs` | In-process pub/sub. `subscribe`/`unsubscribe`/`publish(cwd, message)`. `publish` appends to the durable log first, then fans out to matching direct subscribers and any `"*"` broadcasters. Fires an OS notification via `notifier.mjs` when a message is `urgent` and addressed to `parent`. |
-| `agent/notifier.mjs` | Platform-specific OS notification shim (ADR 0002 §6c). macOS uses `osascript` with AppleScript-escaped title/body; Linux uses `notify-send`; other platforms are silent no-ops. `spawn` (never `exec`), detached, fire-and-forget — a missing command never throws out of `notify()`. |
-| `agent/thread-index.mjs` | User-wide `{threadId → cwd}` map at `~/.claude/agnz/thread-index.json`. Needed because MCP tools take only a `thread_id` but the actual files live under the project's cwd — the index resolves the id back to the right workspace store. |
-| `agent/data-dir.mjs` | Resolves two data roots. `resolveUserDir()` returns `~/.claude/agnz/` by default (overridable by `$AGNZ_DATA_DIR`, with a transitional read-fallback to `~/.local/share/agnz/`). `resolveProjectDir(cwd)` returns `<cwd>/.claude/agnz/`. |
-| `agent/profiles.mjs` | Named `{baseUrl, apiKey, model, temperature, defaultPolicy, ...}` bundles. User-wide. CRUD + ping test. |
-| `agent/run-tracker.mjs` | In-memory `Map<threadId, Promise>` for the detach/wait model. Two functions: `kick`, `wait`. |
-| `agent/llm/openai-compatible.mjs` | Native-fetch HTTP client for `/v1/chat/completions`. Works with LM Studio, Ollama, OpenRouter, anything OpenAI-compatible. |
-| `agent/tools/registry.mjs` | Tool registry. Wraps tool descriptors, serialises to OpenAI `tools[]` schema. |
-| `agent/tools/{list_dir,read_file,grep}.mjs` | Read-only tools. Default policy `allow`. |
-| `agent/tools/{edit_file,write_file}.mjs` | Mutating tools. Default policy `ask`. |
-| `agent/tools/ask_user.mjs` | Special tool: never actually executed; the loop intercepts it in `dispatchToolCall` and pauses with `kind="question"`. |
-| `agent/tools/send_message.mjs` | The sub-agent's one publishing tool under ADR 0002. Validates the fixed `kind` vocabulary (say/question/answer/handoff/status/error/directive), normalizes `to` as string-or-array, delegates to `event-bus.publish`. Default policy `allow`. |
-| `agent/agent-defs.mjs` | ADR 0003 loader. Parses the tiny YAML-frontmatter subset used by agent-def files (`<cwd>/.claude/agnz/agents/*.md`) — zero-dep, supports scalars, folded `>` block, one-level `tools:` map. Exports `parseAgentDefSource`, `validateAgentDef`, `mergeEffectivePolicy` (profile is upper bound, strictest of profile/agent wins with deny > ask > allow), `loadAgentDef`, `listAgentDefs`. Consumed by `mcp/server.mjs` at `agent_start` time and snapshotted onto the thread meta. |
+| `lib/loop.mjs` | The agent loop. `runThread(ctx)` is the main entry. Handles new messages, resume from pause, drain leftover tool calls, and drains the mailbox (ADR 0002) at the top of every turn — delivering messages addressed to `agentName` as synthetic user messages and advancing `inboxCursor`. |
+| `lib/sandbox.mjs` | Path resolution, symlink-escape protection, tiered permission policy. `defaultPolicy()` is the source of truth for tool tiers. |
+| `lib/threads.mjs` | Thread lifecycle routed through a per-project workspace store. Status enum: `idle`, `running`, `awaiting_input`, `stopped`, `error`. Creates a workspace store for the thread's cwd and registers the id in the thread index. |
+| `lib/workspace-store.mjs` | Owns per-project state under `<cwd>/.claude/agnz/`. Today: `workspace.json` (shared metadata, initialised on first thread) and `threads/` (meta + jsonl transcripts). Still the future home for board fields (ADR 0004). |
+| `lib/messages-log.mjs` | Durable append-only `messages.jsonl` at the workspace root. `appendMessage`, `readMessagesSince(cursor)`, `readAllMessages`. Monotonic `m000001`-style ids. Per-workspace append mutex so concurrent `publish()` calls cannot race on id allocation. |
+| `lib/event-bus.mjs` | In-process pub/sub. `subscribe`/`unsubscribe`/`publish(cwd, message)`. `publish` appends to the durable log first, then fans out to matching direct subscribers and any `"*"` broadcasters. Fires an OS notification via `notifier.mjs` when a message is `urgent` and addressed to `parent`. |
+| `lib/notifier.mjs` | Platform-specific OS notification shim (ADR 0002 §6c). macOS uses `osascript` with AppleScript-escaped title/body; Linux uses `notify-send`; other platforms are silent no-ops. `spawn` (never `exec`), detached, fire-and-forget — a missing command never throws out of `notify()`. |
+| `lib/thread-index.mjs` | User-wide `{threadId → cwd}` map at `~/.claude/agnz/thread-index.json`. Needed because MCP tools take only a `thread_id` but the actual files live under the project's cwd — the index resolves the id back to the right workspace store. |
+| `lib/data-dir.mjs` | Resolves two data roots. `resolveUserDir()` returns `~/.claude/agnz/` by default (overridable by `$AGNZ_DATA_DIR`, with a transitional read-fallback to `~/.local/share/agnz/`). `resolveProjectDir(cwd)` returns `<cwd>/.claude/agnz/`. |
+| `lib/profiles.mjs` | Named `{baseUrl, apiKey, model, temperature, defaultPolicy, ...}` bundles. User-wide. CRUD + ping test. |
+| `lib/run-tracker.mjs` | In-memory `Map<threadId, Promise>` for the detach/wait model. Two functions: `kick`, `wait`. |
+| `lib/llm/openai-compatible.mjs` | Native-fetch HTTP client for `/v1/chat/completions`. Works with LM Studio, Ollama, OpenRouter, anything OpenAI-compatible. |
+| `lib/tools/registry.mjs` | Tool registry. Wraps tool descriptors, serialises to OpenAI `tools[]` schema. |
+| `lib/tools/{list_dir,read_file,grep}.mjs` | Read-only tools. Default policy `allow`. |
+| `lib/tools/{edit_file,write_file}.mjs` | Mutating tools. Default policy `ask`. |
+| `lib/tools/bash.mjs` | Shell execution via `/bin/sh -c` inside the sandbox cwd. Default policy `ask`. Hard limits: 30 s default timeout and 1 MiB output cap — oversized stdout/stderr triggers SIGKILL and a `content: "Error: ..."` result. |
+| `lib/tools/ask_user.mjs` | Special tool: never actually executed; the loop intercepts it in `dispatchToolCall` and pauses with `kind="question"`. |
+| `lib/tools/send_message.mjs` | The sub-agent's one publishing tool under ADR 0002. Validates the fixed `kind` vocabulary (say/question/answer/handoff/status/error/directive), normalizes `to` as string-or-array, delegates to `event-bus.publish`. Default policy `allow`. |
+| `lib/agent-defs.mjs` | ADR 0003 loader. Parses the tiny YAML-frontmatter subset used by agent-def files (`<cwd>/.claude/agnz/agents/*.md`) — zero-dep, supports scalars, folded `>` block, one-level `tools:` map. Exports `parseAgentDefSource`, `validateAgentDef`, `mergeEffectivePolicy` (profile is upper bound, strictest of profile/agent wins with deny > ask > allow), `loadAgentDef`, `listAgentDefs`. Consumed by `mcp/server.mjs` at `agent_start` time and snapshotted onto the thread meta. |
 | `scripts/companion.mjs` | Slash-command dispatcher. Currently only handles `/agnz:setup`. |
-| `scripts/hooks/{user-prompt-submit,session-start}.mjs` + `_lib.mjs` | Opt-in Claude Code hooks for ADR 0002 §6a/6b. Inject unread `to:parent` messages into Claude's context at prompt/session time and advance the parent cursor. Self-contained — no imports from `agent/`. Fast no-op when the current project has no agnz workspace. |
+| `scripts/hooks/{user-prompt-submit,session-start}.mjs` + `_lib.mjs` | Claude Code hook scripts for ADR 0002 §6a/6b. Inject unread `to:parent` messages into Claude's context at prompt/session time and advance the parent cursor (via atomic tmp+rename after stdout drain, so the cursor never advances past messages that didn't reach Claude). Self-contained — no imports from `lib/`. Fast no-op when the current project has no agnz workspace. Wired into Claude Code via `hooks/hooks.json` — auto-enabled when the plugin is installed; scoped to the plugin's lifetime. |
+| `hooks/hooks.json` | Plugin-level hook manifest. Merges into the user's Claude Code hooks when the plugin is enabled, binding `UserPromptSubmit` and `SessionStart` to the `scripts/hooks/*.mjs` scripts with a 5 s timeout. Uses the `{description, hooks: {...}}` wrapper format per plugin-dev guidance. |
 | `commands/setup.md` | The `/agnz:setup` slash command markdown. |
 | `skills/workspace/` | Progressive-disclosure skill covering `/agnz:setup` + workspace inspection. `SKILL.md` is the lean entry (third-person trigger phrases, ~570 words); `references/layout.md` has the full data-root layout, JSON schemas, and setup troubleshooting. |
 | `skills/agents/` | Progressive-disclosure skill for ADR 0003 agent definitions and the `agent_*` lifecycle. `SKILL.md` covers when to delegate + quick define-and-spawn path; `references/defining.md` is the frontmatter field reference with example roles; `references/lifecycle.md` is the full MCP tool + conversation reference. |
 | `.mcp.json` | Tells CC how to spawn the MCP server. Uses `${CLAUDE_PLUGIN_ROOT}` (verified to expand). |
 | `.claude-plugin/plugin.json` | Plugin manifest. |
 
-`agent/memory.mjs` **was deleted** as part of the 0.4.0 refactor. There is no project-memory or global-memory `.md` scope any more. If a future design needs persistent cross-run context for a workspace, it goes into `workspace.json` (per ADR 0001) or into board item notes (per ADR 0004), not into a parallel memory store.
+`lib/memory.mjs` **was deleted** as part of the 0.4.0 refactor. There is no project-memory or global-memory `.md` scope any more. If a future design needs persistent cross-run context for a workspace, it goes into `workspace.json` (per ADR 0001) or into board item notes (per ADR 0004), not into a parallel memory store.
 
-Repo layout follows the standard Claude Code plugin layout: `.claude-plugin/plugin.json` at the root, with `agent/`, `mcp/`, `commands/`, `scripts/`, `docs/` as siblings. This repo is a **pure plugin repo** — no marketplace manifest. The marketplace lives elsewhere.
+Repo layout follows the standard Claude Code plugin layout: `.claude-plugin/plugin.json` at the root, with `lib/`, `mcp/`, `commands/`, `scripts/`, `hooks/`, `docs/`, `skills/` as siblings. This repo is a **pure plugin repo** — no marketplace manifest. The marketplace lives elsewhere.
 
-- `tmp/` — gitignored scratch dir for live tests with the sub-agent
+- `tmp/` — gitignored scratch dir for live tests with the sub-agent (created on demand)
 - `docs/adr/` — Architecture Decision Records (see bottom of this file)
+- `docs/examples/` — runnable example scripts against the library modules; see `dogfood-two-agents.mjs` for an end-to-end ADR 0002 communication smoke test
 
 ## The current MCP tool surface
 
@@ -86,6 +89,8 @@ Six tools, all about things the parent cannot do by reading files itself:
 | `agent_stop` | Kill a live thread. Transcripts remain. |
 
 The old `agent_status`, `agent_list_threads`, `agent_memory_read`, `agent_memory_write`, `agent_profiles_list` are gone. Their read equivalents are just `Read`/`Grep` on files under `<cwd>/.claude/agnz/`; profile management is a slash command (`/agnz:setup`) that operates on the user-wide profile file directly.
+
+All six tools return structured JSON via an `outputSchema` declaration — `mcp/server.mjs` has one shared `OUTCOME_SCHEMA` for the four tools that go through `formatOutcome()` (send/wait/approve/answer) and per-tool schemas for `agent_start` and `agent_stop`. The `jsonResult()` helper emits both a plain-text `content` fallback and `structuredContent` so MCP 2025-06-18 clients can validate.
 
 ## The agent loop in one paragraph
 
@@ -114,12 +119,12 @@ This is the critical decision for parent context efficiency. `agent_send` defaul
 
 `defaultPolicy()` is the source of truth:
 ```js
-list_dir: allow,  read_file: allow,  grep: allow,  ask_user: allow,
-edit_file: ask,   write_file: ask,
-bash: deny
+list_dir: allow,  read_file: allow,  grep: allow,
+ask_user: allow,  send_message: allow,
+edit_file: ask,   write_file: ask,   bash: ask
 ```
 
-`bash` doesn't exist as a tool yet. It's in the policy as a placeholder so that *if* someone adds it later, the default is to refuse — fail-safe, not fail-open.
+`bash` runs `/bin/sh -c <command>` inside the sandbox cwd with a 30 s default timeout and a 1 MiB cap on stdout/stderr (oversized output SIGKILLs the child). It is gated behind `ask` so Parent Claude explicitly approves each shell invocation — the pattern is the same as `edit_file`/`write_file`: approve once with `persist=true` to unblock the rest of the thread.
 
 ## Persistence layout
 
@@ -209,15 +214,14 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol
 Four ADRs under [`docs/adr/`](./docs/adr/) describe where this branch is going. Read them before making non-trivial changes — they are the authoritative source of truth for the refactor. Status as of this file:
 
 - **[ADR 0001 — Workspace-first architecture.](./docs/adr/0001-workspace-first-architecture.md)** Workspace as a per-project directory; MCP shrinks to process lifecycle; parent reads state from files. **Implemented in v0.4.0.** `data-dir` user/project split, `workspace-store.mjs`, `thread-index.mjs`, `threads.mjs` rewrite, `memory.mjs` removal, MCP surface down to 6 tools. No formal schema beyond the skeleton yet.
-- **[ADR 0002 — Communication: mailboxes and events.](./docs/adr/0002-communication-mailbox-and-events.md)** Event bus + per-recipient mailboxes + `messages.jsonl` + `UserPromptSubmit`/`SessionStart` hooks + OS notifications. **Implemented in v0.4.0.** New modules: `agent/messages-log.mjs` (durable log with monotonic ids and a per-workspace append mutex), `agent/event-bus.mjs` (pub/sub with append-then-fanout), `agent/notifier.mjs` (macOS/Linux OS notification shim for urgent mail addressed to parent). `agent/tools/send_message.mjs` is the sub-agent's one publishing tool — reading is automatic, the loop drains the mailbox for `agentName` at the top of every turn and injects new mail as a synthetic user message. Hook scripts live under `scripts/hooks/` (`_lib.mjs`, `user-prompt-submit.mjs`, `session-start.mjs`) and are **opt-in** — users must add them to `~/.claude/settings.json` themselves. Each hook is a fast no-op when the current project has no agnz workspace.
-- **[ADR 0003 — Agent definitions.](./docs/adr/0003-agent-definitions.md)** `.md` files with YAML frontmatter under `<cwd>/.claude/agnz/agents/` that layer a role, system prompt, and tool-policy overrides on top of a profile. Referenced by name at `agent_start` time. **Implemented.** `agent/agent-defs.mjs` is the zero-dep loader; `mcp/server.mjs` accepts an `agent` parameter on `agent_start`, resolves the def, merges the effective policy via `mergeEffectivePolicy` (profile is upper bound, strictest wins), and snapshots the resolved def onto `thread.agentDef`. `agent/loop.mjs` reads the snapshot for `agentNameFor`, `maxTurns`/`temperature` overrides, and concatenates `agentDef.body` onto the default sandbox-framing system prompt. Skills under `skills/agents/` document the user-facing surface.
+- **[ADR 0002 — Communication: mailboxes and events.](./docs/adr/0002-communication-mailbox-and-events.md)** Event bus + per-recipient mailboxes + `messages.jsonl` + `UserPromptSubmit`/`SessionStart` hooks + OS notifications. **Implemented in v0.4.0.** New modules: `lib/messages-log.mjs` (durable log with monotonic ids and a per-workspace append mutex), `lib/event-bus.mjs` (pub/sub with append-then-fanout), `lib/notifier.mjs` (macOS/Linux OS notification shim for urgent mail addressed to parent). `lib/tools/send_message.mjs` is the sub-agent's one publishing tool — reading is automatic, the loop drains the mailbox for `agentName` at the top of every turn and injects new mail as a synthetic user message. Hook scripts live under `scripts/hooks/` (`_lib.mjs`, `user-prompt-submit.mjs`, `session-start.mjs`) and are wired into Claude Code via `hooks/hooks.json` — **auto-enabled** when the plugin is installed, scoped to the plugin's lifetime (disable the plugin and the hooks go away). Each hook is a fast no-op when the current project has no agnz workspace. The cursor advance uses an atomic tmp+rename after stdout drain so messages can't be silently marked delivered without reaching Claude.
+- **[ADR 0003 — Agent definitions.](./docs/adr/0003-agent-definitions.md)** `.md` files with YAML frontmatter under `<cwd>/.claude/agnz/agents/` that layer a role, system prompt, and tool-policy overrides on top of a profile. Referenced by name at `agent_start` time. **Implemented.** `lib/agent-defs.mjs` is the zero-dep loader; `mcp/server.mjs` accepts an `agent` parameter on `agent_start`, resolves the def, merges the effective policy via `mergeEffectivePolicy` (profile is upper bound, strictest wins), and snapshots the resolved def onto `thread.agentDef`. `lib/loop.mjs` reads the snapshot for `agentNameFor`, `maxTurns`/`temperature` overrides, and concatenates `agentDef.body` onto the default sandbox-framing system prompt. Skills under `skills/agents/` document the user-facing surface.
 - **[ADR 0004 — Board: mini-scrum for shared work.](./docs/adr/0004-board-mini-scrum.md)** Kanban-style board on `workspace.json` with columns, owners, dependencies, a review gate, and a `mode: planning|executing` flag. Replaces any flat-todo concept. `board_add`/`board_move`/`board_note`/`board_assign` as sub-agent tools. **Not implemented** — `workspace.json` today has no `items`, no `mode`, no `reviewRequired`.
 
 When implementing any of 0002–0004, follow the ADR as the spec and keep deviations visible (either an amendment in the ADR or a note in the commit message).
 
 ## Known gaps / TODO
 
-- **No `bash` tool.** Intentional for safety; will be gated behind `ask` at minimum when added.
 - **No streaming.** `agent_send` returns one outcome at a time. Intermediate progress is not observable to the parent. ADR 0002 changes this picture for agent-to-parent communication via `messages.jsonl`.
 - **No tests.** Sandbox path-escape, loop drain/resume, and the new workspace-store/thread-index plumbing all need real `node:test` coverage.
 - **No 0.3.x → 0.4.0 migration helper.** Users with threads under the old XDG `threads/` directory lose their in-flight runs. Only profiles are read-forwarded by `resolveUserDir()`.

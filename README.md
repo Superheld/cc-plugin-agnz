@@ -54,7 +54,7 @@ Claude Code (Parent)
 mcp/server.mjs             ← 6 agent_* lifecycle tools
     │
     ▼
-agent/loop.mjs             ← LLM ↔ tool loop, persists transcript
+lib/loop.mjs               ← LLM ↔ tool loop, persists transcript
     │
     ├──▶ tools/            (read_file, edit_file, write_file, grep, list_dir, ask_user)
     ├──▶ sandbox.mjs       (cwd lock + tiered permission policy)

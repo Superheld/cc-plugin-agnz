@@ -18,6 +18,7 @@ import {
   readUnreadForParent,
   writeParentCursor,
   formatMessages,
+  flushStdoutThen,
 } from "./_lib.mjs";
 
 try {
@@ -31,9 +32,19 @@ try {
   const unread = readUnreadForParent(ws, cursor);
   if (unread.length === 0) process.exit(0);
 
-  process.stdout.write(formatMessages(unread) + "\n");
-  writeParentCursor(ws, unread[unread.length - 1].id);
-  process.exit(0);
+  // Advance cursor only after stdout has been accepted by the kernel —
+  // prevents the silent-loss race where we'd mark messages delivered
+  // but the write never reached Claude.
+  flushStdoutThen(formatMessages(unread) + "\n", (err) => {
+    if (!err) {
+      try {
+        writeParentCursor(ws, unread[unread.length - 1].id);
+      } catch (cursorErr) {
+        process.stderr.write(`[agnz hook cursor write failed: ${cursorErr?.message || cursorErr}]\n`);
+      }
+    }
+    process.exit(0);
+  });
 } catch (err) {
   process.stderr.write(`[agnz hook error: ${err?.message || err}]\n`);
   process.exit(0);

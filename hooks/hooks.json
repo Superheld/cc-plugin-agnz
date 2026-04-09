@@ -1,0 +1,29 @@
+{
+  "description": "agnz mailbox delivery: injects unread messages addressed to `parent` from <cwd>/.claude/agnz/messages.jsonl into Claude's context on prompt submit and session start. Fast no-op when the current project has no agnz workspace.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/hooks/user-prompt-submit.mjs",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/hooks/session-start.mjs",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

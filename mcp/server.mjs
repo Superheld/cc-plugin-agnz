@@ -7,14 +7,14 @@
 // needs in ./jsonrpc.mjs so the plugin ships zero node_modules.
 
 import { runStdioServer, log } from "./jsonrpc.mjs";
-import { createSandbox, Decision } from "../agent/sandbox.mjs";
-import { createRegistry } from "../agent/tools/registry.mjs";
-import { createThreadManager, ThreadStatus } from "../agent/threads.mjs";
-import { createProfileStore } from "../agent/profiles.mjs";
-import { runThread } from "../agent/loop.mjs";
-import { resolveUserDir } from "../agent/data-dir.mjs";
-import { loadAgentDef, mergeEffectivePolicy } from "../agent/agent-defs.mjs";
-import { kick, wait, forget } from "../agent/run-tracker.mjs";
+import { createSandbox, Decision } from "../lib/sandbox.mjs";
+import { createRegistry } from "../lib/tools/registry.mjs";
+import { createThreadManager, ThreadStatus } from "../lib/threads.mjs";
+import { createProfileStore } from "../lib/profiles.mjs";
+import { runThread } from "../lib/loop.mjs";
+import { resolveUserDir } from "../lib/data-dir.mjs";
+import { loadAgentDef, mergeEffectivePolicy } from "../lib/agent-defs.mjs";
+import { kick, wait, forget } from "../lib/run-tracker.mjs";
 
 // ---- data dirs ----
 //
@@ -93,6 +93,56 @@ CONCURRENCY: set detach=true on agent_send / agent_approve / agent_answer to run
 // rely on runtime validation inside handlers. Annotations (readOnlyHint
 // etc.) are MCP 2025-03-26 hints — clients use them for UX like
 // auto-approve of safe reads.
+
+// Shared outcome schema for every tool that goes through formatOutcome().
+// The shape is a discriminated union on `status` — all agent_send /
+// agent_wait / agent_approve / agent_answer results use this. Rather
+// than encoding the union as oneOf (which MCP 2025-06-18 clients do
+// validate), we list all possible fields as optional and leave status
+// as the discriminator. This matches what the handlers actually emit.
+const OUTCOME_SCHEMA = {
+  type: "object",
+  properties: {
+    status: {
+      type: "string",
+      enum: [
+        "final",
+        "awaiting_input",
+        "started",
+        "still_running",
+        "max_turns",
+        "no_run_tracked",
+        "stopped",
+        "unknown",
+      ],
+      description: "Discriminator for the outcome shape.",
+    },
+    thread_id: { type: "string" },
+    // `final`
+    content: { type: "string", description: "Final assistant content (status=final)." },
+    finish_reason: { type: "string" },
+    // `awaiting_input`
+    kind: {
+      type: "string",
+      enum: ["approval", "question"],
+      description: "Pause kind (status=awaiting_input).",
+    },
+    tool_call_id: { type: "string" },
+    tool: { type: "string", description: "Tool name awaiting approval (kind=approval)." },
+    args: { type: "object", description: "Tool args preview (kind=approval; long strings truncated)." },
+    question: { type: "string", description: "Clarifying question (kind=question)." },
+    options: { type: "array" },
+    context: {},
+    // `still_running` / `no_run_tracked`
+    current_state: { type: "string" },
+    // `max_turns` / `unknown`
+    note: { type: "string" },
+    outcome: {},
+    // generic
+    hint: { type: "string" },
+  },
+  required: ["status", "thread_id"],
+};
 
 const tools = [
   {
@@ -201,6 +251,7 @@ const tools = [
       idempotentHint: false,
       openWorldHint: true,
     },
+    outputSchema: OUTCOME_SCHEMA,
     inputSchema: {
       type: "object",
       properties: {
@@ -257,6 +308,7 @@ const tools = [
       readOnlyHint: true,
       openWorldHint: false,
     },
+    outputSchema: OUTCOME_SCHEMA,
     inputSchema: {
       type: "object",
       properties: {
@@ -311,6 +363,7 @@ const tools = [
       idempotentHint: false,
       openWorldHint: true,
     },
+    outputSchema: OUTCOME_SCHEMA,
     inputSchema: {
       type: "object",
       properties: {
@@ -368,6 +421,7 @@ const tools = [
       idempotentHint: false,
       openWorldHint: true,
     },
+    outputSchema: OUTCOME_SCHEMA,
     inputSchema: {
       type: "object",
       properties: {
@@ -423,6 +477,14 @@ const tools = [
       idempotentHint: true,
       openWorldHint: false,
     },
+    outputSchema: {
+      type: "object",
+      properties: {
+        thread_id: { type: "string" },
+        status: { type: "string", enum: ["stopped"] },
+      },
+      required: ["thread_id", "status"],
+    },
     inputSchema: {
       type: "object",
       properties: { thread_id: { type: "string" } },
@@ -434,7 +496,10 @@ const tools = [
       await threadMgr.stopThread(args.thread_id);
       sandboxes.delete(args.thread_id);
       forget(args.thread_id);
-      return textResult(`thread ${args.thread_id} stopped`);
+      return jsonResult({
+        thread_id: args.thread_id,
+        status: "stopped",
+      });
     },
   },
 
