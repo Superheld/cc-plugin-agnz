@@ -55,7 +55,7 @@ export function createThreadManager() {
    * in the cross-workspace index so later tool calls can resolve the
    * thread id back to its store.
    */
-  async function createThread({ cwd, profile, policy, systemPrompt }) {
+  async function createThread({ cwd, profile, policy, systemPrompt, agentDef }) {
     if (!cwd) throw new Error("threads: cwd is required");
     const id = randomUUID();
     const meta = {
@@ -64,6 +64,7 @@ export function createThreadManager() {
       profile,
       policy: policy || null,
       systemPrompt: systemPrompt || null,
+      agentDef: agentDef || null,
       status: ThreadStatus.IDLE,
       createdAt: Date.now(),
       updatedAt: Date.now(),

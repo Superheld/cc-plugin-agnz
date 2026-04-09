@@ -13,6 +13,7 @@ import { createThreadManager, ThreadStatus } from "../agent/threads.mjs";
 import { createProfileStore } from "../agent/profiles.mjs";
 import { runThread } from "../agent/loop.mjs";
 import { resolveUserDir } from "../agent/data-dir.mjs";
+import { loadAgentDef, mergeEffectivePolicy } from "../agent/agent-defs.mjs";
 import { kick, wait, forget } from "../agent/run-tracker.mjs";
 
 // ---- data dirs ----
@@ -97,7 +98,7 @@ const tools = [
   {
     name: "agent_start",
     description:
-      "Create a new conversation thread with the local agent. The agent will operate strictly inside `cwd` and use the given profile (or the active profile if omitted). Returns the thread id and initial policy.",
+      "Create a new conversation thread with the local agent. The agent will operate strictly inside `cwd`. Pass `agent` to spawn a named role from <cwd>/.claude/agnz/agents/<name>.md (ADR 0003) — the role decides which profile, system prompt, and tool policy to use. Without `agent`, falls back to the named `profile` (or active profile), with a generic system prompt.",
     annotations: {
       title: "Start agent thread",
       readOnlyHint: false,
@@ -113,6 +114,7 @@ const tools = [
         profile: { type: "string" },
         model: { type: "string" },
         policy: { type: "object", additionalProperties: { type: "string" } },
+        agent: { type: ["string", "null"] },
       },
       required: ["thread_id", "cwd", "profile", "model", "policy"],
     },
@@ -122,39 +124,64 @@ const tools = [
         cwd: { type: "string", description: "Absolute path to the sandbox root for this thread." },
         profile: {
           type: "string",
-          description: "Profile name (from /agnz:setup). Defaults to active profile.",
+          description: "Profile name (from /agnz:setup). Defaults to active profile. Ignored when `agent` is set — the agent definition picks its own profile.",
+        },
+        agent: {
+          type: "string",
+          description: "Optional agent definition name (loaded from <cwd>/.claude/agnz/agents/<name>.md). Overrides `profile` and `system_prompt` when set.",
         },
         system_prompt: {
           type: "string",
-          description: "Optional thread-level system prompt override.",
+          description: "Optional thread-level system prompt override. Ignored when `agent` is set.",
         },
       },
       required: ["cwd"],
     },
     async handler(args) {
       try {
-        const profile = await profileStore.get(args.profile);
+        let agentDef = null;
+        let profileName = args.profile;
+
+        if (args.agent) {
+          try {
+            agentDef = await loadAgentDef(args.cwd, args.agent);
+          } catch (err) {
+            return errorResult(err.message);
+          }
+          profileName = agentDef.profile;
+        }
+
+        const profile = await profileStore.get(profileName);
         if (!profile) {
           return errorResult(
-            args.profile
-              ? `no profile named '${args.profile}'. Run /agnz:setup add.`
+            profileName
+              ? `no profile named '${profileName}'. Run /agnz:setup add.`
               : "no active profile configured. Run /agnz:setup add.",
           );
         }
+
+        // Effective policy: the profile's defaultPolicy is the upper
+        // bound, the agent def may only restrict it. See ADR 0003 §5.
+        const effectivePolicy = agentDef
+          ? mergeEffectivePolicy(profile.defaultPolicy, agentDef.tools)
+          : profile.defaultPolicy;
+
         const thread = await threadMgr.createThread({
           cwd: args.cwd,
           profile: profile.name,
-          policy: profile.defaultPolicy,
+          policy: effectivePolicy,
           systemPrompt: args.system_prompt || null,
+          agentDef: agentDef || null,
         });
         sandboxFor(thread); // fail fast on bad cwd
-        log("info", { event: "thread_started", thread_id: thread.id, cwd: thread.cwd, profile: profile.name, model: profile.model }, "agnz.mcp");
+        log("info", { event: "thread_started", thread_id: thread.id, cwd: thread.cwd, profile: profile.name, model: profile.model, agent: agentDef?.name || null }, "agnz.mcp");
         return jsonResult({
           thread_id: thread.id,
           cwd: thread.cwd,
           profile: profile.name,
           model: profile.model,
           policy: thread.policy,
+          agent: agentDef?.name || null,
         });
       } catch (err) {
         log("error", { event: "thread_start_failed", error: err.message }, "agnz.mcp");
