@@ -2,7 +2,7 @@
 
 A Claude Code plugin that exposes a **locally-hosted LLM** (LM Studio, Ollama, etc.) as a sandboxed sub-agent. Parent Claude talks to it via MCP. The sub-agent does the heavy file work; Parent Claude orchestrates and only sees the distilled outcome — keeping its context window small.
 
-This file is the in-repo guidance for future Claude sessions working on the codebase. It reflects the current state of the `refactor/workspace-first-architecture` branch (v0.4.0-pre). Design-in-progress work beyond what is implemented lives in [`docs/adr/`](./docs/adr/) — see the ADR section at the bottom.
+This file is the in-repo guidance for future Claude sessions working on the codebase. It reflects the state as of v0.4.0 — ADR 0001 (workspace-first) and ADR 0002 (mailbox communication) are implemented on `main`. Design-in-progress work beyond what is implemented (ADR 0003 agent definitions, ADR 0004 board) lives in [`docs/adr/`](./docs/adr/) — see the ADR section at the bottom.
 
 ## Why this exists
 
@@ -39,10 +39,13 @@ agent/loop.mjs          ← LLM ↔ tool loop, persists transcript
 |---|---|
 | `mcp/server.mjs` | MCP server entrypoint. Defines the 6 lifecycle `agent_*` tools (start, send, wait, approve, answer, stop), their schemas, handlers. |
 | `mcp/jsonrpc.mjs` | Hand-rolled JSON-RPC 2.0 stdio server (no SDK dep). |
-| `agent/loop.mjs` | The agent loop. `runThread(ctx)` is the main entry. Handles new messages, resume from pause, drain leftover tool calls. No memory preamble any more — the system prompt + persisted history is the whole context. |
+| `agent/loop.mjs` | The agent loop. `runThread(ctx)` is the main entry. Handles new messages, resume from pause, drain leftover tool calls, and drains the mailbox (ADR 0002) at the top of every turn — delivering messages addressed to `agentName` as synthetic user messages and advancing `inboxCursor`. |
 | `agent/sandbox.mjs` | Path resolution, symlink-escape protection, tiered permission policy. `defaultPolicy()` is the source of truth for tool tiers. |
 | `agent/threads.mjs` | Thread lifecycle routed through a per-project workspace store. Status enum: `idle`, `running`, `awaiting_input`, `stopped`, `error`. Creates a workspace store for the thread's cwd and registers the id in the thread index. |
-| `agent/workspace-store.mjs` | Owns per-project state under `<cwd>/.claude/agnz/`. Today: `workspace.json` (shared metadata, initialised on first thread) and `threads/` (meta + jsonl transcripts). Future home for `messages.jsonl`, `cursors/`, board fields (ADRs 0002–0004). |
+| `agent/workspace-store.mjs` | Owns per-project state under `<cwd>/.claude/agnz/`. Today: `workspace.json` (shared metadata, initialised on first thread) and `threads/` (meta + jsonl transcripts). Still the future home for board fields (ADR 0004). |
+| `agent/messages-log.mjs` | Durable append-only `messages.jsonl` at the workspace root. `appendMessage`, `readMessagesSince(cursor)`, `readAllMessages`. Monotonic `m000001`-style ids. Per-workspace append mutex so concurrent `publish()` calls cannot race on id allocation. |
+| `agent/event-bus.mjs` | In-process pub/sub. `subscribe`/`unsubscribe`/`publish(cwd, message)`. `publish` appends to the durable log first, then fans out to matching direct subscribers and any `"*"` broadcasters. Fires an OS notification via `notifier.mjs` when a message is `urgent` and addressed to `parent`. |
+| `agent/notifier.mjs` | Platform-specific OS notification shim (ADR 0002 §6c). macOS uses `osascript` with AppleScript-escaped title/body; Linux uses `notify-send`; other platforms are silent no-ops. `spawn` (never `exec`), detached, fire-and-forget — a missing command never throws out of `notify()`. |
 | `agent/thread-index.mjs` | User-wide `{threadId → cwd}` map at `~/.claude/agnz/thread-index.json`. Needed because MCP tools take only a `thread_id` but the actual files live under the project's cwd — the index resolves the id back to the right workspace store. |
 | `agent/data-dir.mjs` | Resolves two data roots. `resolveUserDir()` returns `~/.claude/agnz/` by default (overridable by `$AGNZ_DATA_DIR`, with a transitional read-fallback to `~/.local/share/agnz/`). `resolveProjectDir(cwd)` returns `<cwd>/.claude/agnz/`. |
 | `agent/profiles.mjs` | Named `{baseUrl, apiKey, model, temperature, defaultPolicy, ...}` bundles. User-wide. CRUD + ping test. |
@@ -52,7 +55,9 @@ agent/loop.mjs          ← LLM ↔ tool loop, persists transcript
 | `agent/tools/{list_dir,read_file,grep}.mjs` | Read-only tools. Default policy `allow`. |
 | `agent/tools/{edit_file,write_file}.mjs` | Mutating tools. Default policy `ask`. |
 | `agent/tools/ask_user.mjs` | Special tool: never actually executed; the loop intercepts it in `dispatchToolCall` and pauses with `kind="question"`. |
+| `agent/tools/send_message.mjs` | The sub-agent's one publishing tool under ADR 0002. Validates the fixed `kind` vocabulary (say/question/answer/handoff/status/error/directive), normalizes `to` as string-or-array, delegates to `event-bus.publish`. Default policy `allow`. |
 | `scripts/companion.mjs` | Slash-command dispatcher. Currently only handles `/agnz:setup`. |
+| `scripts/hooks/{user-prompt-submit,session-start}.mjs` + `_lib.mjs` | Opt-in Claude Code hooks for ADR 0002 §6a/6b. Inject unread `to:parent` messages into Claude's context at prompt/session time and advance the parent cursor. Self-contained — no imports from `agent/`. Fast no-op when the current project has no agnz workspace. |
 | `commands/setup.md` | The `/agnz:setup` slash command markdown. |
 | `.mcp.json` | Tells CC how to spawn the MCP server. Uses `${CLAUDE_PLUGIN_ROOT}` (verified to expand). |
 | `.claude-plugin/plugin.json` | Plugin manifest. |
@@ -196,8 +201,8 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol
 
 Four ADRs under [`docs/adr/`](./docs/adr/) describe where this branch is going. Read them before making non-trivial changes — they are the authoritative source of truth for the refactor. Status as of this file:
 
-- **[ADR 0001 — Workspace-first architecture.](./docs/adr/0001-workspace-first-architecture.md)** Workspace as a per-project directory; MCP shrinks to process lifecycle; parent reads state from files. **Partially implemented.** Done: `data-dir` user/project split, `workspace-store.mjs`, `thread-index.mjs`, `threads.mjs` rewrite, `memory.mjs` removal, MCP surface down to 6 tools. Not done: migration helper from 0.3.x, any formal schema beyond the skeleton.
-- **[ADR 0002 — Communication: mailboxes and events.](./docs/adr/0002-communication-mailbox-and-events.md)** Event bus + per-recipient mailboxes + `messages.jsonl` + `UserPromptSubmit`/`SessionStart` hooks + OS notifications. `send_message` as the sub-agent's one publishing tool. **Not implemented** — no bus, no mailbox, no `messages.jsonl`, no hooks, no `send_message` tool exists yet.
+- **[ADR 0001 — Workspace-first architecture.](./docs/adr/0001-workspace-first-architecture.md)** Workspace as a per-project directory; MCP shrinks to process lifecycle; parent reads state from files. **Implemented in v0.4.0.** `data-dir` user/project split, `workspace-store.mjs`, `thread-index.mjs`, `threads.mjs` rewrite, `memory.mjs` removal, MCP surface down to 6 tools. No formal schema beyond the skeleton yet.
+- **[ADR 0002 — Communication: mailboxes and events.](./docs/adr/0002-communication-mailbox-and-events.md)** Event bus + per-recipient mailboxes + `messages.jsonl` + `UserPromptSubmit`/`SessionStart` hooks + OS notifications. **Implemented in v0.4.0.** New modules: `agent/messages-log.mjs` (durable log with monotonic ids and a per-workspace append mutex), `agent/event-bus.mjs` (pub/sub with append-then-fanout), `agent/notifier.mjs` (macOS/Linux OS notification shim for urgent mail addressed to parent). `agent/tools/send_message.mjs` is the sub-agent's one publishing tool — reading is automatic, the loop drains the mailbox for `agentName` at the top of every turn and injects new mail as a synthetic user message. Hook scripts live under `scripts/hooks/` (`_lib.mjs`, `user-prompt-submit.mjs`, `session-start.mjs`) and are **opt-in** — users must add them to `~/.claude/settings.json` themselves. Each hook is a fast no-op when the current project has no agnz workspace.
 - **[ADR 0003 — Agent definitions.](./docs/adr/0003-agent-definitions.md)** `.md` files with YAML frontmatter under `<cwd>/.claude/agnz/agents/` that layer a role, system prompt, and tool-policy overrides on top of a profile. Referenced by name at `agent_start` time. **Not implemented** — `agent_start` still takes only a `profile`. There is no `agents/` directory, no frontmatter parser, no role snapshot on threads.
 - **[ADR 0004 — Board: mini-scrum for shared work.](./docs/adr/0004-board-mini-scrum.md)** Kanban-style board on `workspace.json` with columns, owners, dependencies, a review gate, and a `mode: planning|executing` flag. Replaces any flat-todo concept. `board_add`/`board_move`/`board_note`/`board_assign` as sub-agent tools. **Not implemented** — `workspace.json` today has no `items`, no `mode`, no `reviewRequired`.
 

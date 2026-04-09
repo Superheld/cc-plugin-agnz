@@ -11,9 +11,9 @@ Parent Claude talks to it over MCP. The sub-agent does the heavy file work — r
 - **Stay in control.** The sub-agent runs inside a sandbox: locked to a single working directory, tiered permissions (read-only by default, mutating tools require approval, shell is denied).
 - **Concurrency for free.** Sub-agents run in parallel via Node's event loop — no workers, no IPC. Two parallel runs measured at ~5.5s vs. ~10s sequential.
 
-## Status (v0.4.0-pre)
+## Status (v0.4.0)
 
-This branch is mid-refactor toward a **workspace-first architecture** (see the ADRs below). What works today:
+The workspace-first architecture (ADR 0001) and the communication layer (ADR 0002) are in. What works today:
 
 - MCP boot, `tools/list`, the lifecycle-only `agent_*` toolset (6 tools)
 - `agent_start` → `agent_send` → final answer (sub-agent does `list_dir` → `read_file` → response on its own)
@@ -120,7 +120,7 @@ The per-project layout is co-located with other Claude Code project state under 
 The design trajectory is captured in four ADRs under [`docs/adr/`](./docs/adr/). Only ADR 0001 has been partially implemented on this branch (the data-dir split, workspace store, thread index, and MCP shrink). The rest are designed but not yet built.
 
 - **[ADR 0001 — Workspace-first architecture.](./docs/adr/0001-workspace-first-architecture.md)** Workspace as a directory under `<cwd>/.claude/agnz/`. MCP shrinks to process lifecycle. Parent reads state directly from files. *Partially implemented: user/project dir split, workspace store, thread index, 6-tool MCP surface.*
-- **[ADR 0002 — Communication: mailboxes and events.](./docs/adr/0002-communication-mailbox-and-events.md)** Per-recipient mailboxes, a `messages.jsonl` durable log, an in-process event bus, and parent notification through `UserPromptSubmit` / `SessionStart` hooks plus OS notifications for urgent traffic. *Designed, not implemented.*
+- **[ADR 0002 — Communication: mailboxes and events.](./docs/adr/0002-communication-mailbox-and-events.md)** Per-recipient mailboxes, a `messages.jsonl` durable log, an in-process event bus, and parent notification through `UserPromptSubmit` / `SessionStart` hooks plus OS notifications for urgent traffic. *Implemented in v0.4.0. Sub-agents publish via the new `send_message` tool; mail for each agent is drained at the top of every turn as a synthetic user message. Hook scripts ship under `scripts/hooks/` and are opt-in (not auto-installed).*
 - **[ADR 0003 — Agent definitions.](./docs/adr/0003-agent-definitions.md)** Roles on top of profiles: `.md` files with YAML frontmatter under `<cwd>/.claude/agnz/agents/`, referenced by name at `agent_start` time. *Designed, not implemented.*
 - **[ADR 0004 — Board: mini-scrum for shared work.](./docs/adr/0004-board-mini-scrum.md)** A small kanban board on `workspace.json`, replacing flat todos, with columns, owners, dependencies, a review gate, and a planning-mode flag. *Designed, not implemented.*
 

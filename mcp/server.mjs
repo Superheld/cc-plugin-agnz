@@ -549,4 +549,4 @@ async function recoverStaleRuns() {
 // ---- boot -----------------------------------------------------------------
 
 await recoverStaleRuns();
-await runStdioServer({ name: "agnz", version: "0.4.0-pre", instructions: INSTRUCTIONS, tools });
+await runStdioServer({ name: "agnz", version: "0.4.0", instructions: INSTRUCTIONS, tools });
