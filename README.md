@@ -11,9 +11,9 @@ Parent Claude talks to it over MCP. The sub-agent does the heavy file work — r
 - **Stay in control.** The sub-agent runs inside a sandbox: locked to a single working directory, tiered permissions (read-only by default, mutating tools require approval, shell is denied).
 - **Concurrency for free.** Sub-agents run in parallel via Node's event loop — no workers, no IPC. Two parallel runs measured at ~5.5s vs. ~10s sequential.
 
-## Status (v0.4.0)
+## Status (v0.5.0)
 
-The workspace-first architecture (ADR 0001) and the communication layer (ADR 0002) are in. What works today:
+ADRs 0001–0003 and 0005 are implemented. What works today:
 
 - MCP boot, `tools/list`, the lifecycle-only `agent_*` toolset (6 tools)
 - `agent_start` → `agent_send` → final answer (sub-agent does `list_dir` → `read_file` → response on its own)
@@ -21,12 +21,9 @@ The workspace-first architecture (ADR 0001) and the communication layer (ADR 000
 - `ask_user` pause + resume via `agent_answer`
 - Detached runs via `agent_send(detach=true)` + `agent_wait`, two parallel sub-agents finishing concurrently
 - Per-project workspace at `<cwd>/.claude/agnz/` with threads, user-wide profiles at `~/.claude/agnz/`
-
-What has moved or gone since 0.3.x:
-
-- The data dir is now split. Per-project state (threads, future workspace.json, board, messages) lives under `<cwd>/.claude/agnz/`. User-wide state (profiles) lives under `~/.claude/agnz/` (with a transitional read-fallback to `~/.local/share/agnz/`).
-- The MCP surface shrank from 11 tools to 6. Everything read-only (status, list threads, memory) is gone from MCP; parent Claude reads workspace state directly with its own `Read`/`Grep` tools.
-- **Memory is removed.** The old project/global `.md` memory scopes no longer exist. Persistent context now belongs in the workspace itself — see ADRs 0001 and 0004.
+- **Agent definitions** (ADR 0003) — named roles at `<cwd>/.claude/agnz/agents/<name>.md` with system prompt, profile, tool policy overrides. Pass `agent: "<name>"` to `agent_start`.
+- **Skills** (ADR 0005) — project-local instruction sets at `<cwd>/.claude/skills/<name>/SKILL.md`. Sub-agents load them on demand via `use_skill`. Agent defs can declare a `skills:` allowlist.
+- **Mailbox communication** (ADR 0002) — sub-agents publish messages via `send_message`; parent Claude receives them as hook injections at prompt/session time.
 
 **Zero npm dependencies.** The MCP stdio server is hand-rolled (~150 lines). The plugin ships as pure source — Claude Code copies it to its cache on every install and there is no `npm install` step.
 
@@ -56,8 +53,10 @@ mcp/server.mjs             ← 6 agent_* lifecycle tools
     ▼
 lib/loop.mjs               ← LLM ↔ tool loop, persists transcript
     │
-    ├──▶ tools/            (read_file, edit_file, write_file, grep, list_dir, ask_user)
+    ├──▶ tools/            (read_file, edit_file, write_file, grep, list_dir,
+    │                       ask_user, send_message, use_skill)
     ├──▶ sandbox.mjs       (cwd lock + tiered permission policy)
+    ├──▶ agent-defs.mjs    (named roles from <cwd>/.claude/agnz/agents/)
     ├──▶ workspace-store   (<cwd>/.claude/agnz/ — threads, workspace.json)
     ├──▶ thread-index      (user-wide id → cwd map)
     ├──▶ profiles.mjs      (named LLM endpoint configs, user-wide)
@@ -106,11 +105,17 @@ Two independent roots:
 **Per-project** — one workspace per cwd, living under the project itself:
 
 ```
-<cwd>/.claude/agnz/
-├── workspace.json           ← shared workspace metadata (skeleton today)
-└── threads/
-    ├── <thread-id>.meta.json
-    └── <thread-id>.jsonl
+<cwd>/.claude/
+├── agnz/
+│   ├── workspace.json           ← shared workspace metadata
+│   ├── agents/
+│   │   └── <name>.md            ← agent definitions (ADR 0003)
+│   └── threads/
+│       ├── <thread-id>.meta.json
+│       └── <thread-id>.jsonl
+└── skills/
+    └── <name>/
+        └── SKILL.md             ← project-local skills (ADR 0005)
 ```
 
 The per-project layout is co-located with other Claude Code project state under `.claude/`, and is intentionally editable and version-controllable by the user.
