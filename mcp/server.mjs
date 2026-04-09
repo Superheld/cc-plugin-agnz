@@ -9,27 +9,25 @@
 import { runStdioServer, log } from "./jsonrpc.mjs";
 import { createSandbox, Decision } from "../agent/sandbox.mjs";
 import { createRegistry } from "../agent/tools/registry.mjs";
-import { createMemoryStore } from "../agent/memory.mjs";
 import { createThreadManager, ThreadStatus } from "../agent/threads.mjs";
 import { createProfileStore } from "../agent/profiles.mjs";
 import { runThread } from "../agent/loop.mjs";
-import { resolveDataDir } from "../agent/data-dir.mjs";
+import { resolveUserDir } from "../agent/data-dir.mjs";
 import { kick, wait, forget } from "../agent/run-tracker.mjs";
 
-// ---- data dir ----
+// ---- data dirs ----
 //
-// Versionsunabhängig: ~/.local/share/agnz (oder $XDG_DATA_HOME/agnz,
-// oder $AGNZ_DATA_DIR override). Wichtig: jeder Plugin-Update legt einen
-// neuen Cache-Ordner an, aber unsere Threads/Profiles/Memory bleiben
-// wo sie sind. Siehe agent/data-dir.mjs für Details.
+// ADR 0001: two roots. userDir holds profiles (and, in the future,
+// any user-wide settings). Per-project workspace state lives under
+// <cwd>/.claude/agnz/ and is owned by workspace-store.mjs — this
+// server doesn't touch it directly; threads.mjs routes through it.
 
-const DATA_DIR = resolveDataDir();
+const USER_DIR = resolveUserDir();
 
 // ---- singletons (one per MCP server process) ----
 
-const memory = createMemoryStore({ dataDir: DATA_DIR });
-const threadMgr = createThreadManager({ memory });
-const profileStore = createProfileStore({ dataDir: DATA_DIR });
+const threadMgr = createThreadManager();
+const profileStore = createProfileStore({ dataDir: USER_DIR });
 const registry = createRegistry();
 
 // Sandboxes are cached per-thread in memory; rebuilt from persisted
@@ -67,26 +65,26 @@ function errorResult(message) {
 
 // ---- server-level instructions ----
 //
-// Surfaced to the parent model via the MCP `initialize` response. This is
-// the ONE place where we get to frame the whole server — the tool
-// descriptions can only speak about themselves. Keep it tight (<400 words),
-// lead with the use case, explain the workflow, mention sandbox + memory.
+// Surfaced to the parent model via the MCP `initialize` response. This
+// is the one place where we get to frame the whole server — tool
+// descriptions can only speak about themselves. Keep it tight, lead
+// with the use case, describe the file-based workspace model.
 
 const INSTRUCTIONS = `agnz exposes a sandboxed, locally-hosted LLM as a sub-agent you (the parent) can delegate work to. The sub-agent runs its own tool loop against a model you control (LM Studio, Ollama, any OpenAI-compatible endpoint) and only reports the final outcome back to you.
 
-WHEN TO USE: delegate read-heavy or mechanically-repetitive file work — bulk reads, grep-and-summarize, find-and-replace across many files, code navigation — instead of doing it yourself. The sub-agent's intermediate tool calls don't count against your context window; only its final summary does. This is the same value model as your built-in Agent tool, but with a model the user hosts locally (free, private, no rate limits).
+WHEN TO USE: delegate read-heavy or mechanically-repetitive file work — bulk reads, grep-and-summarize, find-and-replace across many files, code navigation — instead of doing it yourself. The sub-agent's intermediate tool calls don't count against your context window; only its final summary does. Same value model as your built-in Agent tool, but with a model the user hosts locally (free, private, no rate limits).
 
 WHAT THE SUB-AGENT CAN DO: inside its sandbox it has list_dir, read_file, grep, edit_file, write_file, and ask_user. It is locked to a single cwd and cannot escape. edit_file and write_file are gated by default — the sub-agent will pause and require your approval via agent_approve before running them (set persist=true on the first approval to auto-allow for the rest of the thread).
+
+WORKSPACE LAYOUT: per-project state lives at <cwd>/.claude/agnz/. The workspace.json file holds the shared state; threads/ holds each sub-agent's meta and transcript. You inspect this directory with your own Read/Glob/Grep tools — no MCP call is needed to see what is going on. MCP tools on this server are reserved for live process operations (start, send, approve, answer, wait, stop).
 
 TYPICAL WORKFLOW:
   1. agent_start(cwd) — create a thread locked to a directory. Returns thread_id.
   2. agent_send(thread_id, message) — give it a task; blocks until it finishes, pauses, or hits max_turns.
-  3. If paused: use agent_approve (for tool-call approval pauses) or agent_answer (for ask_user question pauses). Check thread.pending.kind via agent_status to tell them apart.
-  4. agent_stop when done (optional; transcripts persist).
+  3. If paused: read the returned payload to see kind ("approval" or "question"), then call agent_approve or agent_answer to resume.
+  4. agent_stop when done (optional; transcripts persist on disk).
 
-CONCURRENCY: set detach=true on agent_send / agent_approve / agent_answer to run the sub-agent in the background, then agent_wait(thread_id) for the next event. Multiple sub-agents run in parallel freely — Node's event loop gives you real concurrency while they're waiting on their LLM endpoints.
-
-MEMORY: agent_memory_read / agent_memory_write give you scoped persistent notes (thread, project, global) that survive across runs and plugin upgrades.`;
+CONCURRENCY: set detach=true on agent_send / agent_approve / agent_answer to run the sub-agent in the background, then agent_wait(thread_id) for the next event. Multiple sub-agents run in parallel freely — Node's event loop gives you real concurrency while they wait on their LLM endpoints.`;
 
 // ---- tool schemas ----
 //
@@ -202,7 +200,6 @@ const tools = [
             threadMgr,
             sandbox,
             registry,
-            memory,
             profile,
             userMessage: args.message,
           }),
@@ -212,7 +209,7 @@ const tools = [
           return jsonResult({
             status: "started",
             thread_id: args.thread_id,
-            hint: "Sub-agent is running in the background. Call agent_wait(thread_id) to block until next event, or agent_status for a non-blocking check.",
+            hint: "Sub-agent is running in the background. Call agent_wait(thread_id) to block until next event. For a non-blocking check, read the thread's meta file at <cwd>/.claude/agnz/threads/<thread_id>.meta.json.",
           });
         }
 
@@ -257,7 +254,7 @@ const tools = [
             status: "no_run_tracked",
             thread_id: args.thread_id,
             current_state: thread.status,
-            hint: "No background run was tracked for this thread. Either nothing has been started since the MCP server restarted, or the run already completed and was cleared. Check agent_status for the persisted state.",
+            hint: "No background run was tracked for this thread. Either nothing has been started since the MCP server restarted, or the run already completed and was cleared. Read the thread's meta file at <cwd>/.claude/agnz/threads/<thread_id>.meta.json for the persisted state.",
           });
         }
         if (result.timedOut) {
@@ -309,7 +306,6 @@ const tools = [
             threadMgr,
             sandbox,
             registry,
-            memory,
             profile,
             userMessage: null,
             resumeInput: {
@@ -366,7 +362,6 @@ const tools = [
             threadMgr,
             sandbox,
             registry,
-            memory,
             profile,
             userMessage: null,
             resumeInput: {
@@ -387,71 +382,6 @@ const tools = [
       } catch (err) {
         return errorResult(err.message);
       }
-    },
-  },
-
-  {
-    name: "agent_status",
-    description: "Get the current status and meta of a thread.",
-    annotations: {
-      title: "Get thread status",
-      readOnlyHint: true,
-      openWorldHint: false,
-    },
-    inputSchema: {
-      type: "object",
-      properties: { thread_id: { type: "string" } },
-      required: ["thread_id"],
-    },
-    async handler(args) {
-      const thread = await threadMgr.getThread(args.thread_id);
-      if (!thread) return errorResult(`no thread '${args.thread_id}'`);
-      return jsonResult(thread);
-    },
-  },
-
-  {
-    name: "agent_list_threads",
-    description: "List all known threads with their status.",
-    annotations: {
-      title: "List agent threads",
-      readOnlyHint: true,
-      openWorldHint: false,
-    },
-    outputSchema: {
-      type: "object",
-      properties: {
-        threads: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: {
-              id: { type: "string" },
-              cwd: { type: "string" },
-              profile: { type: "string" },
-              status: { type: "string" },
-              createdAt: { type: "string" },
-              updatedAt: { type: "string" },
-            },
-            required: ["id", "cwd", "profile", "status"],
-          },
-        },
-      },
-      required: ["threads"],
-    },
-    inputSchema: { type: "object", properties: {} },
-    async handler() {
-      const threads = await threadMgr.listThreads();
-      return jsonResult({
-        threads: threads.map((t) => ({
-          id: t.id,
-          cwd: t.cwd,
-          profile: t.profile,
-          status: t.status,
-          createdAt: t.createdAt,
-          updatedAt: t.updatedAt,
-        })),
-      });
     },
   },
 
@@ -481,102 +411,6 @@ const tools = [
     },
   },
 
-  {
-    name: "agent_memory_read",
-    description:
-      "Read from the agent's persistent memory. Scope 'thread' needs a thread_id key, scope 'project' needs a project path key, scope 'global' ignores key.",
-    annotations: {
-      title: "Read agent memory",
-      readOnlyHint: true,
-      openWorldHint: false,
-    },
-    inputSchema: {
-      type: "object",
-      properties: {
-        scope: { type: "string", enum: ["thread", "project", "global"] },
-        key: {
-          type: "string",
-          description: "thread id for thread scope, project path for project scope, ignored for global",
-        },
-      },
-      required: ["scope"],
-    },
-    async handler(args) {
-      try {
-        const content = await memory.read(args.scope, args.key);
-        return textResult(content || "(empty)");
-      } catch (err) {
-        return errorResult(err.message);
-      }
-    },
-  },
-
-  {
-    name: "agent_memory_write",
-    description:
-      "Write to the agent's persistent memory (project or global scope only). Overwrites existing content.",
-    annotations: {
-      title: "Write agent memory",
-      readOnlyHint: false,
-      destructiveHint: true,
-      idempotentHint: true,
-      openWorldHint: false,
-    },
-    inputSchema: {
-      type: "object",
-      properties: {
-        scope: { type: "string", enum: ["project", "global"] },
-        key: {
-          type: "string",
-          description: "project path for project scope, ignored for global",
-        },
-        content: { type: "string" },
-      },
-      required: ["scope", "content"],
-    },
-    async handler(args) {
-      try {
-        await memory.write(args.scope, args.key, args.content);
-        return textResult("ok");
-      } catch (err) {
-        return errorResult(err.message);
-      }
-    },
-  },
-
-  {
-    name: "agent_profiles_list",
-    description: "List all configured profiles and the currently active one.",
-    annotations: {
-      title: "List agent profiles",
-      readOnlyHint: true,
-      openWorldHint: false,
-    },
-    outputSchema: {
-      type: "object",
-      properties: {
-        active: { type: ["string", "null"] },
-        profiles: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: {
-              name: { type: "string" },
-              baseUrl: { type: "string" },
-              model: { type: "string" },
-            },
-            required: ["name", "baseUrl", "model"],
-          },
-        },
-      },
-      required: ["active", "profiles"],
-    },
-    inputSchema: { type: "object", properties: {} },
-    async handler() {
-      const summary = await profileStore.list();
-      return jsonResult(summary);
-    },
-  },
 ];
 
 /**
@@ -715,4 +549,4 @@ async function recoverStaleRuns() {
 // ---- boot -----------------------------------------------------------------
 
 await recoverStaleRuns();
-await runStdioServer({ name: "agnz", version: "0.3.0", instructions: INSTRUCTIONS, tools });
+await runStdioServer({ name: "agnz", version: "0.4.0", instructions: INSTRUCTIONS, tools });

@@ -15,6 +15,29 @@
 import { chat } from "./llm/openai-compatible.mjs";
 import { Decision } from "./sandbox.mjs";
 import { ThreadStatus } from "./threads.mjs";
+import { readMessagesSince } from "./messages-log.mjs";
+
+/**
+ * Stable name this agent publishes and receives under. ADR 0003 will
+ * replace this with a real agent definition; until then we derive a
+ * short, human-readable handle from the thread id so dogfooding is
+ * possible without introducing a new createThread parameter yet.
+ */
+function agentNameFor(thread) {
+  return thread.agentName || `agent-${thread.id.slice(0, 8)}`;
+}
+
+/**
+ * Does `message.to` address `self`?
+ * - string: exact match or "*"
+ * - array: contains self or "*"
+ */
+function addressedTo(message, self) {
+  const to = message.to;
+  if (typeof to === "string") return to === self || to === "*";
+  if (Array.isArray(to)) return to.includes(self) || to.includes("*");
+  return false;
+}
 
 // 20 was too tight for realistic multi-file tasks: a single edit_file
 // mishap (e.g. indent mismatch) already costs several turns of retries,
@@ -32,7 +55,6 @@ const DEFAULT_MAX_TURNS = 40;
  * @param {object} ctx.threadMgr
  * @param {object} ctx.sandbox
  * @param {object} ctx.registry
- * @param {object} ctx.memory
  * @param {object} ctx.profile
  * @param {string|null} ctx.userMessage  — new user message, or null when resuming
  * @param {object} [ctx.resumeInput]     — resolution payload for a pending pause:
@@ -46,7 +68,6 @@ export async function runThread(ctx) {
     threadMgr,
     sandbox,
     registry,
-    memory,
     profile,
     userMessage,
     resumeInput,
@@ -68,7 +89,6 @@ export async function runThread(ctx) {
         threadMgr,
         sandbox,
         registry,
-        memory,
         resume: resumeInput,
       });
       // resolvePending may itself surface a new pause (e.g. another
@@ -86,11 +106,21 @@ export async function runThread(ctx) {
         threadMgr,
         sandbox,
         registry,
-        memory,
       });
       if (leftover?.status === "awaiting_input") return leftover;
 
-      const messages = await buildMessages({ thread, threadMgr, memory, profile });
+      // Deliver any new mail addressed to this agent into the thread
+      // history as a synthetic user message. ADR 0002 calls this
+      // "inbox drain at the top of each turn". The cursor is persisted
+      // so a server restart does not re-deliver old mail.
+      await drainMailbox({ thread, threadMgr });
+      // Re-read thread meta because drainMailbox may have advanced
+      // inboxCursor. buildMessages uses thread.id, not the stale ref,
+      // but other downstream callers (dispatchToolCall, ctx) still
+      // carry the old `thread` object — we refresh it once here.
+      Object.assign(thread, (await threadMgr.getThread(thread.id)) || thread);
+
+      const messages = await buildMessages({ thread, threadMgr, profile });
       const tools = registry.toOpenAISchema();
 
       const { message, finishReason } = await chat({
@@ -127,7 +157,6 @@ export async function runThread(ctx) {
           call,
           sandbox,
           registry,
-          memory,
           thread,
           threadMgr,
         });
@@ -167,7 +196,7 @@ export async function runThread(ctx) {
  * only some were answered, process the unanswered ones in order. If one
  * triggers a pause, surface it. If all are answered, this is a no-op.
  */
-async function drainLeftoverToolCalls({ thread, threadMgr, sandbox, registry, memory }) {
+async function drainLeftoverToolCalls({ thread, threadMgr, sandbox, registry }) {
   const history = await threadMgr.readMessages(thread.id);
   let lastAsstIdx = -1;
   for (let i = history.length - 1; i >= 0; i--) {
@@ -193,7 +222,6 @@ async function drainLeftoverToolCalls({ thread, threadMgr, sandbox, registry, me
       call,
       sandbox,
       registry,
-      memory,
       thread,
       threadMgr,
     });
@@ -202,16 +230,53 @@ async function drainLeftoverToolCalls({ thread, threadMgr, sandbox, registry, me
   return null;
 }
 
-async function buildMessages({ thread, threadMgr, memory, profile }) {
+/**
+ * Read new messages from <cwd>/.claude/agnz/messages.jsonl since the
+ * thread's persisted inboxCursor. Of those, deliver the ones addressed
+ * to this agent (exact name, "*", or array containing either) as a
+ * synthetic user message, skipping messages the agent sent itself so
+ * they don't echo back. The cursor advances to the last *observed*
+ * message id (not just delivered ones) so unrelated traffic in the
+ * workspace doesn't get re-scanned on every turn.
+ */
+async function drainMailbox({ thread, threadMgr }) {
+  const cursor = thread.inboxCursor || null;
+  const all = await readMessagesSince(thread.cwd, cursor);
+  if (all.length === 0) return;
+
+  const self = agentNameFor(thread);
+  const delivered = all.filter(
+    (m) => addressedTo(m, self) && m.from !== self,
+  );
+
+  // Advance cursor to the last observed id regardless of whether any
+  // of them were addressed to us. Otherwise every turn re-reads the
+  // same uninteresting traffic from chatty workspaces.
+  const lastObservedId = all[all.length - 1].id;
+
+  if (delivered.length > 0) {
+    const body = delivered
+      .map((m) => {
+        const ref = m.ref ? ` (re: ${m.ref})` : "";
+        const urgent = m.urgent ? " [URGENT]" : "";
+        const item = m.item_id ? ` [item=${m.item_id}]` : "";
+        return `- ${m.id} ${m.from} → ${JSON.stringify(m.to)} ${m.kind}${urgent}${item}${ref}: ${m.text}`;
+      })
+      .join("\n");
+    await threadMgr.appendMessage(thread.id, {
+      role: "user",
+      content: `Inbox update — ${delivered.length} new message(s) since your last turn:\n${body}`,
+    });
+  }
+
+  await threadMgr.updateThread(thread.id, { inboxCursor: lastObservedId });
+}
+
+async function buildMessages({ thread, threadMgr, profile }) {
   const messages = [];
 
   const system = profile.systemPrompt || thread.systemPrompt || defaultSystemPrompt(thread);
   messages.push({ role: "system", content: system });
-
-  const memoryPreamble = await composeMemoryPreamble({ thread, memory });
-  if (memoryPreamble) {
-    messages.push({ role: "system", content: memoryPreamble });
-  }
 
   const history = await threadMgr.readMessages(thread.id);
   for (const m of history) {
@@ -219,15 +284,6 @@ async function buildMessages({ thread, threadMgr, memory, profile }) {
     messages.push(rest);
   }
   return messages;
-}
-
-async function composeMemoryPreamble({ thread, memory }) {
-  const parts = [];
-  const global = (await memory.readGlobalMemory()).trim();
-  if (global) parts.push(`# Global memory\n${global}`);
-  const project = (await memory.readProjectMemory(thread.cwd)).trim();
-  if (project) parts.push(`# Project memory (${thread.cwd})\n${project}`);
-  return parts.length ? parts.join("\n\n") : null;
 }
 
 function defaultSystemPrompt(thread) {
@@ -252,7 +308,7 @@ function defaultSystemPrompt(thread) {
  *   { status: "ok" }                       — tool ran (or was denied), result appended
  *   { status: "awaiting_input", pending }  — paused, caller must resume
  */
-async function dispatchToolCall({ call, sandbox, registry, memory, thread, threadMgr }) {
+async function dispatchToolCall({ call, sandbox, registry, thread, threadMgr }) {
   const name = call?.function?.name;
   const toolCallId = call?.id || `call_${Date.now()}`;
   const tool = registry.get(name);
@@ -315,12 +371,12 @@ async function dispatchToolCall({ call, sandbox, registry, memory, thread, threa
     return { status: "awaiting_input", pending };
   }
 
-  return runToolAndAppend({ tool, args, toolCallId, sandbox, memory, thread, threadMgr });
+  return runToolAndAppend({ tool, args, toolCallId, sandbox, thread, threadMgr });
 }
 
-async function runToolAndAppend({ tool, args, toolCallId, sandbox, memory, thread, threadMgr }) {
+async function runToolAndAppend({ tool, args, toolCallId, sandbox, thread, threadMgr }) {
   try {
-    const result = await tool.run(args, { sandbox, memory, thread });
+    const result = await tool.run(args, { sandbox, thread, agentName: agentNameFor(thread) });
     const content = typeof result?.content === "string" ? result.content : JSON.stringify(result);
     await appendToolResult(threadMgr, thread.id, toolCallId, content);
     return { status: "ok" };
@@ -355,7 +411,7 @@ async function appendToolResult(threadMgr, threadId, toolCallId, content) {
  * the loop should continue, or another { status: "awaiting_input" } if
  * resolving it surfaces another pause.
  */
-async function resolvePending({ thread, threadMgr, sandbox, registry, memory, resume }) {
+async function resolvePending({ thread, threadMgr, sandbox, registry, resume }) {
   const pending = thread.pending;
   if (!pending || pending.toolCallId !== resume.toolCallId) {
     throw new Error(
@@ -408,7 +464,7 @@ async function resolvePending({ thread, threadMgr, sandbox, registry, memory, re
   }
 
   try {
-    const result = await tool.run(pending.args, { sandbox, memory, thread });
+    const result = await tool.run(pending.args, { sandbox, thread, agentName: agentNameFor(thread) });
     const content = typeof result?.content === "string" ? result.content : JSON.stringify(result);
     await appendToolResult(threadMgr, thread.id, pending.toolCallId, content);
   } catch (err) {
