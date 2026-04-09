@@ -158,6 +158,6 @@ data/
 # (threads, messages, cursors — generated at runtime, not source)
 .claude/agnz/
 
-# Live-test scratch dir for sub-agent runs
+# Live-test scratch dir for sub-agent runs (created on demand)
 tmp/
 
