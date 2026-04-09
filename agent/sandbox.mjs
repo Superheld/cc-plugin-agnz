@@ -24,6 +24,7 @@ export function defaultPolicy() {
     read_file: Decision.ALLOW,
     grep: Decision.ALLOW,
     ask_user: Decision.ALLOW, // intercepted by loop, never reaches policy check
+    send_message: Decision.ALLOW,
     edit_file: Decision.ASK,
     write_file: Decision.ASK,
     bash: Decision.ASK,

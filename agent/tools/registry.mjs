@@ -18,8 +18,9 @@ import writeFile from "./write_file.mjs";
 import grep from "./grep.mjs";
 import askUser from "./ask_user.mjs";
 import bash from "./bash.mjs";
+import sendMessage from "./send_message.mjs";
 
-const BUILTIN = [listDir, readFile, editFile, writeFile, grep, askUser, bash];
+const BUILTIN = [listDir, readFile, editFile, writeFile, grep, askUser, bash, sendMessage];
 
 export function createRegistry(extra = []) {
   const tools = new Map();
