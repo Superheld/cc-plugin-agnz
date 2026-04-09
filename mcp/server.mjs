@@ -73,19 +73,23 @@ function errorResult(message) {
 
 const INSTRUCTIONS = `agnz exposes a sandboxed, locally-hosted LLM as a sub-agent you (the parent) can delegate work to. The sub-agent runs its own tool loop against a model you control (LM Studio, Ollama, any OpenAI-compatible endpoint) and only reports the final outcome back to you.
 
-WHEN TO USE: delegate read-heavy or mechanically-repetitive file work — bulk reads, grep-and-summarize, find-and-replace across many files, code navigation — instead of doing it yourself. The sub-agent's intermediate tool calls don't count against your context window; only its final summary does. Same value model as your built-in Agent tool, but with a model the user hosts locally (free, private, no rate limits).
+WHEN TO DELEGATE: read-heavy work (bulk file reads, grep sweeps, "find everywhere X is used"), mechanical edits across many files, tasks you want to run in parallel while you do something else, anything where the intermediate tool calls would bloat your own context. The sub-agent's intermediate steps don't count against your context window — only its final summary does.
 
-WHAT THE SUB-AGENT CAN DO: inside its sandbox it has list_dir, read_file, grep, edit_file, write_file, and ask_user. It is locked to a single cwd and cannot escape. edit_file and write_file are gated by default — the sub-agent will pause and require your approval via agent_approve before running them (set persist=true on the first approval to auto-allow for the rest of the thread).
+WHEN NOT TO DELEGATE: quick one-liners you can do in one tool call, tasks that need real-time back-and-forth with the user, situations where you need the full reasoning chain in your own context.
 
-WORKSPACE LAYOUT: per-project state lives at <cwd>/.claude/agnz/. The workspace.json file holds the shared state; threads/ holds each sub-agent's meta and transcript. You inspect this directory with your own Read/Glob/Grep tools — no MCP call is needed to see what is going on. MCP tools on this server are reserved for live process operations (start, send, approve, answer, wait, stop).
+AGENT DEFINITIONS: if the project has .claude/agnz/agents/*.md files, read them first. Each file describes a named role (researcher, editor, tester…) with a system prompt and tool policy. Pick the agent whose description matches the task, then pass agent: "<name>" to agent_start. Without a definition, the sub-agent runs with a generic prompt.
+
+WHAT THE SUB-AGENT CAN DO: inside its sandbox it has list_dir, read_file, grep, edit_file, write_file, bash, ask_user, send_message. Locked to a single cwd. edit_file/write_file/bash are gated by default — the sub-agent pauses and you approve via agent_approve (persist=true to auto-allow for the rest of the thread).
+
+WORKSPACE LAYOUT: per-project state at <cwd>/.claude/agnz/. Read workspace.json, threads/*.meta.json, and the messages.jsonl log with your own Read/Glob/Grep — no MCP call needed. MCP tools are for live process operations only (start, send, approve, answer, wait, stop).
 
 TYPICAL WORKFLOW:
-  1. agent_start(cwd) — create a thread locked to a directory. Returns thread_id.
-  2. agent_send(thread_id, message) — give it a task; blocks until it finishes, pauses, or hits max_turns.
-  3. If paused: read the returned payload to see kind ("approval" or "question"), then call agent_approve or agent_answer to resume.
-  4. agent_stop when done (optional; transcripts persist on disk).
+  1. agent_start(cwd, agent?: "<name>") — create a thread. Returns thread_id.
+  2. agent_send(thread_id, message) — give it a task; blocks until done, paused, or max_turns.
+  3. If paused: check returned kind ("approval" or "question"), call agent_approve or agent_answer.
+  4. Read the outcome from the return value — do NOT re-read the transcript unless you need detail.
 
-CONCURRENCY: set detach=true on agent_send / agent_approve / agent_answer to run the sub-agent in the background, then agent_wait(thread_id) for the next event. Multiple sub-agents run in parallel freely — Node's event loop gives you real concurrency while they wait on their LLM endpoints.`;
+CONCURRENCY: detach=true on agent_send returns immediately; agent_wait(thread_id) blocks for the next event. Multiple sub-agents run in parallel freely via Node's event loop.`;
 
 // ---- tool schemas ----
 //
@@ -641,4 +645,4 @@ async function recoverStaleRuns() {
 // ---- boot -----------------------------------------------------------------
 
 await recoverStaleRuns();
-await runStdioServer({ name: "agnz", version: "0.4.1", instructions: INSTRUCTIONS, tools });
+await runStdioServer({ name: "agnz", version: "0.4.2", instructions: INSTRUCTIONS, tools });

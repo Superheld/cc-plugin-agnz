@@ -1,6 +1,6 @@
 ---
 name: workspace
-description: This skill should be used when the user asks to "set up agnz", "add a profile to agnz", "configure LM Studio for agnz", "configure Ollama for agnz", "inspect the agnz workspace", "check what agnz is running", "where does agnz store things", or needs to manage local-model profiles via /agnz:setup. Covers agnz's two data roots, profile configuration, and the workspace file layout under .claude/agnz/.
+description: "This skill should be used when the user asks to 'set up agnz', 'add a profile to agnz', 'configure LM Studio for agnz', 'configure Ollama for agnz', 'inspect the agnz workspace', 'check what agnz is running', 'where does agnz store things', or needs to manage local-model profiles via /agnz:setup. Covers agnz's two data roots, profile configuration, and the workspace file layout under .claude/agnz/."
 ---
 
 # agnz workspace

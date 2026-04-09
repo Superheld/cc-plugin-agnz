@@ -1,6 +1,6 @@
 ---
 name: agents
-description: This skill should be used when the user asks to "delegate to agnz", "spawn a sub-agent", "start a researcher agent", "create an agent definition", "write a researcher.md", "run two sub-agents in parallel", "approve a pending tool call", or needs to work with any agent_* MCP tool (agent_start, agent_send, agent_approve, agent_answer, agent_wait, agent_stop). Covers authoring agent-definition markdown files and the full sub-agent lifecycle.
+description: "This skill should be used when the user asks to 'delegate to agnz', 'spawn a sub-agent', 'start a researcher agent', 'create an agent definition', 'write a researcher.md', 'run two sub-agents in parallel', 'approve a pending tool call', or needs to work with any agent_* MCP tool (agent_start, agent_send, agent_approve, agent_answer, agent_wait, agent_stop). Covers authoring agent-definition markdown files and the full sub-agent lifecycle."
 ---
 
 # agnz agents
