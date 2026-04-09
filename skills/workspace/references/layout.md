@@ -10,7 +10,7 @@ Companion to [SKILL.md](SKILL.md). Read this when the quick version did not cove
 └── thread-index.json    ← {threadId → cwd} so MCP tools can resolve a thread back to its project
 ```
 
-`$AGNZ_DATA_DIR` overrides this root. There is a transitional read-fallback to `~/.local/share/agnz/` for users upgrading from 0.3.x — nothing is written there any more.
+`$AGNZ_DATA_DIR` overrides this root.
 
 ## Full per-project layout
 

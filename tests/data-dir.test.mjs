@@ -11,7 +11,7 @@ import { mkdtempSync, rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-import { resolveUserDir, resolveProjectDir, resolveDataDir } from "../lib/data-dir.mjs";
+import { resolveUserDir, resolveProjectDir } from "../lib/data-dir.mjs";
 
 describe("resolveUserDir", () => {
   let savedEnv;
@@ -66,15 +66,3 @@ describe("resolveProjectDir", () => {
   });
 });
 
-describe("resolveDataDir (deprecated alias)", () => {
-  test("returns the same value as resolveUserDir", () => {
-    const dir = mkdtempSync(join(tmpdir(), "agnz-alias-"));
-    try {
-      process.env.AGNZ_DATA_DIR = dir;
-      assert.equal(resolveDataDir(), resolveUserDir());
-    } finally {
-      delete process.env.AGNZ_DATA_DIR;
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-});

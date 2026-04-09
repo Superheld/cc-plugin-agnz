@@ -7,8 +7,11 @@
 // (threads, board, etc.) will hook in here.
 
 import { createProfileStore } from "../lib/profiles.mjs";
-import { resolveUserDir } from "../lib/data-dir.mjs";
+import { resolveUserDir, resolveProjectDir } from "../lib/data-dir.mjs";
 import { createWorkspaceStore } from "../lib/workspace-store.mjs";
+import { readFile, readdir, stat } from "node:fs/promises";
+import { dirname, join, resolve as resolvePath } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const DATA_DIR = resolveUserDir();
 
@@ -42,6 +45,7 @@ async function main() {
 
   if (group === "setup") return runSetup(rest);
   if (group === "threads") return runThreads(rest);
+  if (group === "info") return runInfo(rest);
 
   return usage(`unknown command group: ${group}`);
 }
@@ -124,6 +128,98 @@ async function runThreads(args) {
   }
 
   return usage(`unknown threads sub-command: ${sub}`);
+}
+
+// ---- info ------------------------------------------------------------------
+//
+// Prints a structured summary of the current agnz setup so Claude (or the
+// user) can understand where everything lives without directory searching.
+// Covers: plugin version, user-wide data root + active profile, and the
+// per-project layout (agents, threads, skills) for the current cwd.
+
+async function runInfo(args) {
+  const cwd = args[0] || process.cwd();
+
+  // Plugin version from plugin.json, which lives two directories up from
+  // this script (scripts/ → repo root → .claude-plugin/plugin.json).
+  const scriptDir = dirname(fileURLToPath(import.meta.url));
+  const pluginJsonPath = resolvePath(scriptDir, "..", ".claude-plugin", "plugin.json");
+  let version = "unknown";
+  try {
+    const pluginJson = JSON.parse(await readFile(pluginJsonPath, "utf8"));
+    version = pluginJson.version || "unknown";
+  } catch {
+    // Not fatal — version is cosmetic here.
+  }
+
+  const userDir = resolveUserDir();
+  const profileStore = createProfileStore({ dataDir: userDir });
+  const allProfiles = await profileStore.list();
+
+  // Format active profile details.
+  let profileLines = "  (no active profile — run /agnz:setup add)";
+  if (allProfiles.active) {
+    const p = allProfiles.profiles.find((x) => x.name === allProfiles.active);
+    if (p) {
+      const policyStr = Object.entries(p.defaultPolicy || {})
+        .map(([t, d]) => `${t}=${d}`)
+        .join("  ");
+      profileLines = [
+        `  active: ${p.name}`,
+        `    endpoint: ${p.baseUrl}`,
+        `    model:    ${p.model}`,
+        `    policy:   ${policyStr || "(default)"}`,
+      ].join("\n");
+    }
+  }
+
+  const otherProfiles = (allProfiles.profiles || [])
+    .filter((p) => p.name !== allProfiles.active)
+    .map((p) => `    - ${p.name} (${p.baseUrl})`)
+    .join("\n");
+
+  // Per-project paths.
+  const projectDir = resolveProjectDir(cwd);
+  const agentsDir = resolvePath(projectDir, "agents");
+  const threadsDir = resolvePath(projectDir, "threads");
+  const skillsDir = resolvePath(cwd, ".claude", "skills");
+
+  async function countDir(dir, ext = "") {
+    try {
+      const entries = await readdir(dir);
+      const matches = ext ? entries.filter((e) => e.endsWith(ext)) : entries;
+      return matches;
+    } catch {
+      return null; // directory doesn't exist
+    }
+  }
+
+  const agentFiles = await countDir(agentsDir, ".md");
+  const threadFiles = await countDir(threadsDir, ".meta.json");
+  const skillDirs = await countDir(skillsDir);
+
+  function fmt(dir, items, label) {
+    if (items === null) return `  ${dir}\n    (not created yet)`;
+    const names = items.map((f) => f.replace(/\.(md|meta\.json)$/, "")).join(", ");
+    const summary = items.length === 0 ? "(empty)" : `${items.length} ${label}: ${names}`;
+    return `  ${dir}\n    ${summary}`;
+  }
+
+  const lines = [
+    `agnz v${version}`,
+    "",
+    "User-wide data:",
+    `  ${userDir}`,
+    profileLines,
+    ...(otherProfiles ? ["  other profiles:", otherProfiles] : []),
+    "",
+    `Per-project (cwd: ${cwd}):`,
+    fmt(agentsDir, agentFiles, "agent" + (agentFiles?.length === 1 ? "" : "s")),
+    fmt(threadsDir, threadFiles, "thread" + (threadFiles?.length === 1 ? "" : "s")),
+    fmt(skillsDir, skillDirs, "skill" + (skillDirs?.length === 1 ? "" : "s")),
+  ];
+
+  print(lines.join("\n"));
 }
 
 main().catch((err) => fail(err.stack || err.message));
