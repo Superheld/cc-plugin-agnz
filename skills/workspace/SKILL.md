@@ -1,7 +1,7 @@
 ---
 name: workspace
-version: 0.1.0
-description: "This skill should be used when agnz needs to be configured, when a profile is missing or broken, when the current workspace state needs to be understood before spawning agents, when thread status or transcript content needs to be inspected, or when troubleshooting why an agent failed to start. Also load when the user asks to set up agnz, add a profile, configure LM Studio or Ollama, or check what is running. Covers the two data roots, profile management via /agnz:setup, and how to read workspace state directly from files."
+version: 0.2.0
+description: "This skill should be used when agnz needs to be configured, when a profile is missing or broken, when the user asks to 'set up agnz', 'add a profile', 'configure LM Studio or Ollama', 'check what is running', 'show the current setup', or when the current workspace state needs to be understood before spawning agents. Also load when troubleshooting why an agent failed to start, when thread status needs to be inspected, or when the user asks where agents or skills are stored."
 ---
 
 # agnz workspace
@@ -13,13 +13,24 @@ description: "This skill should be used when agnz needs to be configured, when a
 | Location | What lives there | Scope |
 |---|---|---|
 | `~/.claude/agnz/` | `profiles.json`, `thread-index.json` | User-wide — shared across all projects |
-| `<cwd>/.claude/agnz/` | `workspace.json`, `messages.jsonl`, `threads/`, `cursors/`, `agents/` | Per-project — lives with the code |
+| `<cwd>/.claude/agnz/` | `workspace.json`, `threads/`, `agents/` | Per-project — lives with the code |
+| `<cwd>/.claude/skills/` | Project-local skills for sub-agents | Per-project |
 
-Override the user-wide root by setting `$AGNZ_DATA_DIR`. The per-project root is always at `.claude/agnz/` under the project cwd.
+Override the user-wide root by setting `$AGNZ_DATA_DIR`.
+
+## Show current setup
+
+To see version, active profile, and all per-project paths at once:
+
+```
+node ${CLAUDE_PLUGIN_ROOT}/scripts/companion.mjs info [/abs/path/to/project]
+```
+
+Or use the `/agnz:info` slash command. Output includes plugin version, active profile with endpoint/model/policy, and agents/threads/skills paths with file counts.
 
 ## Setup in 30 seconds
 
-Profiles are named `{baseUrl, apiKey, model, temperature, ...}` bundles. One *active* profile is used as the default when a thread is started without specifying one.
+Profiles are named `{baseUrl, apiKey, model, ...}` bundles. One *active* profile is used as the default when a thread is started.
 
 ```
 /agnz:setup list                      # show profiles + active
@@ -35,40 +46,31 @@ Common endpoints:
 - **Ollama** → `http://localhost:11434/v1`
 - **OpenRouter / any OpenAI-compatible** → their `/v1` URL
 
-The `model` field must match whatever the runtime actually serves (e.g. `mistralai/devstral-small-2-2512` in LM Studio, `qwen2.5-coder:32b` in Ollama). When unsure, run `/agnz:setup test <name>` — it lists models the endpoint reports.
-
-For full troubleshooting, endpoint quirks, and the profile file schema see [references/layout.md](references/layout.md).
+The `model` field must match whatever the runtime actually serves. When unsure, run `/agnz:setup test <name>` — it lists models the endpoint reports.
 
 ## Inspecting the workspace — use Read/Glob/Grep, NOT MCP
 
-**Important.** `agnz`'s MCP tools (`agent_start`, `agent_send`, `agent_approve`, `agent_answer`, `agent_wait`, `agent_stop`) are reserved for **live process operations**. Inspect *state on disk* directly with Read/Glob/Grep. There is no `agent_status` or `agent_list_threads` MCP tool — that is on purpose.
-
-Typical look-around:
+`agnz`'s MCP tools are reserved for **live process operations**. Inspect state on disk directly:
 
 ```
-Read <cwd>/.claude/agnz/workspace.json
-  → shared workspace metadata (name, members, mode, ...)
-
-Glob <cwd>/.claude/agnz/threads/*.meta.json
-  → one file per thread: status, pending, policy, agentDef snapshot
-
-Read <cwd>/.claude/agnz/threads/<id>.jsonl
-  → append-only transcript (user/assistant/tool messages)
-
-Read <cwd>/.claude/agnz/messages.jsonl
-  → durable message log across all agents in the workspace
+Read <cwd>/.claude/agnz/workspace.json          → shared workspace metadata
+Glob <cwd>/.claude/agnz/threads/*.meta.json     → one file per thread
+Read <cwd>/.claude/agnz/threads/<id>.jsonl      → append-only transcript
+Read <cwd>/.claude/agnz/messages.jsonl          → workspace message log
 ```
 
-Thread status field values: `idle`, `running`, `awaiting_input`, `stopped`, `error`. An `awaiting_input` thread has a `pending` object indicating whether it is waiting on an `approval` or a `question` — see the `agents` skill for how to resolve those.
-
-For the full directory tree and per-file schema, including what `messages.jsonl` and `cursors/` look like, see [references/layout.md](references/layout.md).
+Thread status values: `idle`, `running`, `awaiting_input`, `stopped`, `error`. An `awaiting_input` thread has a `pending` object — `kind: "approval"` or `kind: "question"`. See the `agents` skill for resolution.
 
 ## When a profile is missing or stale
 
-When `agent_start` returns `no active profile configured` or `no profile named '<x>'`, the user has not run `/agnz:setup add` yet (or renamed it). Point them at the setup flow above.
+**`no active profile configured`** — run `/agnz:setup add` to create one.
 
-When a profile exists but `agent_start` returns an old / narrow policy (e.g. missing a tool that should be allowed), the stored `defaultPolicy` is stale relative to the current plugin version. Recreate the profile via `/agnz:setup remove <name>` then `/agnz:setup add <name>`. This is a known rough edge.
+**`no profile named '<x>'`** — the profile was renamed or removed. Run `/agnz:setup list` to see what's actually there.
 
-## Additional resources
+**Stale `defaultPolicy` after plugin upgrade** — new tools added to the plugin don't retroactively appear in old profiles. Recreate the profile (`/agnz:setup remove` then `add`) to pick up the current default policy.
 
-- **[references/layout.md](references/layout.md)** — full directory tree for both data roots, profile and thread meta JSON schemas, `messages.jsonl` shape, `/agnz:setup` sub-command details, and troubleshooting for common setup failures.
+## Reference files
+
+For deeper content, read the file using the base directory shown in the skill header:
+
+- **`references/layout.md`** — full directory tree for both data roots, profile and thread meta JSON schemas, `messages.jsonl` shape, `/agnz:setup` sub-command details, troubleshooting for common setup failures.
