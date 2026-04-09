@@ -1,7 +1,7 @@
 ---
 name: workspace
 version: 0.1.0
-description: "This skill should be used when the user asks to 'set up agnz', 'add a profile to agnz', 'configure LM Studio for agnz', 'configure Ollama for agnz', 'inspect the agnz workspace', 'check what agnz is running', 'where does agnz store things', or needs to manage local-model profiles via /agnz:setup. Covers agnz's two data roots, profile configuration, and the workspace file layout under .claude/agnz/."
+description: "This skill should be used when agnz needs to be configured, when a profile is missing or broken, when the current workspace state needs to be understood before spawning agents, when thread status or transcript content needs to be inspected, or when troubleshooting why an agent failed to start. Also load when the user asks to set up agnz, add a profile, configure LM Studio or Ollama, or check what is running. Covers the two data roots, profile management via /agnz:setup, and how to read workspace state directly from files."
 ---
 
 # agnz workspace

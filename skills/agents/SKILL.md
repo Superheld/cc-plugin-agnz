@@ -1,7 +1,7 @@
 ---
 name: agents
 version: 0.1.0
-description: "This skill should be used when the user asks to 'use agnz', 'delegate work to a local model', 'should I use agnz for this', 'save tokens', 'offload this task', 'run this in the background', 'frontier quality not needed here', 'a reviewer will check this anyway', 'spawn a sub-agent', 'start a researcher agent', 'create an agent definition', 'write a researcher.md', 'run two sub-agents in parallel', 'approve a pending tool call', 'the agent is paused', or when a task is read-heavy, mechanical, or will be reviewed before use — making it a good candidate for a local model instead of a frontier model. Covers when and how to delegate, authoring agent-definition files, and the full sub-agent lifecycle including parallel runs and pause resolution."
+description: "This skill should be used when a task involves reading many files, bulk grep sweeps, mechanical edits across multiple files, or any work where frontier-model quality is not required — particularly when the output will be reviewed before use. Also load this skill when two independent tasks could run in parallel, when context-window budget is a concern, when the user asks to 'use agnz', 'delegate this', 'spawn an agent', 'create an agent definition', 'approve a pending tool call', or when an agnz thread is paused and needs resolution. Covers the delegation decision, agent-definition authoring, and the full sub-agent lifecycle."
 ---
 
 # agnz agents
