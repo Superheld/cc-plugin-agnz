@@ -5,6 +5,7 @@
 // message is appended to the durable log before being delivered to subscribers.
 //
 import { appendMessage } from "./messages-log.mjs";
+import { notify } from "./notifier.mjs";
 
 // In-memory map of recipients to arrays of handlers.
 // Recipients can be agent names, "parent", or "*" (broadcast).
@@ -55,6 +56,22 @@ export async function publish(cwd, message) {
 
   // Append to durable log first (invariants: append-to-file-before-fanout)
   const fullMessage = await appendMessage(cwd, message);
+
+  // Fire an OS notification if this is an urgent message addressed to
+  // the parent. Fire-and-forget: notify() itself never throws, but we
+  // still defensively swallow a rejected promise so a misbehaving
+  // notifier cannot ever break publish().
+  const toField = fullMessage.to;
+  const addressesParent =
+    typeof toField === "string"
+      ? toField === "parent"
+      : Array.isArray(toField) && toField.includes("parent");
+  if (fullMessage.urgent === true && addressesParent) {
+    notify({
+      title: `agnz: ${fullMessage.kind} from ${fullMessage.from}`,
+      body: fullMessage.text,
+    }).catch(() => {});
+  }
 
   // Normalize recipients: string -> single entry; array -> all entries
   const recipients = new Set();
