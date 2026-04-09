@@ -2,7 +2,7 @@
 
 A Claude Code plugin that exposes a **locally-hosted LLM** (LM Studio, Ollama, etc.) as a sandboxed sub-agent. Parent Claude talks to it via MCP. The sub-agent does the heavy file work; Parent Claude orchestrates and only sees the distilled outcome — keeping its context window small.
 
-This file is the in-repo guidance for future Claude sessions working on the codebase. It reflects the state as of v0.4.0 — ADR 0001 (workspace-first) and ADR 0002 (mailbox communication) are implemented on `main`. Design-in-progress work beyond what is implemented (ADR 0003 agent definitions, ADR 0004 board) lives in [`docs/adr/`](./docs/adr/) — see the ADR section at the bottom.
+This file is the in-repo guidance for future Claude sessions working on the codebase. It reflects the current state of `main`: ADR 0001 (workspace-first), ADR 0002 (mailbox communication), and ADR 0003 (agent definitions) are implemented. ADR 0004 (board) is still design-in-progress. All ADRs live in [`docs/adr/`](./docs/adr/) — see the ADR section at the bottom.
 
 ## Why this exists
 
@@ -56,9 +56,12 @@ agent/loop.mjs          ← LLM ↔ tool loop, persists transcript
 | `agent/tools/{edit_file,write_file}.mjs` | Mutating tools. Default policy `ask`. |
 | `agent/tools/ask_user.mjs` | Special tool: never actually executed; the loop intercepts it in `dispatchToolCall` and pauses with `kind="question"`. |
 | `agent/tools/send_message.mjs` | The sub-agent's one publishing tool under ADR 0002. Validates the fixed `kind` vocabulary (say/question/answer/handoff/status/error/directive), normalizes `to` as string-or-array, delegates to `event-bus.publish`. Default policy `allow`. |
+| `agent/agent-defs.mjs` | ADR 0003 loader. Parses the tiny YAML-frontmatter subset used by agent-def files (`<cwd>/.claude/agnz/agents/*.md`) — zero-dep, supports scalars, folded `>` block, one-level `tools:` map. Exports `parseAgentDefSource`, `validateAgentDef`, `mergeEffectivePolicy` (profile is upper bound, strictest of profile/agent wins with deny > ask > allow), `loadAgentDef`, `listAgentDefs`. Consumed by `mcp/server.mjs` at `agent_start` time and snapshotted onto the thread meta. |
 | `scripts/companion.mjs` | Slash-command dispatcher. Currently only handles `/agnz:setup`. |
 | `scripts/hooks/{user-prompt-submit,session-start}.mjs` + `_lib.mjs` | Opt-in Claude Code hooks for ADR 0002 §6a/6b. Inject unread `to:parent` messages into Claude's context at prompt/session time and advance the parent cursor. Self-contained — no imports from `agent/`. Fast no-op when the current project has no agnz workspace. |
 | `commands/setup.md` | The `/agnz:setup` slash command markdown. |
+| `skills/workspace/` | Progressive-disclosure skill covering `/agnz:setup` + workspace inspection. `SKILL.md` is the lean entry (third-person trigger phrases, ~570 words); `references/layout.md` has the full data-root layout, JSON schemas, and setup troubleshooting. |
+| `skills/agents/` | Progressive-disclosure skill for ADR 0003 agent definitions and the `agent_*` lifecycle. `SKILL.md` covers when to delegate + quick define-and-spawn path; `references/defining.md` is the frontmatter field reference with example roles; `references/lifecycle.md` is the full MCP tool + conversation reference. |
 | `.mcp.json` | Tells CC how to spawn the MCP server. Uses `${CLAUDE_PLUGIN_ROOT}` (verified to expand). |
 | `.claude-plugin/plugin.json` | Plugin manifest. |
 
@@ -152,21 +155,25 @@ The old `memory/` directory is gone. The old `threads/` directory under the user
 
 ## Plugin development workflow
 
-CC caches each installed plugin version under `~/.claude/plugins/cache/agnz/agnz/<VERSION>/`. There is no live-reload; **every code change requires a version bump and reinstall**. Cycle:
+### Versioning rule
 
-1. Edit source at the repo root (`agent/`, `mcp/`, `commands/`, ...)
-2. Bump version in **both** places:
-   - `.claude-plugin/plugin.json`
-   - `mcp/server.mjs` (the `runStdioServer` call's `version` field)
-3. In Claude Code:
-   ```
-   /plugin marketplace update agnz
-   /plugin install agnz@agnz
-   /reload-plugins
-   ```
-4. Verify with `/mcp` — agnz should show as connected and the `agent_*` tools should be visible.
+**Only bump `version` when pushing / publishing a release.** Day-to-day feature work on a branch keeps the current version string. A release bundles several branches' worth of work and bumps once at push time, either on the release commit or immediately before `git push`. This keeps semantic versioning meaningful instead of burning a minor number per refactor Häppchen.
 
-`/plugin uninstall agnz` is **broken** in current CC for local marketplace plugins (it actually re-enables instead of removing). Bump-and-reinstall is the working path.
+The two files that must move together on a release bump:
+
+- `.claude-plugin/plugin.json`
+- `mcp/server.mjs` (the `runStdioServer` call's `version` field)
+
+### Iterating locally against the installed plugin
+
+CC caches each installed plugin version under `~/.claude/plugins/cache/<marketplace>/<plugin>/<VERSION>/`. Since we no longer bump for every change, reinstall via one of:
+
+1. `/plugin marketplace update agnz && /plugin install agnz@agnz && /reload-plugins` — the marketplace updater overwrites the cached version directory in place, so the live MCP server picks up the new source after a reload.
+2. If `/reload-plugins` doesn't seem to take effect, the running MCP stdio process has outlived the reload. Find and kill the `node mcp/server.mjs` process; CC respawns it with the fresh files.
+
+`/plugin uninstall agnz` is **broken** in current CC for local marketplace plugins (it actually re-enables instead of removing). Marketplace-update + reinstall is the working path.
+
+Verify with `/mcp` — agnz should show as connected and the `agent_*` tools visible.
 
 ## Profile setup (LM Studio example)
 
@@ -203,7 +210,7 @@ Four ADRs under [`docs/adr/`](./docs/adr/) describe where this branch is going. 
 
 - **[ADR 0001 — Workspace-first architecture.](./docs/adr/0001-workspace-first-architecture.md)** Workspace as a per-project directory; MCP shrinks to process lifecycle; parent reads state from files. **Implemented in v0.4.0.** `data-dir` user/project split, `workspace-store.mjs`, `thread-index.mjs`, `threads.mjs` rewrite, `memory.mjs` removal, MCP surface down to 6 tools. No formal schema beyond the skeleton yet.
 - **[ADR 0002 — Communication: mailboxes and events.](./docs/adr/0002-communication-mailbox-and-events.md)** Event bus + per-recipient mailboxes + `messages.jsonl` + `UserPromptSubmit`/`SessionStart` hooks + OS notifications. **Implemented in v0.4.0.** New modules: `agent/messages-log.mjs` (durable log with monotonic ids and a per-workspace append mutex), `agent/event-bus.mjs` (pub/sub with append-then-fanout), `agent/notifier.mjs` (macOS/Linux OS notification shim for urgent mail addressed to parent). `agent/tools/send_message.mjs` is the sub-agent's one publishing tool — reading is automatic, the loop drains the mailbox for `agentName` at the top of every turn and injects new mail as a synthetic user message. Hook scripts live under `scripts/hooks/` (`_lib.mjs`, `user-prompt-submit.mjs`, `session-start.mjs`) and are **opt-in** — users must add them to `~/.claude/settings.json` themselves. Each hook is a fast no-op when the current project has no agnz workspace.
-- **[ADR 0003 — Agent definitions.](./docs/adr/0003-agent-definitions.md)** `.md` files with YAML frontmatter under `<cwd>/.claude/agnz/agents/` that layer a role, system prompt, and tool-policy overrides on top of a profile. Referenced by name at `agent_start` time. **Not implemented** — `agent_start` still takes only a `profile`. There is no `agents/` directory, no frontmatter parser, no role snapshot on threads.
+- **[ADR 0003 — Agent definitions.](./docs/adr/0003-agent-definitions.md)** `.md` files with YAML frontmatter under `<cwd>/.claude/agnz/agents/` that layer a role, system prompt, and tool-policy overrides on top of a profile. Referenced by name at `agent_start` time. **Implemented.** `agent/agent-defs.mjs` is the zero-dep loader; `mcp/server.mjs` accepts an `agent` parameter on `agent_start`, resolves the def, merges the effective policy via `mergeEffectivePolicy` (profile is upper bound, strictest wins), and snapshots the resolved def onto `thread.agentDef`. `agent/loop.mjs` reads the snapshot for `agentNameFor`, `maxTurns`/`temperature` overrides, and concatenates `agentDef.body` onto the default sandbox-framing system prompt. Skills under `skills/agents/` document the user-facing surface.
 - **[ADR 0004 — Board: mini-scrum for shared work.](./docs/adr/0004-board-mini-scrum.md)** Kanban-style board on `workspace.json` with columns, owners, dependencies, a review gate, and a `mode: planning|executing` flag. Replaces any flat-todo concept. `board_add`/`board_move`/`board_note`/`board_assign` as sub-agent tools. **Not implemented** — `workspace.json` today has no `items`, no `mode`, no `reviewRequired`.
 
 When implementing any of 0002–0004, follow the ADR as the spec and keep deviations visible (either an amendment in the ADR or a note in the commit message).

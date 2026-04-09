@@ -154,6 +154,10 @@ data/
 # CC per-developer local permission allowlist
 .claude/settings.local.json
 
+# Live sub-agent workspace state when running agnz against this repo itself
+# (threads, messages, cursors — generated at runtime, not source)
+.claude/agnz/
+
 # Live-test scratch dir for sub-agent runs
 tmp/
 
