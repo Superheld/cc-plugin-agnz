@@ -8,6 +8,7 @@
 
 import { createProfileStore } from "../lib/profiles.mjs";
 import { resolveUserDir } from "../lib/data-dir.mjs";
+import { createWorkspaceStore } from "../lib/workspace-store.mjs";
 
 const DATA_DIR = resolveUserDir();
 
@@ -40,6 +41,7 @@ async function main() {
   if (!group) return usage("usage: companion.mjs <group> <subcommand> [args...]");
 
   if (group === "setup") return runSetup(rest);
+  if (group === "threads") return runThreads(rest);
 
   return usage(`unknown command group: ${group}`);
 }
@@ -94,6 +96,34 @@ async function runSetup(args) {
   }
 
   return usage(`unknown setup sub-command: ${sub}`);
+}
+
+// ---- threads ---------------------------------------------------------------
+//
+// Per-project thread inspection. Reads <cwd>/.claude/agnz/threads/ via
+// workspace-store. No MCP calls — the slash command is a plain file
+// read so the parent context isn't consumed by a thread-list pull.
+// `cwd` defaults to process.cwd() because the Bash tool that invokes
+// this script runs in the project root.
+async function runThreads(args) {
+  const sub = args[0] || "list";
+
+  if (sub === "list") {
+    const store = createWorkspaceStore(process.cwd());
+    const threads = await store.listThreads();
+    const summary = threads.map((t) => ({
+      id: t.id,
+      status: t.status,
+      profile: t.profile,
+      agent: t.agentDef?.name || null,
+      pending: t.pending?.kind || null,
+      createdAt: t.createdAt,
+      updatedAt: t.updatedAt,
+    }));
+    return print({ cwd: process.cwd(), count: summary.length, threads: summary });
+  }
+
+  return usage(`unknown threads sub-command: ${sub}`);
 }
 
 main().catch((err) => fail(err.stack || err.message));
