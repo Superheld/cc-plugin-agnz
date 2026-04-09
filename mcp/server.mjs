@@ -202,7 +202,9 @@ const tools = [
           } catch (err) {
             return errorResult(err.message);
           }
-          profileName = agentDef.profile;
+          // `model` is the CC-compatible field that holds our profile name.
+          // Fall back to the explicit `profile` arg if the def has no model.
+          profileName = agentDef.model || args.profile;
         }
 
         const profile = await profileStore.get(profileName);
@@ -214,10 +216,10 @@ const tools = [
           );
         }
 
-        // Effective policy: the profile's defaultPolicy is the upper
-        // bound, the agent def may only restrict it. See ADR 0003 §5.
+        // Effective policy: profile is the upper bound; agent def may
+        // restrict via tools (whitelist) and/or disallowedTools (blacklist).
         const effectivePolicy = agentDef
-          ? mergeEffectivePolicy(profile.defaultPolicy, agentDef.tools)
+          ? mergeEffectivePolicy(profile.defaultPolicy, agentDef)
           : profile.defaultPolicy;
 
         const thread = await threadMgr.createThread({

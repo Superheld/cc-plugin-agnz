@@ -47,11 +47,11 @@ description: |
   assistant: "I'll delegate this to the researcher agent."
   <commentary>Read-heavy, no edits needed.</commentary>
   </example>
-model: inherit
+model: lmstudio-devstral
 color: blue
-tools:
-  edit_file: deny
-  write_file: deny
+disallowedTools:
+  - edit_file
+  - write_file
 ---
 
 Investigate code and produce concise, factual summaries.
@@ -79,16 +79,16 @@ agnz agent files follow the same format as CC's built-in agent definitions. The 
 | Field | Required | Notes |
 |---|---|---|
 | `name` | yes | `[a-z][a-z0-9_-]*`. Unique in the workspace. |
-| `description` | yes | How Parent Claude picks this role. Use `\|` for multi-line with `<example>` blocks (CC style). **Be specific.** |
-| `model` | no | CC-compatible (`inherit`/`sonnet`/`haiku`/`opus`). Stored; `profile` controls the actual endpoint. |
-| `color` | no | CC-compatible (`blue`/`cyan`/`green`/`yellow`/`magenta`/`red`). Stored for future use. |
-| `profile` | no | agnz profile name. Falls back to active profile if absent. |
-| `tools` | no | Policy map `{toolName: allow\|ask\|deny}`. Profile is the upper bound — the agent can only restrict, never expand. |
-| `skills` | no | Allowlist for `use_skill`. Absent = all project-local skills available. |
-| `temperature` | no | Overrides the profile's temperature. |
-| `maxTurns` | no | Overrides the profile's maxTurns. |
+| `description` | yes | How Parent Claude picks this role. Use `\|` for multi-line with `<example>` blocks. **Be specific.** |
+| `model` | no | agnz profile name (e.g. `lmstudio-devstral`). Falls back to active profile if absent. |
+| `color` | no | `blue`/`cyan`/`green`/`yellow`/`magenta`/`red`. Stored for future UI use. |
+| `tools` | no | String array — **whitelist**. Only listed tools are available; all others denied. Profile is the upper bound. |
+| `disallowedTools` | no | String array — **blacklist**. Listed tools are denied, overrides the whitelist. |
+| `skills` | no | String array — allowlist for `use_skill`. Absent = all project-local skills available. |
+| `temperature` | no | LLM sampling temperature override. |
+| `maxTurns` | no | Loop ceiling override. |
 
-**Critical rule:** The profile's `defaultPolicy` is the ceiling. To unlock a tool, update the profile — not the agent def.
+**Critical rule:** The profile's `defaultPolicy` is the ceiling. Listing a tool in `tools` can never promote it beyond the profile's decision. To unlock a tool, update the profile.
 
 ## The six MCP tools
 
