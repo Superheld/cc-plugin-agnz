@@ -1,6 +1,7 @@
 ---
 name: agents
-description: "This skill should be used when the user asks to 'delegate to agnz', 'spawn a sub-agent', 'start a researcher agent', 'create an agent definition', 'write a researcher.md', 'run two sub-agents in parallel', 'approve a pending tool call', or needs to work with any agent_* MCP tool (agent_start, agent_send, agent_approve, agent_answer, agent_wait, agent_stop). Covers authoring agent-definition markdown files and the full sub-agent lifecycle."
+version: 0.1.0
+description: "This skill should be used when the user asks to 'use agnz', 'delegate work to a local model', 'should I use agnz for this', 'save tokens', 'offload this task', 'run this in the background', 'frontier quality not needed here', 'a reviewer will check this anyway', 'spawn a sub-agent', 'start a researcher agent', 'create an agent definition', 'write a researcher.md', 'run two sub-agents in parallel', 'approve a pending tool call', 'the agent is paused', or when a task is read-heavy, mechanical, or will be reviewed before use — making it a good candidate for a local model instead of a frontier model. Covers when and how to delegate, authoring agent-definition files, and the full sub-agent lifecycle including parallel runs and pause resolution."
 ---
 
 # agnz agents
@@ -115,3 +116,4 @@ Node's event loop gives real parallelism while the sub-agents await their respec
 
 - **[references/defining.md](references/defining.md)** — full frontmatter field reference, the tool-policy merge model with worked examples, and three complete example roles (researcher, editor, tester).
 - **[references/lifecycle.md](references/lifecycle.md)** — full MCP tool reference (all six tools with signatures), the three-outcomes model in depth, the detach + wait concurrency pattern, error recovery, and agent-to-agent messaging via `send_message` and `messages.jsonl`.
+- **[references/orchestration.md](references/orchestration.md)** — when to delegate vs. do it yourself, how to pick an agent, how to write a task brief, handling outcomes and pauses, parallel runs.
