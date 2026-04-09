@@ -2,7 +2,7 @@
 
 A Claude Code plugin that exposes a **locally-hosted LLM** (LM Studio, Ollama, etc.) as a sandboxed sub-agent. Parent Claude talks to it via MCP. The sub-agent does the heavy file work; Parent Claude orchestrates and only sees the distilled outcome — keeping its context window small.
 
-This file is the in-repo guidance for future Claude sessions working on the codebase. It reflects the current state of `main`: ADR 0001 (workspace-first), ADR 0002 (mailbox communication), ADR 0003 (agent definitions), and ADR 0005 (skills for agents) are implemented. ADR 0004 (board) is still design-in-progress. All ADRs live in [`docs/adr/`](./docs/adr/) — see the ADR section at the bottom.
+This file is the in-repo guidance for future Claude sessions working on the codebase. It reflects the current state of `main`: ADR 0001 (workspace-first), ADR 0002 (mailbox communication), ADR 0003 (agent definitions) are implemented. ADR 0004 (board) is still design-in-progress. ADR 0005 is superseded by ADR 0006 (skills injection, memory, initialPrompt — proposed). All ADRs live in [`docs/adr/`](./docs/adr/) — see the ADR section at the bottom.
 
 ## Why this exists
 
@@ -22,7 +22,7 @@ mcp/server.mjs          ← 6 agent_* lifecycle tools
     ▼
 lib/loop.mjs          ← LLM ↔ tool loop, persists transcript
     │
-    ├──▶ tools/         (list_dir, read_file, grep, edit_file, write_file, bash, ask_user, send_message)
+    ├──▶ tools/         (LS, Read, Grep, Edit, Write, Bash, AskUser, SendMessage, Skill)
     ├──▶ sandbox.mjs    (cwd lock + permission policy)
     ├──▶ workspace-store.mjs  (per-project state under <cwd>/.claude/agnz/)
     ├──▶ thread-index.mjs     (user-wide thread_id → cwd map)
@@ -47,19 +47,19 @@ lib/loop.mjs          ← LLM ↔ tool loop, persists transcript
 | `lib/event-bus.mjs` | In-process pub/sub. `subscribe`/`unsubscribe`/`publish(cwd, message)`. `publish` appends to the durable log first, then fans out to matching direct subscribers and any `"*"` broadcasters. Fires an OS notification via `notifier.mjs` when a message is `urgent` and addressed to `parent`. |
 | `lib/notifier.mjs` | Platform-specific OS notification shim (ADR 0002 §6c). macOS uses `osascript` with AppleScript-escaped title/body; Linux uses `notify-send`; other platforms are silent no-ops. `spawn` (never `exec`), detached, fire-and-forget — a missing command never throws out of `notify()`. |
 | `lib/thread-index.mjs` | User-wide `{threadId → cwd}` map at `~/.claude/agnz/thread-index.json`. Needed because MCP tools take only a `thread_id` but the actual files live under the project's cwd — the index resolves the id back to the right workspace store. |
-| `lib/data-dir.mjs` | Resolves two data roots. `resolveUserDir()` returns `~/.claude/agnz/` by default (overridable by `$AGNZ_DATA_DIR`, with a transitional read-fallback to `~/.local/share/agnz/`). `resolveProjectDir(cwd)` returns `<cwd>/.claude/agnz/`. |
+| `lib/data-dir.mjs` | Resolves two data roots. `resolveUserDir()` returns `~/.claude/agnz/` by default (overridable by `$AGNZ_DATA_DIR`). `resolveProjectDir(cwd)` returns `<cwd>/.claude/agnz/`. |
 | `lib/profiles.mjs` | Named `{baseUrl, apiKey, model, temperature, defaultPolicy, ...}` bundles. User-wide. CRUD + ping test. |
 | `lib/run-tracker.mjs` | In-memory `Map<threadId, Promise>` for the detach/wait model. Two functions: `kick`, `wait`. |
 | `lib/llm/openai-compatible.mjs` | Native-fetch HTTP client for `/v1/chat/completions`. Works with LM Studio, Ollama, OpenRouter, anything OpenAI-compatible. |
 | `lib/tools/registry.mjs` | Tool registry. Wraps tool descriptors, serialises to OpenAI `tools[]` schema. |
-| `lib/tools/{list_dir,read_file,grep}.mjs` | Read-only tools. Default policy `allow`. |
-| `lib/tools/{edit_file,write_file}.mjs` | Mutating tools. Default policy `ask`. |
-| `lib/tools/bash.mjs` | Shell execution via `/bin/sh -c` inside the sandbox cwd. Default policy `ask`. Hard limits: 30 s default timeout and 1 MiB output cap — oversized stdout/stderr triggers SIGKILL and a `content: "Error: ..."` result. |
-| `lib/tools/ask_user.mjs` | Special tool: never actually executed; the loop intercepts it in `dispatchToolCall` and pauses with `kind="question"`. |
-| `lib/tools/send_message.mjs` | The sub-agent's one publishing tool under ADR 0002. Validates the fixed `kind` vocabulary (say/question/answer/handoff/status/error/directive), normalizes `to` as string-or-array, delegates to `event-bus.publish`. Default policy `allow`. |
-| `lib/tools/use_skill.mjs` | ADR 0005. Discovers and loads project-local skills from `<cwd>/.claude/skills/<name>/SKILL.md`. Actions: `list` (catalog) and `load` (body). Per-thread catalog cache; allowList from `thread.agentDef.skills`. Default policy `allow`. |
-| `lib/agent-defs.mjs` | ADR 0003 loader. Parses the tiny YAML-frontmatter subset used by agent-def files (`<cwd>/.claude/agnz/agents/*.md`) — zero-dep, supports scalars, folded `>` block, one-level `tools:` map. Exports `parseAgentDefSource`, `validateAgentDef`, `mergeEffectivePolicy` (profile is upper bound, strictest of profile/agent wins with deny > ask > allow), `loadAgentDef`, `listAgentDefs`. Consumed by `mcp/server.mjs` at `agent_start` time and snapshotted onto the thread meta. |
-| `scripts/companion.mjs` | Slash-command dispatcher. Currently only handles `/agnz:setup`. |
+| `lib/tools/{LS,Read,Grep}.mjs` | Read-only tools. Default policy `allow`. |
+| `lib/tools/{Edit,Write}.mjs` | Mutating tools. Default policy `ask`. |
+| `lib/tools/Bash.mjs` | Shell execution via `/bin/sh -c` inside the sandbox cwd. Default policy `ask`. Hard limits: 30 s default timeout and 1 MiB output cap — oversized stdout/stderr triggers SIGKILL and a `content: "Error: ..."` result. |
+| `lib/tools/AskUser.mjs` | Special tool: never actually executed; the loop intercepts it in `dispatchToolCall` and pauses with `kind="question"`. |
+| `lib/tools/SendMessage.mjs` | The sub-agent's one publishing tool under ADR 0002. Validates the fixed `kind` vocabulary (say/question/answer/handoff/status/error/directive), normalizes `to` as string-or-array, delegates to `event-bus.publish`. Default policy `allow`. |
+| `lib/tools/Skill.mjs` | Framework tool (ADR 0006). Provides `list` (catalog) and `load` (full body) actions for project-local skills at `<cwd>/.claude/skills/<name>/SKILL.md`. When `skills:` is set in the agent def, the agent sees a catalog in its system prompt and calls Skill to load on demand. Default policy `allow`. |
+| `lib/agent-defs.mjs` | ADR 0003 loader. Parses the tiny YAML-frontmatter subset used by agent-def files (`<cwd>/.claude/agnz/agents/*.md`) — zero-dep, supports scalars, folded `>` block, literal `\|` block (for `<example>` blocks), sequences for `tools`/`disallowedTools`/`skills`. Exports `parseAgentDefSource`, `validateAgentDef`, `mergeEffectivePolicy` (profile is upper bound, strictest of profile/agent wins with deny > ask > allow), `loadAgentDef`, `listAgentDefs`. Consumed by `mcp/server.mjs` at `agent_start` time and snapshotted onto the thread meta. |
+| `scripts/companion.mjs` | Slash-command dispatcher. Handles `/agnz:setup` and `/agnz:info`. |
 | `scripts/hooks/{user-prompt-submit,session-start}.mjs` + `_lib.mjs` | Claude Code hook scripts for ADR 0002 §6a/6b. Inject unread `to:parent` messages into Claude's context at prompt/session time and advance the parent cursor (via atomic tmp+rename after stdout drain, so the cursor never advances past messages that didn't reach Claude). Self-contained — no imports from `lib/`. Fast no-op when the current project has no agnz workspace. Wired into Claude Code via `hooks/hooks.json` — auto-enabled when the plugin is installed; scoped to the plugin's lifetime. |
 | `hooks/hooks.json` | Plugin-level hook manifest. Merges into the user's Claude Code hooks when the plugin is enabled, binding `UserPromptSubmit` and `SessionStart` to the `scripts/hooks/*.mjs` scripts with a 5 s timeout. Uses the `{description, hooks: {...}}` wrapper format per plugin-dev guidance. |
 | `commands/setup.md` | The `/agnz:setup` slash command markdown. |
@@ -120,12 +120,14 @@ This is the critical decision for parent context efficiency. `agent_send` defaul
 
 `defaultPolicy()` is the source of truth:
 ```js
-list_dir: allow,  read_file: allow,  grep: allow,
-ask_user: allow,  send_message: allow,
-edit_file: ask,   write_file: ask,   bash: ask
+LS: allow,   Read: allow,        Grep: allow,
+AskUser: allow,  SendMessage: allow,  Skill: allow,
+Edit: ask,   Write: ask,         Bash: ask
 ```
 
-`bash` runs `/bin/sh -c <command>` inside the sandbox cwd with a 30 s default timeout and a 1 MiB cap on stdout/stderr (oversized output SIGKILLs the child). It is gated behind `ask` so Parent Claude explicitly approves each shell invocation — the pattern is the same as `edit_file`/`write_file`: approve once with `persist=true` to unblock the rest of the thread.
+Tool names are PascalCase, matching Claude Code's built-in tool naming so agent definition files can be shared between CC and agnz without modification.
+
+`Bash` runs `/bin/sh -c <command>` inside the sandbox cwd with a 30 s default timeout and a 1 MiB cap on stdout/stderr (oversized output SIGKILLs the child). It is gated behind `ask` so Parent Claude explicitly approves each shell invocation — the pattern is the same as `Edit`/`Write`: approve once with `persist=true` to unblock the rest of the thread.
 
 ## Persistence layout
 
@@ -133,7 +135,7 @@ There are now **two** independent roots.
 
 ### User-wide (`resolveUserDir()`)
 
-Default `~/.claude/agnz/`. Overridable by `$AGNZ_DATA_DIR`. A transitional read-fallback to `~/.local/share/agnz/` applies when the new location is empty but the old XDG default has content (courtesy for 0.3.x upgrades).
+Default `~/.claude/agnz/`. Overridable by `$AGNZ_DATA_DIR`.
 
 ```
 ~/.claude/agnz/

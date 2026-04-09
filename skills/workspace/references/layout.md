@@ -44,13 +44,15 @@ Companion to [SKILL.md](SKILL.md). Read this when the quick version did not cove
       "maxTurns": 40,
       "systemPrompt": null,
       "defaultPolicy": {
-        "list_dir": "allow",
-        "read_file": "allow",
-        "grep": "allow",
-        "ask_user": "allow",
-        "edit_file": "ask",
-        "write_file": "ask",
-        "bash": "ask"
+        "LS": "allow",
+        "Read": "allow",
+        "Grep": "allow",
+        "AskUser": "allow",
+        "SendMessage": "allow",
+        "Skill": "allow",
+        "Edit": "ask",
+        "Write": "ask",
+        "Bash": "ask"
       }
     }
   }
@@ -69,9 +71,9 @@ Companion to [SKILL.md](SKILL.md). Read this when the quick version did not cove
   "id": "ce63f17a-...",
   "cwd": "/abs/path/to/project",
   "profile": "lmstudio-devstral",
-  "policy": { "read_file": "allow", "edit_file": "deny", ... },
+  "policy": { "Read": "allow", "Edit": "deny", ... },
   "systemPrompt": null,
-  "agentDef": { "name": "researcher", "body": "...", "tools": {...}, ... } | null,
+  "agentDef": { "name": "researcher", "body": "...", "disallowedTools": [...], ... } | null,
   "status": "idle" | "running" | "awaiting_input" | "stopped" | "error",
   "inboxCursor": "m000042" | null,
   "createdAt": 1775724539724,

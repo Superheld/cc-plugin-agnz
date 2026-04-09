@@ -37,11 +37,22 @@ Minimal example — create `<cwd>/.claude/agnz/agents/researcher.md`:
 ```markdown
 ---
 name: researcher
-profile: lmstudio-devstral
-description: Read-heavy code investigation. Bulk reads, grep sweeps, summaries.
-tools:
-  edit_file: deny
-  write_file: deny
+description: |
+  Use this agent when the user asks to investigate code, find usages,
+  or summarise a module. Examples:
+
+  <example>
+  Context: User wants to understand the codebase.
+  user: "How does request logging work?"
+  assistant: "I'll delegate this to the researcher agent."
+  <commentary>Read-heavy, no edits needed.</commentary>
+  </example>
+model: lmstudio-devstral
+color: blue
+disallowedTools:
+  - Edit
+  - Write
+  - Bash
 ---
 
 Investigate code and produce concise, factual summaries.
@@ -64,17 +75,21 @@ agent_send({ thread_id: "abc...", message: "Summarise how request logging works.
 
 ## Agent file — frontmatter fields
 
-| Field | Required | Type | Notes |
-|---|---|---|---|
-| `name` | yes | `[a-z][a-z0-9_-]*` | Unique in the workspace. Used in mailbox addressing. |
-| `profile` | yes | string | Must match a profile in `~/.claude/agnz/profiles.json`. |
-| `description` | yes | string | How Parent Claude picks this role. **Be specific** — vague descriptions route nothing. |
-| `tools` | no | map | Per-tool override on top of the profile's policy. Profile is the upper bound: the agent can only restrict, never expand. |
-| `temperature` | no | number | Overrides the profile's temperature for this role. |
-| `maxTurns` | no | integer | Overrides the profile's maxTurns. |
-| `skills` | no | list | Allowlist of project-local skills the agent may load via `use_skill`. If absent, all skills are available. |
+agnz agent files follow the same format as CC's built-in agent definitions. The main difference is `tools`: CC uses an array of names to grant access; agnz uses a policy map `{toolName: allow|ask|deny}`.
 
-**Critical rule:** The profile's `defaultPolicy` is the ceiling. Setting `edit_file: allow` in an agent def when the profile says `edit_file: ask` has no effect — `ask` wins. To unlock a tool, update the profile first.
+| Field | Required | Notes |
+|---|---|---|
+| `name` | yes | `[a-z][a-z0-9_-]*`. Unique in the workspace. |
+| `description` | yes | How Parent Claude picks this role. Use `\|` for multi-line with `<example>` blocks. **Be specific.** |
+| `model` | no | agnz profile name (e.g. `lmstudio-devstral`). Falls back to active profile if absent. |
+| `color` | no | `blue`/`cyan`/`green`/`yellow`/`magenta`/`red`. Stored for future UI use. |
+| `tools` | no | String array — **whitelist**. Only listed tools are available; all others denied. Profile is the upper bound. |
+| `disallowedTools` | no | String array — **blacklist**. Listed tools are denied, overrides the whitelist. |
+| `skills` | no | String array — allowlist for the `Skill` tool. Absent = all project-local skills available. |
+| `temperature` | no | LLM sampling temperature override. |
+| `maxTurns` | no | Loop ceiling override. |
+
+**Critical rule:** The profile's `defaultPolicy` is the ceiling. Listing a tool in `tools` can never promote it beyond the profile's decision. To unlock a tool, update the profile.
 
 ## The six MCP tools
 
@@ -83,7 +98,7 @@ agent_send({ thread_id: "abc...", message: "Summarise how request logging works.
 | `agent_start` | Create a thread. Returns `thread_id`. |
 | `agent_send` | Send a task. Sync by default — blocks until done or paused. |
 | `agent_approve` | Resolve an approval pause (sub-agent wants to run a gated tool). |
-| `agent_answer` | Resolve a question pause (sub-agent called `ask_user`). |
+| `agent_answer` | Resolve a question pause (sub-agent called `AskUser`). |
 | `agent_wait` | Block for the next event on a detached thread. |
 | `agent_stop` | End a thread. Transcripts persist. |
 
@@ -93,7 +108,7 @@ agent_send({ thread_id: "abc...", message: "Summarise how request logging works.
 
 1. **`status: "final"`** — sub-agent finished. Round is over.
 2. **`status: "awaiting_input"`, `kind: "approval"`** — sub-agent wants to run a gated tool. Resolve with `agent_approve(thread_id, tool_call_id, decision: "allow"|"deny", persist?: true)`. Use `persist: true` to avoid repeated pauses for the same tool.
-3. **`status: "awaiting_input"`, `kind: "question"`** — sub-agent called `ask_user`. Resolve with `agent_answer(thread_id, tool_call_id, answer: "...")`.
+3. **`status: "awaiting_input"`, `kind: "question"`** — sub-agent called `AskUser`. Resolve with `agent_answer(thread_id, tool_call_id, answer: "...")`.
 
 ## Concurrency
 
@@ -119,5 +134,5 @@ Node's event loop gives real parallelism. Two agents finish in roughly the time 
 For deeper content, read the file using the base directory shown in the skill header:
 
 - **`references/defining.md`** — full frontmatter spec, the tool-policy merge model with worked examples, three complete example roles (researcher / editor / tester), snapshot-on-spawn semantics.
-- **`references/lifecycle.md`** — full MCP tool signatures, error recovery, the detach + wait pattern in depth, agent-to-agent messaging via `send_message`.
+- **`references/lifecycle.md`** — full MCP tool signatures, error recovery, the detach + wait pattern in depth, agent-to-agent messaging via `SendMessage`.
 - **`references/orchestration.md`** — when to delegate vs. do it yourself, how to write a task brief, handling outcomes and pauses, parallel run patterns.
