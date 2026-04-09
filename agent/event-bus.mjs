@@ -48,8 +48,11 @@ export function unsubscribe(recipient, handler) {
  * Publish a message to the event bus.
  * First appends the message to the durable log, then fans out to all matching
  * subscribers (direct and wildcard). This ensures durability before delivery.
+ * Returns the full message (with id and at filled in) so callers like the
+ * send_message tool can surface the id in their tool result.
  * @param {string} cwd - absolute path to the project root
  * @param {Object} message - partial message without id and at
+ * @returns {Promise<Object>} the full message
  */
 export async function publish(cwd, message) {
   if (!cwd || !message) throw new Error("publish: cwd and message are required");
@@ -106,4 +109,6 @@ export async function publish(cwd, message) {
       }
     }
   }
+
+  return fullMessage;
 }
