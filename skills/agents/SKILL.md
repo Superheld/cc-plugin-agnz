@@ -1,98 +1,101 @@
 ---
 name: agents
-version: 0.1.0
-description: "This skill should be used when a task involves reading many files, bulk grep sweeps, mechanical edits across multiple files, or any work where frontier-model quality is not required — particularly when the output will be reviewed before use. Also load this skill when two independent tasks could run in parallel, when context-window budget is a concern, when the user asks to 'use agnz', 'delegate this', 'spawn an agent', 'create an agent definition', 'approve a pending tool call', or when an agnz thread is paused and needs resolution. Covers the delegation decision, agent-definition authoring, and the full sub-agent lifecycle."
+version: 0.2.0
+description: "This skill should be used when the user asks to 'use agnz', 'delegate this to an agent', 'spawn an agent', 'create an agent definition', 'write an agent file', 'define a role for the sub-agent', or when a task involves reading many files, bulk grep sweeps, or mechanical edits across multiple files where a local model can do the work. Also load when an agnz thread is paused and needs resolution via agent_approve or agent_answer, or when the user asks about running two agents in parallel."
 ---
 
 # agnz agents
 
-`agnz` delegates work to a locally-hosted LLM running as a sandboxed sub-agent. This skill covers two intertwined concerns:
+`agnz` delegates work to a locally-hosted LLM running as a sandboxed sub-agent. This skill covers:
 
-1. **Defining** what a sub-agent *is* — its role, system prompt, and tool policy, stored as a markdown file with frontmatter under `<cwd>/.claude/agnz/agents/<name>.md`.
-2. **Spawning** and holding a conversation with it via the MCP `agent_*` tools.
+1. **Defining** a named role — a `.md` file that gives the sub-agent its identity, system prompt, and tool policy.
+2. **Spawning** and talking to it via the `agent_*` MCP tools.
 
-For setup (profiles, where files live, how to inspect workspace state) see the `workspace` skill.
+For setup (profiles, data paths) see the `workspace` skill.
 
-## Why delegate at all
+## When to delegate
 
-A sub-agent's intermediate tool calls (Read, Grep, Edit…) run inside its own loop and **do not consume parent context**. Only the final summary comes back. Delegate when:
+A sub-agent's intermediate tool calls do **not** consume parent context — only its final summary comes back. Delegate when:
 
-- The work is read-heavy (bulk file reads, grep sweeps, "find everywhere X is used")
-- The work is mechanically repetitive (same edit across many files, rename refactoring)
-- Two investigations should run in parallel (sub-agents are concurrent via `detach: true`)
+- The work is read-heavy (bulk file reads, grep sweeps)
+- The work is mechanically repetitive (same edit pattern across many files)
+- Two tasks can run in parallel (`detach: true`)
 
-Avoid delegation when the work needs deep reasoning — local models are useful but limited.
+Avoid delegation when the work needs deep reasoning — local models are limited.
 
 ## Quick path — define and spawn
 
-**Step 1: define a role.** Create `<cwd>/.claude/agnz/agents/researcher.md`:
+### Step 1 — create the agent file
+
+Agent files live at:
+```
+<cwd>/.claude/agnz/agents/<name>.md
+```
+
+Minimal example — create `<cwd>/.claude/agnz/agents/researcher.md`:
 
 ```markdown
 ---
 name: researcher
 profile: lmstudio-devstral
-description: >
-  Read-heavy code investigation. Bulk reads, grep sweeps, summaries.
+description: Read-heavy code investigation. Bulk reads, grep sweeps, summaries.
 tools:
   edit_file: deny
   write_file: deny
 ---
 
-You are a research sub-agent. Investigate code and produce concise,
-factual summaries. You do not modify files. When you finish, reply
-with a one-paragraph summary of what you found.
+Investigate code and produce concise, factual summaries.
+Do not modify files. Finish with a one-paragraph summary.
 ```
 
-**Step 2: spawn.** Call `agent_start` with `agent: "researcher"`:
+### Step 2 — spawn
 
 ```
-agent_start({ cwd: "/abs/path", agent: "researcher" })
-  → { thread_id: "abc...", profile: "lmstudio-devstral", policy: {...}, agent: "researcher" }
+agent_start({ cwd: "/abs/path/to/project", agent: "researcher" })
+→ { thread_id: "abc...", profile: "lmstudio-devstral", policy: {...} }
 ```
 
-**Step 3: send a task.** Sync by default — blocks until done or paused:
+### Step 3 — send a task
 
 ```
-agent_send({ thread_id: "abc...", message: "Summarize how request logging works in this repo." })
-  → { status: "final", content: "Request logging is handled by...", ... }
+agent_send({ thread_id: "abc...", message: "Summarise how request logging works." })
+→ { status: "final", content: "Request logging is handled by..." }
 ```
 
-That's it for the happy path. The sections below cover the details.
+## Agent file — frontmatter fields
 
-## Defining an agent role
+| Field | Required | Type | Notes |
+|---|---|---|---|
+| `name` | yes | `[a-z][a-z0-9_-]*` | Unique in the workspace. Used in mailbox addressing. |
+| `profile` | yes | string | Must match a profile in `~/.claude/agnz/profiles.json`. |
+| `description` | yes | string | How Parent Claude picks this role. **Be specific** — vague descriptions route nothing. |
+| `tools` | no | map | Per-tool override on top of the profile's policy. Profile is the upper bound: the agent can only restrict, never expand. |
+| `temperature` | no | number | Overrides the profile's temperature for this role. |
+| `maxTurns` | no | integer | Overrides the profile's maxTurns. |
+| `skills` | no | list | Allowlist of project-local skills the agent may load via `use_skill`. If absent, all skills are available. |
 
-Full field reference, policy-merge rules, and several example definitions (researcher / editor / tester) are in [references/defining.md](references/defining.md). Consult that when creating a new role or debugging why a role's effective policy looks wrong.
+**Critical rule:** The profile's `defaultPolicy` is the ceiling. Setting `edit_file: allow` in an agent def when the profile says `edit_file: ask` has no effect — `ask` wins. To unlock a tool, update the profile first.
 
-The single most important rule to remember inline: **the profile is the upper bound of the tool policy.** An agent definition can only *restrict* further — if the profile says `edit_file: ask` and the agent says `edit_file: allow`, the effective decision is still `ask` (strictest wins, deny > ask > allow). The `workspace` skill's reference has the profile side; [references/defining.md](references/defining.md) has the agent side.
-
-## Holding a conversation — the lifecycle
-
-`agnz` exposes six MCP tools, all prefixed `agent_`:
+## The six MCP tools
 
 | Tool | When |
 |---|---|
-| `agent_start` | Create a thread locked to a cwd. Returns a `thread_id`. |
-| `agent_send` | Give the sub-agent a task or a follow-up. Sync by default. |
+| `agent_start` | Create a thread. Returns `thread_id`. |
+| `agent_send` | Send a task. Sync by default — blocks until done or paused. |
 | `agent_approve` | Resolve an approval pause (sub-agent wants to run a gated tool). |
 | `agent_answer` | Resolve a question pause (sub-agent called `ask_user`). |
 | `agent_wait` | Block for the next event on a detached thread. |
-| `agent_stop` | End a live thread. Transcripts persist. |
+| `agent_stop` | End a thread. Transcripts persist. |
 
-**There is no `agent_status` or `agent_list_threads`.** To check current state, `Read` the files under `<cwd>/.claude/agnz/threads/` directly — the `workspace` skill shows the layout.
+**There is no `agent_status` or `agent_list_threads`.** Read `<cwd>/.claude/agnz/threads/*.meta.json` directly.
 
-### The three outcomes of a send
+### The three outcomes of agent_send
 
-Any `agent_send` / `agent_approve` / `agent_answer` call returns one of:
+1. **`status: "final"`** — sub-agent finished. Round is over.
+2. **`status: "awaiting_input"`, `kind: "approval"`** — sub-agent wants to run a gated tool. Resolve with `agent_approve(thread_id, tool_call_id, decision: "allow"|"deny", persist?: true)`. Use `persist: true` to avoid repeated pauses for the same tool.
+3. **`status: "awaiting_input"`, `kind: "question"`** — sub-agent called `ask_user`. Resolve with `agent_answer(thread_id, tool_call_id, answer: "...")`.
 
-1. **`status: "final"`** — the sub-agent finished its turn with a plain text answer. The round is over.
-2. **`status: "awaiting_input"`, `kind: "approval"`** — the sub-agent wants to run a tool whose policy is `ask` (typically `edit_file` or `write_file`). Resolve with `agent_approve(thread_id, tool_call_id, decision: "allow"|"deny", persist?: true)`. Setting `persist: true` upgrades the tool to `allow` for the rest of the thread, avoiding repeated pauses on every subsequent edit.
-3. **`status: "awaiting_input"`, `kind: "question"`** — the sub-agent called `ask_user` because it genuinely cannot decide on its own. Resolve with `agent_answer(thread_id, tool_call_id, answer: "...")`.
-
-Both pause kinds block the sub-agent until resolution. There is no timeout — a paused thread stays paused indefinitely.
-
-For the full lifecycle including error recovery, the `detach` + `agent_wait` concurrency pattern, and how messages/mailboxes fit in, see [references/lifecycle.md](references/lifecycle.md).
-
-## Concurrency — running two sub-agents at once
+## Concurrency
 
 ```
 agent_start A → thread_A
@@ -103,17 +106,18 @@ agent_wait(A) → outcome_A
 agent_wait(B) → outcome_B
 ```
 
-Node's event loop gives real parallelism while the sub-agents await their respective LLM endpoints. Two agents finish in roughly the time one would take. Patterns and trade-offs in [references/lifecycle.md](references/lifecycle.md).
+Node's event loop gives real parallelism. Two agents finish in roughly the time one would take.
 
 ## Common pitfalls
 
-- **Vague `description` on an agent definition.** It is *the* field Parent Claude uses to decide which role to spawn for which task. "Helper agent" routes nothing; "Read-heavy code investigation; bulk reads, grep sweeps, summaries of large modules" routes well.
-- **Assuming the agent def can unlock a tool.** It cannot. Upgrade the profile to enable more capabilities.
-- **Editing an agent file while a thread is running.** The thread keeps the definition it was spawned under (snapshotted on start) — start a fresh thread to pick up the new version.
-- **Using MCP calls to poll state.** Read the files directly with Read/Glob/Grep. The MCP surface is intentionally small.
+- **Vague description.** The description is how the right role gets picked. "Helper" routes nothing; "Read-heavy code investigation, no file writes" routes well.
+- **Trying to expand tool policy from an agent def.** Only the profile can grant access. The agent def can only restrict.
+- **Editing an agent file while a thread runs.** The thread uses a snapshot taken at `agent_start` — edits need a fresh thread.
 
-## Additional resources
+## Reference files
 
-- **[references/defining.md](references/defining.md)** — full frontmatter field reference, the tool-policy merge model with worked examples, and three complete example roles (researcher, editor, tester).
-- **[references/lifecycle.md](references/lifecycle.md)** — full MCP tool reference (all six tools with signatures), the three-outcomes model in depth, the detach + wait concurrency pattern, error recovery, and agent-to-agent messaging via `send_message` and `messages.jsonl`.
-- **[references/orchestration.md](references/orchestration.md)** — when to delegate vs. do it yourself, how to pick an agent, how to write a task brief, handling outcomes and pauses, parallel runs.
+For deeper content, read the file using the base directory shown in the skill header:
+
+- **`references/defining.md`** — full frontmatter spec, the tool-policy merge model with worked examples, three complete example roles (researcher / editor / tester), snapshot-on-spawn semantics.
+- **`references/lifecycle.md`** — full MCP tool signatures, error recovery, the detach + wait pattern in depth, agent-to-agent messaging via `send_message`.
+- **`references/orchestration.md`** — when to delegate vs. do it yourself, how to write a task brief, handling outcomes and pauses, parallel run patterns.

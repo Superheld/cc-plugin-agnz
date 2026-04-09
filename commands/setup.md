@@ -5,7 +5,7 @@ allowed-tools: Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/companion.mjs:*), AskUser
 model: haiku
 ---
 
-Profile management for the **agnz** plugin. Profiles are named `{baseUrl, apiKey, model, ...}` bundles stored in `$AGNZ_DATA_DIR/profiles.json` (default `~/.claude/agnz/profiles.json`, with a transitional read-fallback to `~/.local/share/agnz/profiles.json` for 0.3.x users). The agent uses the *active* profile when a thread is started without specifying one.
+Profile management for the **agnz** plugin. Profiles are named `{baseUrl, apiKey, model, ...}` bundles stored in `~/.claude/agnz/profiles.json` (override with `$AGNZ_DATA_DIR`). The agent uses the *active* profile when a thread is started without specifying one.
 
 ## Sub-commands
 
