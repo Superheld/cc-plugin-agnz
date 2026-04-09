@@ -79,7 +79,7 @@ WHEN NOT TO DELEGATE: quick one-liners you can do in one tool call, tasks that n
 
 AGENT DEFINITIONS: if the project has .claude/agnz/agents/*.md files, read them first. Each file describes a named role (researcher, editor, tester…) with a system prompt and tool policy. Pick the agent whose description matches the task, then pass agent: "<name>" to agent_start. Without a definition, the sub-agent runs with a generic prompt.
 
-WHAT THE SUB-AGENT CAN DO: inside its sandbox it has list_dir, read_file, grep, edit_file, write_file, bash, ask_user, send_message. Locked to a single cwd. edit_file/write_file/bash are gated by default — the sub-agent pauses and you approve via agent_approve (persist=true to auto-allow for the rest of the thread).
+WHAT THE SUB-AGENT CAN DO: inside its sandbox it has list_dir, read_file, grep, edit_file, write_file, bash, ask_user, send_message, use_skill. Locked to a single cwd. edit_file/write_file/bash are gated by default — the sub-agent pauses and you approve via agent_approve (persist=true to auto-allow for the rest of the thread). use_skill lets the agent discover and load project-local skills from <cwd>/.claude/skills/.
 
 WORKSPACE LAYOUT: per-project state at <cwd>/.claude/agnz/. Read workspace.json, threads/*.meta.json, and the messages.jsonl log with your own Read/Glob/Grep — no MCP call needed. MCP tools are for live process operations only (start, send, approve, answer, wait, stop).
 
