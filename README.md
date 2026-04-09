@@ -117,14 +117,7 @@ The per-project layout is co-located with other Claude Code project state under 
 
 ## Where this is going
 
-The design trajectory is captured in four ADRs under [`docs/adr/`](./docs/adr/). Only ADR 0001 has been partially implemented on this branch (the data-dir split, workspace store, thread index, and MCP shrink). The rest are designed but not yet built.
-
-- **[ADR 0001 — Workspace-first architecture.](./docs/adr/0001-workspace-first-architecture.md)** Workspace as a directory under `<cwd>/.claude/agnz/`. MCP shrinks to process lifecycle. Parent reads state directly from files. *Partially implemented: user/project dir split, workspace store, thread index, 6-tool MCP surface.*
-- **[ADR 0002 — Communication: mailboxes and events.](./docs/adr/0002-communication-mailbox-and-events.md)** Per-recipient mailboxes, a `messages.jsonl` durable log, an in-process event bus, and parent notification through `UserPromptSubmit` / `SessionStart` hooks plus OS notifications for urgent traffic. *Implemented in v0.4.0. Sub-agents publish via the new `send_message` tool; mail for each agent is drained at the top of every turn as a synthetic user message. Hook scripts ship under `scripts/hooks/` and are opt-in (not auto-installed).*
-- **[ADR 0003 — Agent definitions.](./docs/adr/0003-agent-definitions.md)** Roles on top of profiles: `.md` files with YAML frontmatter under `<cwd>/.claude/agnz/agents/`, referenced by name at `agent_start` time. *Designed, not implemented.*
-- **[ADR 0004 — Board: mini-scrum for shared work.](./docs/adr/0004-board-mini-scrum.md)** A small kanban board on `workspace.json`, replacing flat todos, with columns, owners, dependencies, a review gate, and a planning-mode flag. *Designed, not implemented.*
-
-There is no `bash` tool today and adding one is intentionally outside the current branch.
+Design decisions are captured as ADRs under [`docs/adr/`](./docs/adr/).
 
 ## Conventions
 
