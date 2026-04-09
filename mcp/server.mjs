@@ -434,7 +434,10 @@ const tools = [
       await threadMgr.stopThread(args.thread_id);
       sandboxes.delete(args.thread_id);
       forget(args.thread_id);
-      return textResult(`thread ${args.thread_id} stopped`);
+      return jsonResult({
+        thread_id: args.thread_id,
+        status: "stopped",
+      });
     },
   },
 
