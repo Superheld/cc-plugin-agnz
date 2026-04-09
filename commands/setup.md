@@ -2,6 +2,7 @@
 description: Configure local-model profiles for the agnz agent (list, add, remove, use, test).
 argument-hint: "list | add <name> | remove <name> | use <name> | test [name]"
 allowed-tools: Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/companion.mjs:*), AskUserQuestion
+model: haiku
 ---
 
 Profile management for the **agnz** plugin. Profiles are named `{baseUrl, apiKey, model, ...}` bundles stored in `$AGNZ_DATA_DIR/profiles.json` (default `~/.claude/agnz/profiles.json`, with a transitional read-fallback to `~/.local/share/agnz/profiles.json` for 0.3.x users). The agent uses the *active* profile when a thread is started without specifying one.

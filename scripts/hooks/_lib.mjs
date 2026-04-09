@@ -45,12 +45,20 @@ export function parseHookInput(raw) {
 
 /**
  * Resolve the agnz workspace dir for a given project cwd. Returns
- * null if the cwd is missing or the workspace does not exist — both
- * are "fast no-op" signals for the hook.
+ * null if the cwd is missing, not absolute, or the workspace does
+ * not exist — all "fast no-op" signals for the hook.
+ *
+ * Claude Code always passes an absolute cwd, but we refuse anything
+ * that is not, both as a cheap sanity check and as defense-in-depth
+ * against a malformed / adversarial hook envelope: `resolve()` on a
+ * relative path would mix in whatever the hook process's cwd happens
+ * to be at invocation time, which is not a path we want to touch.
  */
 export function resolveWorkspace(cwd) {
   if (!cwd || typeof cwd !== "string") return null;
-  const ws = resolve(cwd, ".claude", "agnz");
+  const abs = resolve(cwd);
+  if (abs !== cwd) return null; // reject relative inputs
+  const ws = resolve(abs, ".claude", "agnz");
   if (!existsSync(ws)) return null;
   return ws;
 }
@@ -116,6 +124,13 @@ export function flushStdoutThen(text, then) {
 /**
  * Read unread messages addressed to the parent. Returns an array
  * ordered by id ascending. Missing file → [].
+ *
+ * Cursor comparison is lexicographic (`msg.id > cursor`). This is
+ * correct ONLY because lib/messages-log.mjs allocates ids with a
+ * fixed-width zero-padded counter (m000001, m000002, …) — lexical
+ * order matches numeric order exactly. If the id format ever
+ * changes (wider counter, epoch-millis prefix, uuid), this
+ * comparison must change too.
  */
 export function readUnreadForParent(ws, cursor) {
   const path = resolve(ws, "messages.jsonl");
@@ -156,19 +171,46 @@ export function readWorkspaceFile(ws) {
   }
 }
 
+// Max number of messages to render into Claude's context in a single
+// injection. A burst of 500 unread messages would otherwise inject
+// ~100 KB after per-message truncation. When the cap kicks in we show
+// the MOST recent N (they are most actionable) and add a footer line
+// noting how many were elided — the rest stay in messages.jsonl.
+const MAX_MESSAGES_IN_INJECTION = 20;
+
+// Per-message text truncation cap. Prevents a single oversized message
+// from blowing out the context even when the count is within bounds.
+const MAX_TEXT_LENGTH = 200;
+
 /**
- * Format a message list for stdout injection. Truncates long text to
- * 200 chars (with ellipsis) so a single oversized message cannot blow
- * out the parent's context.
+ * Format a message list for stdout injection. Applies two caps:
+ *   - per-message text truncation (MAX_TEXT_LENGTH)
+ *   - total message count (MAX_MESSAGES_IN_INJECTION)
+ * When the count cap trims the list, the MOST recent N are kept and
+ * an elision footer line is emitted.
  */
 export function formatMessages(messages) {
-  const header = `[agnz] ${messages.length} new message(s) since last interaction:`;
-  const lines = messages.map((m) => {
+  const total = messages.length;
+  const shown =
+    total > MAX_MESSAGES_IN_INJECTION
+      ? messages.slice(total - MAX_MESSAGES_IN_INJECTION)
+      : messages;
+  const elided = total - shown.length;
+
+  const header = `[agnz] ${total} new message(s) since last interaction:`;
+  const lines = shown.map((m) => {
     const text = typeof m.text === "string" ? m.text : "";
-    const short = text.length > 200 ? `${text.slice(0, 199)}…` : text;
+    const short =
+      text.length > MAX_TEXT_LENGTH ? `${text.slice(0, MAX_TEXT_LENGTH - 1)}…` : text;
     return `- ${m.id} ${m.from || "?"} ${m.kind || "?"}: ${short}`;
   });
-  return [header, ...lines].join("\n");
+  const out = [header, ...lines];
+  if (elided > 0) {
+    out.push(
+      `… ${elided} older message(s) elided; see <cwd>/.claude/agnz/messages.jsonl for the full log.`,
+    );
+  }
+  return out.join("\n");
 }
 
 function addressesParent(to) {
