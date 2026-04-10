@@ -53,8 +53,8 @@ mcp/server.mjs             ← 6 agent_* lifecycle tools
     ▼
 lib/loop.mjs               ← LLM ↔ tool loop, persists transcript
     │
-    ├──▶ tools/            (read_file, edit_file, write_file, grep, list_dir,
-    │                       ask_user, send_message, use_skill)
+    ├──▶ tools/            (Read, Edit, Write, Grep, LS, Bash,
+    │                       AskUser, SendMessage, Skill, Close)
     ├──▶ sandbox.mjs       (cwd lock + tiered permission policy)
     ├──▶ agent-defs.mjs    (named roles from <cwd>/.claude/agnz/agents/)
     ├──▶ workspace-store   (<cwd>/.claude/agnz/ — threads, workspace.json)
@@ -127,9 +127,15 @@ Design decisions are captured as ADRs under [`docs/adr/`](./docs/adr/).
 ## Conventions
 
 - **Native Node only.** No npm dependencies in the plugin.
-- **Comments explain *why*, not what.**
+- **Everything is commented.** All modules, functions, and non-obvious lines carry comments — not to explain *what* the code does, but *why* it does it that way. This is the primary mechanism by which a future Claude session understands the codebase without reading ADRs first. If you add or refactor code, add comments; if you remove code, remove its comments.
 - **JSONL for streams, JSON for snapshots.** Thread transcripts are append-only; thread metadata is rewritten in place.
 - **User-wide data survives plugin upgrades.** Per-project data lives with the project.
+
+## ADRs are living documents
+
+The files under [`docs/adr/`](./docs/adr/) are *not* one-time decisions that get archived after implementation. They are the authoritative description of how the system works *right now* — updated whenever the implementation diverges, a tradeoff shifts, or a decision is revisited. An ADR can be amended, partially superseded, or fully replaced by a newer ADR. The current status of each ADR (proposed / implemented / superseded / rejected) is written inside the file itself.
+
+If you change something that an ADR describes, update the ADR.
 
 ## License
 
