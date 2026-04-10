@@ -11,19 +11,23 @@ Parent Claude talks to it over MCP. The sub-agent does the heavy file work — r
 - **Stay in control.** The sub-agent runs inside a sandbox: locked to a single working directory, tiered permissions (read-only by default, mutating tools require approval, shell is denied).
 - **Concurrency for free.** Sub-agents run in parallel via Node's event loop — no workers, no IPC. Two parallel runs measured at ~5.5s vs. ~10s sequential.
 
-## Status (v0.5.0)
+## Status (v0.6.0)
 
-ADRs 0001–0003 and 0005 are implemented. What works today:
+ADRs 0001–0003, 0005, and 0010 are implemented. What works today:
 
-- MCP boot, `tools/list`, the lifecycle-only `agent_*` toolset (6 tools)
-- `agent_start` → `agent_send` → final answer (sub-agent does `list_dir` → `read_file` → response on its own)
-- Approval pause + resume via `agent_approve` (with `persist=true` to upgrade the policy for the rest of the thread)
+- MCP boot, the lifecycle-only `agent_*` toolset (6 tools for agent process control)
+- `agent_start` → `agent_send` → final answer (sub-agent does work independently)
+- Approval pause + resume via `agent_approve` (with `persist=true` to upgrade policy for the rest of the thread)
 - `ask_user` pause + resume via `agent_answer`
 - Detached runs via `agent_send(detach=true)` + `agent_wait`, two parallel sub-agents finishing concurrently
 - Per-project workspace at `<cwd>/.claude/agnz/` with threads, user-wide profiles at `~/.claude/agnz/`
 - **Agent definitions** (ADR 0003) — named roles at `<cwd>/.claude/agnz/agents/<name>.md` with system prompt, profile, tool policy overrides. Pass `agent: "<name>"` to `agent_start`.
-- **Skills** (ADR 0005) — project-local instruction sets at `<cwd>/.claude/skills/<name>/SKILL.md`. Sub-agents load them on demand via `use_skill`. Agent defs can declare a `skills:` allowlist.
-- **Mailbox communication** (ADR 0002) — sub-agents publish messages via `send_message`; parent Claude receives them as hook injections at prompt/session time.
+- **Skills** (ADR 0005) — project-local instruction sets at `<cwd>/.claude/skills/<name>/SKILL.md`. Sub-agents load them on demand via `Skill({action:"load", name:"..."})`. Agent defs can declare a `skills:` allowlist.
+- **Mailbox communication** (ADR 0002) — sub-agents publish messages via `SendMessage`; parent Claude receives them as hook injections at prompt/session time.
+- **Workspace file manager** (ADR 0010) — open files tracked in `thread.openFiles`, injected as per-file synthetic messages before history. `Read` opens, `Close` closes, `Edit`/`Write` keep content current. Scope: files ≤100 KB, configurable limit.
+- **Runtime trace** — per-thread `<thread-id>.trace.jsonl` logs all state changes (file open/close, turn starts) for debugging and observability. One line per event with timestamp.
+- **Close tool** — removes an open file from the workspace context, freeing memory for other files. File is not deleted from disk.
+- **Compression utilities** — `lib/compression.mjs` deduplicates redundant Read/LS/Grep calls in transcript history (Tier-1 context management).
 
 **Zero npm dependencies.** The MCP stdio server is hand-rolled (~150 lines). The plugin ships as pure source — Claude Code copies it to its cache on every install and there is no `npm install` step.
 
