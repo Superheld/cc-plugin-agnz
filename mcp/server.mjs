@@ -130,7 +130,7 @@ const tools = [
   {
     name: "agent_start",
     description:
-      "Create a new conversation thread with the local agent. The agent will operate strictly inside `cwd`. Pass `agent` to spawn a named role from <cwd>/.claude/agnz/agents/<name>.md (ADR 0003) — the role decides which profile, system prompt, and tool policy to use. Without `agent`, falls back to the named `profile` (or active profile), with a generic system prompt.",
+      "Start a sub-agent thread. Pass `agent` with the agent name from ~/.claude/agents/ or <cwd>/.claude/agents/ — the agent definition is loaded automatically and its config (model via mappings, tools, prompt) is applied. Optionally pass `name` to identify the thread.",
     annotations: {
       title: "Start agent thread",
       readOnlyHint: false,
@@ -142,86 +142,79 @@ const tools = [
       type: "object",
       properties: {
         thread_id: { type: "string" },
+        name: { type: ["string", "null"] },
         cwd: { type: "string" },
         profile: { type: "string" },
         model: { type: "string" },
         policy: { type: "object", additionalProperties: { type: "string" } },
-        agent: { type: ["string", "null"] },
+        agent: { type: "string" },
       },
-      required: ["thread_id", "cwd", "profile", "model", "policy"],
+      required: ["thread_id", "cwd", "profile", "model", "policy", "agent"],
     },
     inputSchema: {
       type: "object",
       properties: {
-        cwd: { type: "string", description: "Absolute path to the sandbox root for this thread." },
-        profile: {
+        name: {
           type: "string",
-          description: "Profile name (from /agnz:setup). Defaults to active profile. Ignored when `agent` is set — the agent definition picks its own profile.",
+          description: "Optional name to identify this thread.",
         },
         agent: {
           type: "string",
-          description: "Optional agent definition name (loaded from <cwd>/.claude/agnz/agents/<name>.md). Overrides `profile` and `system_prompt` when set.",
-        },
-        system_prompt: {
-          type: "string",
-          description: "Optional thread-level system prompt override. Ignored when `agent` is set.",
+          description: "Agent name (from ~/.claude/agents/ or <cwd>/.claude/agents/). The agent definition is loaded and its config (model, tools, prompt) is used automatically.",
         },
       },
-      required: ["cwd"],
+      required: ["agent"],
     },
     async handler(args) {
       try {
+        // cwd comes from the workspace this MCP server is serving.
+        // In practice Claude Code sets CWD when invoking the MCP server,
+        // or we fall back to reading the workspace from an environment variable.
+        const cwd = process.env.AGNZ_CWD || process.cwd();
+
         let agentDef = null;
         let profileName = args.profile;
 
-        if (args.agent) {
-          try {
-            agentDef = await loadAgentDef(args.cwd, args.agent);
-          } catch (err) {
-            return errorResult(err.message);
-          }
-          // Map model identifier from agent def to profile name via workspace mappings.
-          // The resolved profile carries the actual model (whatever the endpoint serves).
-          // Fall back to explicit `profile` arg, then to agent def's model field.
-          const store = createWorkspaceStore(args.cwd);
-          const modelIdentifier = agentDef.model || "_default";
-          profileName = await store.resolveModelToProfile(modelIdentifier);
-          if (!profileName) {
-            profileName = args.profile;
-          }
+        try {
+          agentDef = await loadAgentDef(cwd, args.agent);
+        } catch (err) {
+          return errorResult(err.message);
         }
+
+        // Map model identifier from agent def to profile name via workspace mappings.
+        // The resolved profile carries the actual model (whatever the endpoint serves).
+        const store = createWorkspaceStore(cwd);
+        const modelIdentifier = agentDef.model || "_default";
+        profileName = await store.resolveModelToProfile(modelIdentifier);
 
         const profile = await profileStore.get(profileName);
         if (!profile) {
           return errorResult(
-            profileName
-              ? `no profile named '${profileName}'. Run /agnz:setup add.`
-              : "no active profile configured. Run /agnz:setup add.",
+            `no profile named '${profileName}'. Run /agnz:setup add.`,
           );
         }
 
         // Effective policy: profile is the upper bound; agent def may
         // restrict via tools (whitelist) and/or disallowedTools (blacklist).
-        const effectivePolicy = agentDef
-          ? mergeEffectivePolicy(profile.defaultPolicy, agentDef)
-          : profile.defaultPolicy;
+        const effectivePolicy = mergeEffectivePolicy(profile.defaultPolicy, agentDef);
 
         const thread = await threadMgr.createThread({
-          cwd: args.cwd,
+          cwd,
           profile: profile.name,
           policy: effectivePolicy,
-          systemPrompt: args.system_prompt || null,
-          agentDef: agentDef || null,
+          agentDef,
+          name: args.name || null,
         });
         sandboxFor(thread); // fail fast on bad cwd
-        log("info", { event: "thread_started", thread_id: thread.id, cwd: thread.cwd, profile: profile.name, model: profile.model, agent: agentDef?.name || null }, "agnz.mcp");
+        log("info", { event: "thread_started", thread_id: thread.id, cwd: thread.cwd, profile: profile.name, model: profile.model, agent: agentDef.name }, "agnz.mcp");
         return jsonResult({
           thread_id: thread.id,
+          name: args.name || null,
           cwd: thread.cwd,
           profile: profile.name,
           model: profile.model,
           policy: thread.policy,
-          agent: agentDef?.name || null,
+          agent: agentDef.name,
         });
       } catch (err) {
         log("error", { event: "thread_start_failed", error: err.message }, "agnz.mcp");
