@@ -2,8 +2,8 @@
 
 - **Status:** Active (living document)
 - **Date:** 2026-04-08
-- **Updated:** 2026-04-10
-- **Branch:** `refactor/workspace-first-architecture`
+- **Updated:** 2026-04-11
+- **Branch:** `feat/cc-agent-compatibility`
 - **Depends on:** [ADR 0001](./0001-workspace-first-architecture.md), [ADR 0002](./0002-communication-mailbox-and-events.md)
 
 ## Context
@@ -16,18 +16,20 @@ We also want the team to feel like Claude Code's native agent system without *be
 
 ## Decision
 
-Agent definitions are **files** in the project workspace, separate from profiles, and referenced by name.
+agnz loads agent definitions from **Claude Code's standard agent locations**. No separate agnz-specific agent directory exists. This means agents defined for CC are immediately available to agnz without duplication.
 
-### 1. Location
+### 1. Location (CC standard)
 
 ```
-<cwd>/.claude/agnz/agents/
-├── researcher.md
-├── editor.md
-└── tester.md
+~/.claude/agents/              ← user-wide (global agents)
+<cwd>/.claude/agents/          ← project agents
 ```
 
-Per-project only. No user-wide fallback — if you want a library of reusable agents, version them in a template repo and copy them in. This is a deliberate choice to keep agents tightly coupled to the project they serve, matching how a team's roles are shaped by the work they are hired to do.
+agnz follows the same lookup order as CC:
+1. Project agents (`<cwd>/.claude/agents/`) shadow user agents with the same name.
+2. User agents (`~/.claude/agents/`) are the fallback.
+
+No `agents/` subdirectory under `.claude/agnz/` exists. All agent loading goes through the CC paths.
 
 ### 2. File format: Markdown with YAML frontmatter
 
@@ -78,10 +80,12 @@ message.
 | `skills` | no | List of skill names the agent may load on demand from `<cwd>/.claude/skills/<name>/SKILL.md`. A catalog is injected into the system prompt at startup (see ADR 0006). |
 | `temperature` | no | Override the profile's temperature for this role. |
 | `maxTurns` | no | Override the profile's `maxTurns`. |
+| `prompt` | no | Inline system prompt (alternative to markdown body). CC-compatible. |
+| `initialPrompt` | no | Initial prompt injected at session start. CC-compatible. |
 
 Tool names are **PascalCase** matching Claude Code's built-in tool naming, so agent definition files can be shared between CC and agnz without modification.
 
-**Markdown body = the system prompt.** The entire body below the frontmatter is concatenated with the default agnz system prompt (sandbox rules, tool discipline, mailbox instructions) to form the sub-agent's final system message.
+**System prompt resolution:** If `prompt:` is set in frontmatter, it is used as the agent's system prompt. Otherwise, the markdown body below the frontmatter is used. Both are concatenated with the default agnz system prompt (sandbox rules, tool discipline, mailbox instructions) to form the sub-agent's final system message.
 
 ### 3. Profile versus agent definition
 
@@ -102,12 +106,41 @@ Clear separation of concerns:
 Agent definitions are loaded **lazily, at thread-start time**:
 
 1. `agent_start(cwd, agent: "researcher")`.
-2. The server resolves `<cwd>/.claude/agnz/agents/researcher.md`.
+2. The server resolves the agent file from CC standard locations (project first, then user):
+   - `<cwd>/.claude/agents/researcher.md` (project scope)
+   - `~/.claude/agents/researcher.md` (user scope)
 3. Parses frontmatter + body. Validates schema (name present, profile resolvable, tools keys known).
 4. Looks up the referenced profile in the user-wide profile store.
-5. Merges: profile's `defaultPolicy` is the base; agent's `tools`/`disallowedTools` override per key. Other fields (temperature, maxTurns) override the profile's values when present.
-6. System prompt for the sub-agent: `[base agnz system prompt] + [skills catalog if skills: is set] + [agent.body]`.
-7. Thread meta stores a **snapshot** of the resolved agent definition, not just the file path — the thread continues with the definition it was spawned under regardless of later edits to the file.
+5. Resolves the model via workspace model mappings (see §4a).
+6. Merges: profile's `defaultPolicy` is the base; agent's `tools`/`disallowedTools` override per key. Other fields (temperature, maxTurns) override the profile's values when present.
+7. System prompt for the sub-agent: `[sandbox-framing] + [tool restrictions] + [skills catalog if skills: is set] + [agent prompt:]`.
+8. Thread meta stores a **snapshot** of the resolved agent definition, not just the file path — the thread continues with the definition it was spawned under regardless of later edits to the file.
+
+### 4a. Model-to-profile mapping
+
+CC agent definitions may specify a `model:` field with CC identifiers (`opus`, `sonnet`, `haiku`) or arbitrary strings. These are mapped to **profile names** via `workspace.json`. The profile carries the actual endpoint configuration and the current model string (whatever the endpoint is serving).
+
+```json
+{
+  "modelProfileMappings": {
+    "opus": "lmstudio-large",      // agent with model: opus → profile lmstudio-large
+    "sonnet": "lmstudio-devstral", // agent with model: sonnet → profile lmstudio-devstral
+    "_default": "lmstudio-default"  // fallback profile
+  }
+}
+```
+
+**Resolution order:**
+1. `modelProfileMappings[agentModel]` — explicit mapping to profile name
+2. `modelProfileMappings["_default"]` — fallback profile name
+3. original model string — treat as profile name (forward compatible)
+
+**Why map to profiles, not directly to models?**
+- When LM Studio loads a different model, only the profile needs updating — all agents that use that profile automatically get the new model.
+- No need to update mappings across all workspaces when models change.
+- The profile carries endpoint details (baseUrl, apiKey) that the agent shouldn't need to know about.
+
+The resolved profile provides `baseUrl`, `apiKey`, and `model` for the LLM API call. If `modelProfileMappings` is absent or a key is unmapped, the model identifier is used directly as the profile name.
 
 ### 5. Tool policy: profile is the upper bound
 
@@ -195,6 +228,7 @@ The compact format injected by the hook is `<name> — <first line of descriptio
 - **No inheritance between agents.** Copy and modify if you need variants.
 - **No runtime reload.** Editing an agent file mid-thread does not affect the running thread.
 - **No team composition files.** A team is all agents you have spawned in the workspace.
+- **No separate agnz agent directory.** Agents live in CC's standard locations only. This avoids duplication and keeps agnz compatible with CC's agent ecosystem.
 
 ## Consequences
 
@@ -202,33 +236,37 @@ The compact format injected by the hook is `<name> — <first line of descriptio
 
 - **Clean separation of "where" and "what."** Swapping endpoints does not disturb roles.
 - **Agent files are reviewable and versionable.** Plain text, diff cleanly.
-- **Ergonomic parity with Claude Code's native agents.** Users who know CC's `.claude/agents/*.md` feel instantly at home.
+- **Full CC compatibility.** Agents defined for CC work in agnz without modification.
+- **User-wide agents shared across projects.** A great `researcher` agent at `~/.claude/agents/` is available in every project.
+- **Project agents shadow user agents.** Teams can define project-specific agents that override shared ones.
 - **Parent routing is data-driven, not hard-coded.** Add a new agent file and Claude can use it immediately.
 - **Profiles stay simple.** Pure endpoint description.
 
 ### Negative
 
 - **Description quality matters.** A sloppy `description` leads to Claude picking the wrong agent.
-- **Per-project only means no sharing.** A great `researcher` for project A must be copied to project B manually.
 - **The tool policy asymmetry can confuse users.** "I added `Edit` to `tools:` but it still can't edit files" — because the profile denies it. Documentation must call this out clearly.
 - **Snapshot-on-spawn means stale agents keep running.** Fixing a bug in a running agent's prompt only takes effect for newly-spawned threads.
 
 ## Interaction with ADR 0001 and 0002
 
-ADR 0001 established the workspace directory. This ADR adds:
+ADR 0001 established the workspace directory. This ADR defines the agent lookup paths (CC standard, not under `.claude/agnz/`):
 
 ```
-<cwd>/.claude/agnz/
-├── workspace.json
-├── messages.jsonl                 (0002)
-├── cursors/                       (0002)
-├── agents/                        ← this ADR
-│   ├── researcher.md
-│   └── ...
-├── threads/
-│   └── <id>.meta.json             ← extended: `agentDef` snapshot field
-└── scratch/
+<cwd>/.claude/
+├── agents/                        ← CC standard location (project)
+│   └── <name>.md
+├── agnz/
+│   ├── workspace.json              ← contains modelMappings (this ADR §4a)
+│   ├── messages.jsonl            (0002)
+│   └── threads/
+│       └── <id>.meta.json         ← extended: `agentDef` snapshot, `model`
+└── skills/                       ← CC standard skills location (0005)
+    └── <name>/
+        └── SKILL.md
 ```
+
+User-wide agents live at `~/.claude/agents/`.
 
 ---
 
@@ -263,7 +301,7 @@ Options under consideration:
 
 ### User-wide agent library
 
-A fallback lookup at `~/.claude/agnz/agents/` before `<cwd>/.claude/agnz/agents/`. Lets you maintain a set of reusable roles (a generic `researcher`, a `summariser`) without copying files per project. Per-project definitions shadow user-wide ones by name.
+**Implemented via CC standard paths.** User agents live at `~/.claude/agents/`, project agents at `<cwd>/.claude/agents/`. Project agents shadow user agents with the same name. No separate agnz directory exists.
 
 ### Role-based message routing
 
