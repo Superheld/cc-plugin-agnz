@@ -11,21 +11,21 @@ Parent Claude talks to it over MCP. The sub-agent does the heavy file work — r
 - **Stay in control.** The sub-agent runs inside a sandbox: locked to a single working directory, tiered permissions (read-only by default, mutating tools require approval, shell is denied).
 - **Concurrency for free.** Sub-agents run in parallel via Node's event loop — no workers, no IPC. Two parallel runs measured at ~5.5s vs. ~10s sequential.
 
-## Status (v0.7.0)
+## Status (v0.8.0)
 
 ADRs 0001–0003, 0005, and 0009 are implemented. What works today:
 
 - MCP boot, the lifecycle-only `agent_*` toolset (6 tools for agent process control)
 - `agent_start(agent: "<name>")` → `agent_send` → final answer (sub-agent does work independently)
-- Approval pause + resume via `agent_approve` (with `persist=true` to upgrade policy for the rest of the thread)
+- Approval pause + resume via `agent_approve` (session-scoped)
 - `ask_user` pause + resume via `agent_answer`
 - Detached runs via `agent_send(detach=true)` + `agent_wait`, two parallel sub-agents finishing concurrently
 - Per-project workspace at `<cwd>/.claude/agnz/` with threads, user-wide profiles at `~/.claude/agnz/`
 - **Agent definitions** (ADR 0003) — any Claude Code agent can be started as agnz sub-agent. Just pass `agent: "<name>"` to `agent_start` — the agent's config (model, tools, prompt) is loaded automatically from CC's agent definitions.
 - **modelProfileMappings** — map agent model identifiers to profile names in `workspace.json`. When LM Studio loads a different model, only the profile needs updating.
+- **Permissions** — tools: agent's tools/disallowedTools define access. Bash: workspace.json allow/deny lists + session approvals.
 - **Skills** (ADR 0005) — project-local instruction sets at `<cwd>/.claude/skills/<name>/SKILL.md`. Sub-agents load them on demand via `Skill({action:"load", name:"..."})`. Agent defs can declare a `skills:` allowlist.
 - **Mailbox communication** (ADR 0002) — sub-agents publish messages via `SendMessage`; parent Claude receives them as hook injections at prompt/session time.
-- **Bash command allowlists** (ADR 0009 §3) — approved and denied Bash commands stored per-agent in `workspace.json`. Commands in `allow` run without prompting; commands in `deny` are blocked immediately.
 - **Runtime trace** — per-thread `<thread-id>.trace.jsonl` logs all state changes (turn starts) for debugging and observability. One line per event with timestamp.
 
 **Zero npm dependencies.** The MCP stdio server is hand-rolled (~150 lines). The plugin ships as pure source — Claude Code copies it to its cache on every install and there is no `npm install` step.
