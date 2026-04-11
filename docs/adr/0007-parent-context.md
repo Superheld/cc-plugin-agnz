@@ -2,6 +2,7 @@
 
 - **Status:** Proposed (roadmap)
 - **Date:** 2026-04-09
+- **Updated:** 2026-04-10
 - **Depends on:** [ADR 0001](./0001-workspace-first-architecture.md), [ADR 0002](./0002-communication-mailbox-and-events.md), [ADR 0003](./0003-agent-definitions.md)
 
 ## Context
@@ -35,6 +36,39 @@ The `SessionStart` and `UserPromptSubmit` hooks (ADR 0002) already inject unread
 - Any agents defined in `.claude/agnz/agents/` — name and description
 
 This summary is compact (a few lines per item) and tells Claude what the team is doing *right now* without requiring a manual `Read` of every file. The hook only injects when the workspace exists and has meaningful state — an idle or non-existent workspace produces no output.
+
+#### Workspace summary: concrete format
+
+The summary is injected as a fenced block so Claude can parse it reliably and it stands out from normal hook output:
+
+```
+[agnz workspace: <workspace-name>]
+mode: executing | planning
+
+agents (<n>):
+  <name> — <first sentence of description>
+  <name> — <first sentence of description>
+
+threads (<n> active):
+  <name>:<short-id> — <status>  (last: <ISO timestamp>)
+  <name>:<short-id> — running   (started: <ISO timestamp>)
+
+board: <n> in-progress, <n> in-review  → read .claude/agnz/workspace.json for detail
+```
+
+**Rules:**
+
+- `agents` block: present when `<cwd>/.claude/agnz/agents/` contains at least one `.md` file. Each line is `<name> — <first sentence of description:>`. The first sentence must be self-contained (see ADR 0003 §7).
+- `threads` block: present when at least one thread exists in `.claude/agnz/threads/`. Shows all threads whose status is not `stopped` (i.e. `idle`, `running`, `awaiting_input`, `error`). `<short-id>` is the first 8 characters of the thread UUID. Stopped threads are omitted to keep the summary actionable.
+- `board` line: present only when ADR 0004 is implemented. Omitted until then.
+- The entire block is omitted when the workspace directory does not exist or is empty (fast no-op for non-agnz projects).
+
+**Injection point:**
+
+- `SessionStart` hook — injects the full workspace summary (agents + threads).
+- `UserPromptSubmit` hook — injects only if something changed since last inject: new threads, status changes, or new unread messages. If nothing changed, omits the workspace summary (unread messages are always injected regardless).
+
+The goal is that Claude always knows which agents exist and what they do without needing to manually `Glob` or `Read` agent files. The thread status tells Claude whether it needs to check in on a running agent. The summary is not a replacement for reading the files — it is a routing prompt that tells Claude when reading files is worth it.
 
 **Layer 3 — Instructions: MCP INSTRUCTIONS field**
 

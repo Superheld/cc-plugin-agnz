@@ -16,6 +16,7 @@ import { resolveUserDir } from "../lib/data-dir.mjs";
 import { loadAgentDef, mergeEffectivePolicy } from "../lib/agent-defs.mjs";
 import { kick, wait, forget } from "../lib/run-tracker.mjs";
 
+
 // ---- data dirs ----
 //
 // ADR 0001: two roots. userDir holds profiles (and, in the future,
@@ -638,8 +639,6 @@ async function recoverStaleRuns() {
       log("notice", { event: "stale_runs_recovered", count: recovered }, "agnz.mcp");
     }
   } catch (err) {
-    // Don't fail boot just because recovery had a hiccup; log to stderr
-    // (which CC captures into plugin logs).
     process.stderr.write(`agnz: recovery scan failed: ${err.message}\n`);
   }
 }

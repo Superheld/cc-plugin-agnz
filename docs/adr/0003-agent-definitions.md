@@ -2,7 +2,7 @@
 
 - **Status:** Active (living document)
 - **Date:** 2026-04-08
-- **Updated:** 2026-04-09
+- **Updated:** 2026-04-10
 - **Branch:** `refactor/workspace-first-architecture`
 - **Depends on:** [ADR 0001](./0001-workspace-first-architecture.md), [ADR 0002](./0002-communication-mailbox-and-events.md)
 
@@ -119,6 +119,33 @@ An agent definition's tool lists may **restrict** but not **expand** what the pr
 
 This is deliberate. The profile is the user's trust setting for the endpoint (what can this model's process touch at all?), and an agent role is only ever a further narrowing of that.
 
+#### 5a. Known confusion: three overlapping layers
+
+In the current implementation, tool access is determined by three mechanisms that interact without a single clear precedence rule:
+
+1. `sandbox.defaultPolicy()` — hardcoded baseline (Read/Grep/LS → allow, Edit/Write/Bash → ask)
+2. Profile `defaultPolicy` — can override sandbox defaults per tool
+3. Agent def `tools:` (allowlist) + `disallowedTools:` (denylist) — role-level overrides
+
+The `tools:` / `disallowedTools:` duality is particularly confusing: `tools:` means "expose only these in the schema", `disallowedTools:` means "deny these regardless". A tool that appears in neither list falls through to the profile defaultPolicy. Mixing both lists in one agent def produces ambiguous results.
+
+**Until ADR 0009 presets are implemented:** use `disallowedTools:` to deny specific tools, or use `tools:` for strict allowlist semantics — but not both. ADR 0009 (presets + tool_config) supersedes this with a cleaner model where a preset selects the base tool set and a single `tools:` map overrides per-tool policy.
+
+#### 5b. Bash: sandbox bypass
+
+`Bash` is the only tool that does **not** honour the sandbox path restriction.
+
+The sandbox's `resolvePath()` restricts `LS`, `Read`, `Grep`, `Edit`, and `Write` to the cwd root — if a path escapes the root, the tool call is rejected. `Bash` does not go through `resolvePath`. It sets the shell working directory to cwd, but a command like `cat /etc/passwd` or `cat ~/.claude/profiles.json` succeeds regardless of the sandbox root.
+
+Practical consequences:
+
+- **An agent with `Bash: ask` has effective full-filesystem read/write access**, mediated only by Parent Claude approving each call. That is human-gating, not technical sandboxing.
+- **An agent that should be read-only must have `Bash: deny`** — not just `ask`. This is the only way to technically prevent shell-based file access outside the sandbox.
+- The `read-only` preset (ADR 0009) enforces this automatically: `Bash` is not registered in the tool schema at all.
+- Any agent that genuinely needs shell execution should use `tool_config.bash.allowedCommands` (ADR 0009) to restrict which commands are permitted, reducing the blast radius.
+
+**The researcher and similar read-only roles must carry `Bash` in `disallowedTools:` (or use the `read-only` preset) — treating `Bash: ask` as "safe enough" is incorrect.**
+
 ### 6. Concurrency and naming
 
 - **Agent definitions are stateless.** Multiple threads can run the same agent definition simultaneously.
@@ -134,6 +161,33 @@ This is deliberate. The profile is the user's trust setting for the endpoint (wh
 5. Calls `agent_send(thread_id, "<task>")` to kick it off.
 
 The `description` is the single most important field for routing decisions — write it specifically enough that Claude can tell two agents apart.
+
+#### Description field: what makes a good one
+
+The description answers three questions Claude needs for routing:
+- What kind of work does this agent do?
+- What are concrete examples of tasks to delegate to it?
+- What does it explicitly NOT do?
+
+**Good (specific, negative case included):**
+```yaml
+description: >
+  Read-heavy code investigation: bulk file reads, grep sweeps,
+  "find everywhere X is used", module summaries. Does not modify files.
+  Good for: understanding unfamiliar code, finding all call sites,
+  summarising a large module before planning changes.
+```
+
+**Bad (too vague for routing):**
+```yaml
+description: A researcher agent that reads code.
+```
+
+Claude receives agent descriptions via two channels:
+1. **Direct file read** — `Read`/`Glob` on `<cwd>/.claude/agnz/agents/*.md` when it wants the full frontmatter.
+2. **Hook injection** — the `SessionStart` hook (ADR 0007) injects a compact workspace summary at session start that includes agent names and their one-line descriptions, so Claude has baseline routing knowledge without needing to read files first.
+
+The compact format injected by the hook is `<name> — <first line of description>`. This means the first sentence of `description:` must be self-contained and actionable — the rest of the block is detail for when Claude reads the full file.
 
 ### 8. What we are not building in this ADR
 

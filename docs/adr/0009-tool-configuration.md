@@ -1,7 +1,8 @@
 # ADR 0009: Tool configuration — composing the tool set at agent init
 
-- **Status:** Proposed (roadmap)
+- **Status:** Accepted
 - **Date:** 2026-04-09
+- **Updated:** 2026-04-11
 - **Depends on:** [ADR 0003](./0003-agent-definitions.md), [ADR 0006](./0006-mcp-for-agents.md)
 
 ## Context
@@ -59,7 +60,51 @@ tool_config:
 
 The `allowedCommands` filter on `bash` is the most important: it lets a CI agent run `npm test` without being able to `rm -rf` anything. The filter is prefix-based (the command string must start with one of the listed prefixes after trimming) — simple, auditable, no regex injection risk.
 
-### 3. Tool set at `agent_start` (inline override)
+### 3. Bash command allowlists (dynamic approvals)
+
+Every Bash call that would otherwise require approval (`ask` policy) checks a set of command lists before surfacing a pause. These lists live in `workspace.json` under a per-agent namespace, with a `_generic_` fallback for threads started without an agent name.
+
+**Storage in `<cwd>/.claude/agnz/workspace.json`:**
+
+```json
+{
+  "agentCommands": {
+    "_generic_": {
+      "allow": ["git status", "npm test"],
+      "deny": []
+    },
+    "researcher": {
+      "allow": ["grep -r", "find . -name"],
+      "deny": ["rm -rf", "dd if="]
+    },
+    "editor": {
+      "allow": [],
+      "deny": []
+    }
+  }
+}
+```
+
+**Lifetime semantics:**
+
+All entries in `workspace.json` are persistent — they survive MCP server restarts and CC sessions. There is no session-scoped storage (the MCP server is stateless between invocations; threads do not persist their command decisions across restarts).
+
+**Resolution order for every Bash call:**
+
+1. `deny` matches → immediately denied
+2. `allow` matches → immediately executed
+3. no match → pause with approval request
+
+**Approval resolution:**
+
+When the parent calls `agent_approve(thread_id, tool_call_id, decision)`:
+
+- `decision=allow` → command added to `allow` for the current agent
+- `decision=deny` → command added to `deny` for the current agent
+
+The agent name used for storage is `thread.agentDef?.name ?? "_generic_"`. Lists are always stored in workspace.json — no in-memory caching. The agent definition may also declare static `allowedCommands` via `tool_config:` (prefix-based); dynamic approvals layer on top of that.
+
+### 4. Tool set at `agent_start` (inline override)
 
 For one-off customisation without an agent definition file, `agent_start` accepts a `tools` parameter that mirrors the agent def `tools:` map and an optional `preset`:
 
@@ -74,13 +119,13 @@ agent_start({
 
 This is the escape hatch for scripted or programmatic use where writing an agent def file is overkill.
 
-### 4. MCP tools (ADR 0006) follow the same model
+### 5. MCP tools (ADR 0006) follow the same model
 
 MCP tools are registered alongside built-ins and appear in the `tools:` map using the `<server>__<tool>` naming convention. The preset system does not know about MCP tools (they are not part of any preset), so they default to `ask`. The agent def `tools:` map can promote them to `allow` or `deny` them entirely.
 
 `tool_config:` for MCP tools is not supported in V1 — MCP tool configuration is the server's responsibility, not agnz's.
 
-### 5. Schema serialisation: only registered tools appear
+### 6. Schema serialisation: only registered tools appear
 
 Today `registry.toOpenAISchema()` serialises all registered tools into the LLM's `tools` parameter. After this ADR, tools that the preset excludes are never registered in the first place — they do not appear in the schema at all. This is cleaner than registering everything and relying on `deny` to block execution: a `denied` tool that appears in the schema may still be called by the LLM (and then immediately blocked), adding a turn of latency and confusion.
 
