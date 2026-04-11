@@ -11,7 +11,7 @@ Parent Claude talks to it over MCP. The sub-agent does the heavy file work — r
 - **Stay in control.** The sub-agent runs inside a sandbox: locked to a single working directory, tiered permissions (read-only by default, mutating tools require approval, shell is denied).
 - **Concurrency for free.** Sub-agents run in parallel via Node's event loop — no workers, no IPC. Two parallel runs measured at ~5.5s vs. ~10s sequential.
 
-## Status (v0.6.0)
+## Status (v0.6.1)
 
 ADRs 0001–0003, 0005, and 0009 are implemented. What works today:
 
