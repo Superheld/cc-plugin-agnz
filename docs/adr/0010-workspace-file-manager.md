@@ -1,9 +1,15 @@
 # ADR 0010: Workspace file manager — open/close files as context state
 
-- **Status:** Proposed
+- **Status:** Proposed / Deferred
 - **Date:** 2026-04-10
+- **Updated:** 2026-04-11
 - **Depends on:** [ADR 0001](./0001-workspace-first-architecture.md), [ADR 0003](./0003-agent-definitions.md)
 - **Supersedes:** rolling-compression approach from `lib/compression.mjs` (retained as fallback, not the primary strategy)
+
+> **2026-04-11 — Deferral note:** Implementation of this ADR is deferred. The goal remains
+> reducing context bloat from file reads, but we do not yet have a reproducible evaluation
+> framework to compare different approaches. See §6 for the deferred decision and open
+> evaluation questions.
 
 ## Context
 
@@ -172,3 +178,49 @@ This prevents runaway context growth when the agent ignores the >80% warning.
   (content in tool result, not in openFiles) for oversized files.
 - **Skill content.** Skills loaded via `Skill({action:"load"})` are also large injected
   blobs. Should they count against the working-memory budget and be closeable? Deferred.
+
+## §6 — Deferred implementation
+
+This ADR describes one concrete approach (per-file workspace with synthetic message injection).
+The problem it solves — context bloat from file reads in long sub-agent runs — is real, but
+we do not yet have a systematic evaluation framework to compare this approach against
+alternatives.
+
+**Decision: no compression implementation until evaluation framework exists.**
+
+Before committing to any single strategy, we need a reproducible test setup that can measure:
+- transcript size over N turns for a given task
+- model output quality (factual accuracy, coherence)
+- latency and token cost
+
+**Candidate strategies to evaluate:**
+
+1. **Workspace model (this ADR)** — file content in synthetic messages, always current,
+   per-file close control. Pro: structural fix, no lossy compression. Con: still injects
+   full file content; large files remain large.
+
+2. **LLM-based distillation** — summarise or extract key facts from file content before
+   injecting. Pro: aggressive token reduction. Con: lossy; summarisation quality varies;
+   extra LLM call per turn.
+
+3. **Memory-tier integration (ADR 0008 Tier 2/3)** — offload stale file content to
+   persistent brain storage, retrieve on demand. Pro: structural memory management. Con:
+   requires brain system to exist first.
+
+4. **Token budget with graceful degradation** — hard cap on injected file content,
+   truncate or drop least-recently-read files. Pro: simple, predictable. Con: may lose
+   context the model still needs.
+
+5. **Provider-side context window** — delegate compression to the LLM provider (if supported).
+   Pro: zero implementation effort. Con: not universally available; behaviour unpredictable.
+
+**Evaluation setup needed:**
+
+- A reproducible multi-file task (e.g. "add feature X to project Y") that can be run against
+  multiple model endpoints with consistent prompts.
+- Metrics: transcript token count per turn, final output quality scored manually or via a
+  judge model.
+- Baseline: current behaviour (full file content in tool results) as reference point.
+
+This ADR remains as a living design document. When an evaluation system exists, the
+decision will be revisited and the winning strategy will be implemented.
