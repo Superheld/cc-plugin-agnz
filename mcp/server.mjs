@@ -130,7 +130,7 @@ const tools = [
   {
     name: "agent_start",
     description:
-      "Start a sub-agent thread. Pass `agent` with the agent name from ~/.claude/agents/ or <cwd>/.claude/agents/ — the agent definition is loaded automatically and its config (model via mappings, tools, prompt) is applied. Optionally pass `name` to identify the thread.",
+      "Start a sub-agent thread. Pass `agent` with the agent name — the agent definition is loaded automatically and its config (model via mappings, tools, prompt) is applied. Optionally pass `name` to identify the thread.",
     annotations: {
       title: "Start agent thread",
       readOnlyHint: false,
