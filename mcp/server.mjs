@@ -13,7 +13,7 @@ import { createThreadManager, ThreadStatus } from "../lib/threads.mjs";
 import { createProfileStore } from "../lib/profiles.mjs";
 import { runThread } from "../lib/loop.mjs";
 import { resolveUserDir } from "../lib/data-dir.mjs";
-import { loadAgentDef, mergeEffectivePolicy } from "../lib/agent-defs.mjs";
+import { loadAgentDef, buildToolPolicy } from "../lib/agent-defs.mjs";
 import { kick, wait, forget } from "../lib/run-tracker.mjs";
 import { createWorkspaceStore } from "../lib/workspace-store.mjs";
 import { INSTRUCTIONS } from "../lib/prompts.mjs";
@@ -194,14 +194,17 @@ const tools = [
           );
         }
 
-        // Effective policy: profile is the upper bound; agent def may
-        // restrict via tools (whitelist) and/or disallowedTools (blacklist).
-        const effectivePolicy = mergeEffectivePolicy(profile.defaultPolicy, agentDef);
+        // Build tool policy from agent def:
+        // - tools (whitelist): allowed
+        // - disallowedTools: denied
+        // - everything else: "ask" (prompt)
+        // Session approvals override this for that session.
+        const policy = buildToolPolicy(agentDef);
 
         const thread = await threadMgr.createThread({
           cwd,
           profile: profile.name,
-          policy: effectivePolicy,
+          policy,
           agentDef,
           name: args.name || null,
         });
