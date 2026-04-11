@@ -13,7 +13,7 @@ Parent Claude talks to it over MCP. The sub-agent does the heavy file work — r
 
 ## Status (v0.6.0)
 
-ADRs 0001–0003, 0005, and 0010 are implemented. What works today:
+ADRs 0001–0003, 0005, and 0009 are implemented. What works today:
 
 - MCP boot, the lifecycle-only `agent_*` toolset (6 tools for agent process control)
 - `agent_start` → `agent_send` → final answer (sub-agent does work independently)
@@ -24,10 +24,8 @@ ADRs 0001–0003, 0005, and 0010 are implemented. What works today:
 - **Agent definitions** (ADR 0003) — named roles at `<cwd>/.claude/agnz/agents/<name>.md` with system prompt, profile, tool policy overrides. Pass `agent: "<name>"` to `agent_start`.
 - **Skills** (ADR 0005) — project-local instruction sets at `<cwd>/.claude/skills/<name>/SKILL.md`. Sub-agents load them on demand via `Skill({action:"load", name:"..."})`. Agent defs can declare a `skills:` allowlist.
 - **Mailbox communication** (ADR 0002) — sub-agents publish messages via `SendMessage`; parent Claude receives them as hook injections at prompt/session time.
-- **Workspace file manager** (ADR 0010) — open files tracked in `thread.openFiles`, injected as per-file synthetic messages before history. `Read` opens, `Close` closes, `Edit`/`Write` keep content current. Scope: files ≤100 KB, configurable limit.
-- **Runtime trace** — per-thread `<thread-id>.trace.jsonl` logs all state changes (file open/close, turn starts) for debugging and observability. One line per event with timestamp.
-- **Close tool** — removes an open file from the workspace context, freeing memory for other files. File is not deleted from disk.
-- **Compression utilities** — `lib/compression.mjs` deduplicates redundant Read/LS/Grep calls in transcript history (Tier-1 context management).
+- **Bash command allowlists** (ADR 0009 §3) — approved and denied Bash commands stored per-agent in `workspace.json`. Commands in `allow` run without prompting; commands in `deny` are blocked immediately.
+- **Runtime trace** — per-thread `<thread-id>.trace.jsonl` logs all state changes (turn starts) for debugging and observability. One line per event with timestamp.
 
 **Zero npm dependencies.** The MCP stdio server is hand-rolled (~150 lines). The plugin ships as pure source — Claude Code copies it to its cache on every install and there is no `npm install` step.
 
@@ -58,7 +56,7 @@ mcp/server.mjs             ← 6 agent_* lifecycle tools
 lib/loop.mjs               ← LLM ↔ tool loop, persists transcript
     │
     ├──▶ tools/            (Read, Edit, Write, Grep, LS, Bash,
-    │                       AskUser, SendMessage, Skill, Close)
+    │                       AskUser, SendMessage, Skill)
     ├──▶ sandbox.mjs       (cwd lock + tiered permission policy)
     ├──▶ agent-defs.mjs    (named roles from <cwd>/.claude/agnz/agents/)
     ├──▶ workspace-store   (<cwd>/.claude/agnz/ — threads, workspace.json)
