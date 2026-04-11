@@ -11,17 +11,18 @@ Parent Claude talks to it over MCP. The sub-agent does the heavy file work — r
 - **Stay in control.** The sub-agent runs inside a sandbox: locked to a single working directory, tiered permissions (read-only by default, mutating tools require approval, shell is denied).
 - **Concurrency for free.** Sub-agents run in parallel via Node's event loop — no workers, no IPC. Two parallel runs measured at ~5.5s vs. ~10s sequential.
 
-## Status (v0.6.1)
+## Status (v0.7.0)
 
 ADRs 0001–0003, 0005, and 0009 are implemented. What works today:
 
 - MCP boot, the lifecycle-only `agent_*` toolset (6 tools for agent process control)
-- `agent_start` → `agent_send` → final answer (sub-agent does work independently)
+- `agent_start(agent: "<name>")` → `agent_send` → final answer (sub-agent does work independently)
 - Approval pause + resume via `agent_approve` (with `persist=true` to upgrade policy for the rest of the thread)
 - `ask_user` pause + resume via `agent_answer`
 - Detached runs via `agent_send(detach=true)` + `agent_wait`, two parallel sub-agents finishing concurrently
 - Per-project workspace at `<cwd>/.claude/agnz/` with threads, user-wide profiles at `~/.claude/agnz/`
-- **Agent definitions** (ADR 0003) — named roles at `<cwd>/.claude/agnz/agents/<name>.md` with system prompt, profile, tool policy overrides. Pass `agent: "<name>"` to `agent_start`.
+- **Agent definitions** (ADR 0003) — any Claude Code agent can be started as agnz sub-agent. Just pass `agent: "<name>"` to `agent_start` — the agent's config (model, tools, prompt) is loaded automatically from CC's agent definitions.
+- **modelProfileMappings** — map agent model identifiers to profile names in `workspace.json`. When LM Studio loads a different model, only the profile needs updating.
 - **Skills** (ADR 0005) — project-local instruction sets at `<cwd>/.claude/skills/<name>/SKILL.md`. Sub-agents load them on demand via `Skill({action:"load", name:"..."})`. Agent defs can declare a `skills:` allowlist.
 - **Mailbox communication** (ADR 0002) — sub-agents publish messages via `SendMessage`; parent Claude receives them as hook injections at prompt/session time.
 - **Bash command allowlists** (ADR 0009 §3) — approved and denied Bash commands stored per-agent in `workspace.json`. Commands in `allow` run without prompting; commands in `deny` are blocked immediately.
@@ -35,7 +36,7 @@ Only six, all about process lifecycle:
 
 | Tool | Purpose |
 |---|---|
-| `agent_start` | Create a thread locked to a cwd. |
+| `agent_start` | Start a thread with an agent. `agent_start({agent: "name", name?: "optional-id"})`. |
 | `agent_send` | Send a message. Sync by default; `detach=true` returns immediately. |
 | `agent_wait` | Block on a detached run until the next event (final / pause / error). |
 | `agent_approve` | Resolve an approval pause (allow/deny, optional `persist`). |
