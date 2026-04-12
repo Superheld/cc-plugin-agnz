@@ -86,8 +86,8 @@ The user invoked `/agnz:setup $ARGUMENTS`.
 1. Parse `$ARGUMENTS` into a sub-command and positional args.
 2. If no sub-command is given, default to `list`.
 3. For `add`: collect missing fields via `AskUserQuestion` — **profile name**, **baseUrl**, **model**, optionally **apiKey** and **llmTimeoutMs**.
-4. For `info`: run `node ${CLAUDE_PLUGIN_ROOT}/scripts/companion.mjs info`
-5. For all other sub-commands: run `node ${CLAUDE_PLUGIN_ROOT}/scripts/companion.mjs setup <subcommand> [args...]`
+4. For `info`: run `node ${SKILL_BASE_DIR}/scripts/companion.mjs info`
+5. For all other sub-commands: run `node ${SKILL_BASE_DIR}/scripts/companion.mjs setup <subcommand> [args...]`
 6. Print the companion's output verbatim.
 
 Do **not** run in the background — finishes in milliseconds.
