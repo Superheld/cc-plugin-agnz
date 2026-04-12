@@ -66,6 +66,7 @@ lib/loop.mjs          ← LLM ↔ tool loop, persists transcript
 | `skills/agnz-setup/` | Skill for `/agnz:setup` profile management. |
 | `skills/agnz-info/` | Skill for `/agnz:info` — version, data paths, active profile. |
 | `skills/agnz-threads/` | Skill for listing threads in the current workspace. |
+| `skills/agnz-inspect/` | Skill + bash script (`scripts/inspect.sh`) for inspecting thread meta and transcript directly from disk. No MCP call needed. |
 | `skills/agents/` | Progressive-disclosure skill for ADR 0003 agent definitions and the `agent_*` lifecycle. `SKILL.md` covers when to delegate + quick define-and-spawn path; `references/defining.md` is the frontmatter field reference; `references/lifecycle.md` is the full MCP tool + conversation reference. |
 | `.mcp.json` | Tells CC how to spawn the MCP server. Uses `${CLAUDE_PLUGIN_ROOT}` (verified to expand). |
 | `.claude-plugin/plugin.json` | Plugin manifest. |
@@ -161,11 +162,11 @@ Always `<cwd>/.claude/agnz/`. Co-located with other Claude Code project state un
 <cwd>/.claude/agnz/
 ├── workspace.json                    ← shared workspace metadata (skeleton today)
 └── threads/
-    ├── <thread-id>.meta.json         ← thread metadata (status, pending, policy, cwd, ...)
+    ├── <thread-id>.meta.json         ← thread metadata (status, pending, agentDef, ...)
     └── <thread-id>.jsonl             ← append-only transcript
 ```
 
-`workspace.json` today is a minimal skeleton (`schemaVersion`, `name`, `cwd`, `createdAt`, `updatedAt`, `members: []`). It is created lazily on first `agent_start` in a project. ADRs 0002 and 0004 define the fields it will grow (`items`, `mode`, `reviewRequired`) and the sibling files that will join it (`messages.jsonl`, `cursors/`, `scratch/`). Agent definitions live in CC's standard locations (`~/.claude/agents/` and `<cwd>/.claude/agents/`), not under `agnz/`.
+`workspace.json` today is a minimal skeleton (`schemaVersion`, `name`, `cwd`, `createdAt`, `updatedAt`). It is created lazily on first `agent_start` in a project. ADRs 0002 and 0004 define the fields it will grow (`items`, `mode`, `reviewRequired`) and the sibling files that will join it (`messages.jsonl`, `cursors/`, `scratch/`). Agent definitions live in CC's standard locations (`~/.claude/agents/` and `<cwd>/.claude/agents/`), not under `agnz/`.
 
 The old `memory/` directory is gone. The old `threads/` directory under the user-wide root is gone.
 
@@ -197,7 +198,7 @@ LM Studio default endpoint is `http://localhost:1234/v1`. After installing the p
 ```bash
 node ${CLAUDE_PLUGIN_ROOT}/scripts/companion.mjs setup add lmstudio-devstral http://localhost:1234/v1 mistralai/devstral-small-2-2512
 ```
-The active profile is what `agent_start` picks up if no profile is named.
+Profile resolution at thread start: `workspace.json → modelProfileMappings[agentDef.model]` → fallback to `modelProfileMappings["_default"]` → profile name string. Configure mappings via `/agnz:setup`.
 
 ## Useful commands during development
 
@@ -243,4 +244,4 @@ When implementing any ADR, follow it as the spec and keep deviations visible (ei
 - **No streaming.** `agent_send` returns one outcome at a time. Intermediate progress is not observable to the parent. ADR 0002 changes this picture for agent-to-parent communication via `messages.jsonl`.
 - **No tests.** Sandbox path-escape, loop drain/resume, and workspace-store/thread-index plumbing all need real `node:test` coverage.
 - **Bash sessionCommands are session-scoped only.** Approved commands are not persisted across MCP server restarts. A fresh session re-asks for every command. ADR 0009's `allowedCommands` workspace lists were the planned fix but were removed for simplicity — revisit if this becomes painful.
-- **License.** Repo has no LICENSE file. Pick one before publishing more widely.
+- **License.** MIT is declared in `plugin.json` and README but no `LICENSE` file exists in the repo root yet.
