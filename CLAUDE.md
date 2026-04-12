@@ -68,7 +68,7 @@ lib/loop.mjs          ← LLM ↔ tool loop, persists transcript
 | `skills/agnz-info/` | Skill for `/agnz:info` — version, data paths, active profile. |
 | `skills/agnz-threads/` | Skill for listing threads in the current workspace. |
 | `skills/agnz-inspect/` | Skill + bash script (`scripts/inspect.sh`) for inspecting thread meta and transcript directly from disk. No MCP call needed. |
-| `skills/agents/` | Progressive-disclosure skill for ADR 0003 agent definitions and the `agent_*` lifecycle. `SKILL.md` covers when to delegate + quick define-and-spawn path; `references/defining.md` is the frontmatter field reference; `references/lifecycle.md` is the full MCP tool + conversation reference. |
+| `skills/agnz/` | Progressive-disclosure skill for ADR 0003 agent definitions and the `agent_*` lifecycle. `SKILL.md` covers when to delegate + quick define-and-spawn path; `references/defining.md` is the frontmatter field reference; `references/lifecycle.md` is the full MCP tool + conversation reference. |
 | `.mcp.json` | Tells CC how to spawn the MCP server. Uses `${CLAUDE_PLUGIN_ROOT}` (verified to expand). |
 | `.claude-plugin/plugin.json` | Plugin manifest. |
 
