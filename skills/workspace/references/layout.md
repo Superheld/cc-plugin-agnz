@@ -16,17 +16,44 @@ Companion to [SKILL.md](SKILL.md). Read this when the quick version did not cove
 
 ```
 <cwd>/.claude/agnz/
-├── workspace.json       ← shared metadata: schemaVersion, name, cwd, createdAt, updatedAt, members[]
+├── workspace.json       ← shared metadata + modelProfileMappings (see below)
 ├── messages.jsonl       ← durable append-only message log (ADR 0002), monotonic `m000001` ids
 ├── cursors/
 │   └── parent.json      ← last message id the parent has seen (advanced by the hooks)
-├── agents/              ← agent-definition files (ADR 0003) — see the `agents` skill
-│   ├── researcher.md
-│   └── editor.md
 └── threads/
     ├── <thread-id>.meta.json    ← status, pending, policy, cwd, inboxCursor, agentDef snapshot
     └── <thread-id>.jsonl        ← append-only transcript (user / assistant / tool)
 ```
+
+Agent definition files live at `<cwd>/.claude/agents/` (project-local) and `~/.claude/agents/` (user-wide) — not inside the `agnz/` subtree.
+
+## workspace.json shape
+
+```json
+{
+  "schemaVersion": 1,
+  "name": "my-project",
+  "cwd": "/path/to/project",
+  "createdAt": 0,
+  "updatedAt": 0,
+  "members": ["<thread-id>", "..."],
+  "modelProfileMappings": {
+    "inherit":  "lmstudio",
+    "opus":     "lmstudio",
+    "sonnet":   "lmstudio",
+    "haiku":    "lmstudio",
+    "_default": "lmstudio"
+  }
+}
+```
+
+`modelProfileMappings` maps CC model identifiers to profile names. When an agent def says `model: inherit` (or `model: sonnet` etc.), agnz looks up the profile here instead of treating the model string as a profile name directly.
+
+- `inherit` — CC default; use the project's primary local model
+- `opus` / `sonnet` / `haiku` — CC model tiers; map to appropriate profiles when you have multiple local models of different sizes
+- `_default` — fallback for any unmapped identifier
+
+If `modelProfileMappings` is absent or a key is not found, the model string is used as a profile name directly (backwards compat).
 
 ## profiles.json shape
 
@@ -41,28 +68,22 @@ Companion to [SKILL.md](SKILL.md). Read this when the quick version did not cove
       "model": "mistralai/devstral-small-2-2512",
       "temperature": 0.2,
       "maxTokens": null,
-      "maxTurns": 40,
-      "systemPrompt": null,
-      "defaultPolicy": {
-        "LS": "allow",
-        "Read": "allow",
-        "Grep": "allow",
-        "AskUser": "allow",
-        "SendMessage": "allow",
-        "Skill": "allow",
-        "Edit": "ask",
-        "Write": "ask",
-        "Bash": "ask"
-      }
+      "maxTurns": 20,
+      "llmTimeoutMs": null
     }
   }
 }
 ```
 
-- `apiKey` may be `null` for LM Studio / Ollama — they don't check it.
-- `temperature` is 0.0–2.0; 0.1–0.3 works best for coding sub-agents.
-- `maxTurns` is the hard ceiling on the agent loop before it bails with `max_turns`.
-- `defaultPolicy` is the **upper bound** for any agent definition that references this profile. An agent can only narrow it (see the `agents` skill §tool policy).
+| Field | Required | Default | Notes |
+|---|---|---|---|
+| `baseUrl` | yes | — | OpenAI-compatible endpoint, e.g. `http://localhost:1234/v1` |
+| `model` | yes | — | Model identifier as the server expects it |
+| `apiKey` | no | `null` | LM Studio / Ollama ignore it; required for OpenRouter etc. |
+| `temperature` | no | `0.2` | 0.0–2.0; 0.1–0.3 works best for coding sub-agents |
+| `maxTokens` | no | `null` | Max tokens in the completion; `null` = server default |
+| `maxTurns` | no | `20` | Hard ceiling on the agent loop before it stops with `max_turns` |
+| `llmTimeoutMs` | no | `null` | Request timeout in milliseconds; `null` = 600 000 ms (10 min). Increase for very slow models (large model on CPU, long context). |
 
 ## thread meta shape
 

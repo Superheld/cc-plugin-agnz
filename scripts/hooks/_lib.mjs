@@ -11,8 +11,8 @@
 // `lib/` so that the plugin's hook scripts keep working even if the
 // surrounding module layout is refactored.
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, renameSync } from "node:fs";
+import { join, resolve } from "node:path";
 
 /**
  * Read all of stdin synchronously into a string.
@@ -217,4 +217,38 @@ function addressesParent(to) {
   if (typeof to === "string") return to === "parent";
   if (Array.isArray(to)) return to.includes("parent");
   return false;
+}
+
+/**
+ * Read all non-stopped thread metas from the workspace.
+ * Returns an array of objects with id, name, status, agent, and updatedAt.
+ */
+export function readThreadMetas(wsDir) {
+  const threadsDir = join(wsDir, "threads");
+  try {
+    const files = readdirSync(threadsDir).filter(f => f.endsWith(".meta.json"));
+    return files.flatMap(f => {
+      try {
+        const meta = JSON.parse(readFileSync(join(threadsDir, f), "utf8"));
+        if (meta.status === "stopped") return [];
+        return [{
+          id: meta.id,
+          name: meta.name || null,
+          status: meta.status,
+          agent: meta.agentDef?.name || null,
+          updatedAt: meta.updatedAt || null,
+        }];
+      } catch { return []; }
+    });
+  } catch { return []; }
+}
+
+/**
+ * Format a list of threads into a compact string.
+ * Example: "hook-visibility running, researcher idle"
+ */
+export function formatThreads(threads) {
+  if (!threads || threads.length === 0) return null;
+  const pairs = threads.map(t => `${t.name || "?"} ${t.status}`);
+  return pairs.join(", ");
 }
