@@ -21,7 +21,7 @@ The user invoked `/agnz:setup $ARGUMENTS`.
 
 1. Parse `$ARGUMENTS` into a sub-command and any positional args.
 2. If no sub-command is given, default to `list`.
-3. For `add`: if the user didn't supply all fields on the command line, use `AskUserQuestion` to collect: **profile name**, **baseUrl** (e.g. `http://localhost:1234/v1` for LM Studio, `http://localhost:11434/v1` for Ollama), **model** (e.g. `qwen2.5-coder-32b-instruct`), and optionally **apiKey**. Then call the companion CLI with all fields.
+3. For `add`: if the user didn't supply all fields on the command line, use `AskUserQuestion` to collect: **profile name**, **baseUrl** (e.g. `http://localhost:1234/v1` for LM Studio, `http://localhost:11434/v1` for Ollama), **model** (e.g. `qwen2.5-coder-32b-instruct`), and optionally **apiKey**. Optional advanced fields: **llmTimeoutMs** (default 600 000 ms — increase for very slow models). Then call the companion CLI with all fields.
 4. Run the companion CLI:
    ```
    node ${CLAUDE_PLUGIN_ROOT}/scripts/companion.mjs setup <subcommand> [args...]

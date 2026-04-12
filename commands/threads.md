@@ -25,7 +25,7 @@ The user invoked `/agnz:threads $ARGUMENTS`.
    node ${CLAUDE_PLUGIN_ROOT}/scripts/companion.mjs threads list
    ```
 3. Print the companion's JSON output verbatim. The shape is
-   `{ cwd, count, threads: [{id, status, profile, agent, pending, createdAt, updatedAt}] }`.
+   `{ cwd, count, threads: [{id, name, description, status, profile, agent, pending, createdAt, updatedAt}] }`.
 4. If `count === 0`, mention that the workspace has no threads yet
    and point the user at `agent_start` or `/agnz:setup` if no
    profile is configured.
