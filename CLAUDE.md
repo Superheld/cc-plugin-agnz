@@ -65,8 +65,7 @@ lib/loop.mjs          ← LLM ↔ tool loop, persists transcript
 | `hooks/hooks.json` | Plugin-level hook manifest. Merges into the user's Claude Code hooks when the plugin is enabled, binding `UserPromptSubmit` and `SessionStart` to the `scripts/hooks/*.mjs` scripts with a 5 s timeout. Uses the `{description, hooks: {...}}` wrapper format per plugin-dev guidance. |
 | `agents/` | Plugin-bundled agent definitions (dev, researcher, reviewer, general). Loaded at lowest priority — project and user agents shadow them. |
 | `skills/agnz-setup/` | Skill for `/agnz:setup` — profiles, model→profile mappings, and `info` sub-command (version, data paths, current state). |
-| `skills/agnz-threads/` | Skill for listing threads in the current workspace. |
-| `skills/agnz-inspect/` | Skill + bash script (`scripts/inspect.sh`) for inspecting thread meta and transcript directly from disk. No MCP call needed. |
+| `skills/agnz-threads/` | Skill for listing and inspecting threads. Reads `.claude/agnz/threads/*.meta.json` and `.jsonl` directly. Includes `scripts/inspect.sh` as a terminal shortcut. |
 | `skills/agnz/` | Progressive-disclosure skill for ADR 0003 agent definitions and the `agent_*` lifecycle. `SKILL.md` covers when to delegate + quick define-and-spawn path; `references/defining.md` is the frontmatter field reference; `references/lifecycle.md` is the full MCP tool + conversation reference. |
 | `.mcp.json` | Tells CC how to spawn the MCP server. Uses `${CLAUDE_PLUGIN_ROOT}` (verified to expand). |
 | `.claude-plugin/plugin.json` | Plugin manifest. |
