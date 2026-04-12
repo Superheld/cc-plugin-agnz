@@ -21,6 +21,7 @@ Mechanical implementation with clear spec, benefits from local model.
 </example>
 
 model: inherit
+color: yellow
 maxTurns: 40
 ---
 

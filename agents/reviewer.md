@@ -21,7 +21,7 @@ ADR compliance check on sandbox.mjs and related files.
 </example>
 
 model: inherit
-color: purple
+color: blue
 disallowedTools: ["Edit", "Write"]
 temperature: 0.1
 maxTurns: 20

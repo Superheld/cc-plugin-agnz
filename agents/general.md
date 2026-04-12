@@ -21,6 +21,7 @@ Ad-hoc shell task, no domain expertise needed.
 </example>
 
 model: inherit
+color: cyan
 maxTurns: 30
 ---
 
