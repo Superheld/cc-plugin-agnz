@@ -16,6 +16,7 @@ import { resolveUserDir } from "../lib/data-dir.mjs";
 import { loadAgentDef, listAgentDefs, buildToolPolicy, parseAgentDefSource, validateAgentDef } from "../lib/agent-defs.mjs";
 import { kick, wait, forget } from "../lib/run-tracker.mjs";
 import { createWorkspaceStore } from "../lib/workspace-store.mjs";
+import { publish } from "../lib/event-bus.mjs";
 import { INSTRUCTIONS } from "../lib/prompts.mjs";
 import { dirname, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -287,6 +288,28 @@ const tools = [
       try {
         const thread = await threadMgr.getThread(args.thread_id);
         if (!thread) return errorResult(`no thread '${args.thread_id}'`);
+
+        // If the thread is active (running or paused awaiting input), route the
+        // message through the shared mailbox instead of injecting it directly.
+        // The loop's drainMailbox() will deliver it at the next natural turn
+        // boundary — exactly the same path as agent-to-agent messages (ADR 0002).
+        // This prevents role-alternation errors on strict models (Mistral etc.)
+        // and makes the parent a first-class participant in the message system.
+        if (thread.status === ThreadStatus.RUNNING || thread.status === ThreadStatus.AWAITING_INPUT) {
+          const agentName = thread.agentDef?.name || thread.agentName || `agent-${thread.id.slice(0, 8)}`;
+          await publish(thread.cwd, {
+            from: "parent",
+            to: agentName,
+            kind: "directive",
+            text: args.message,
+          });
+          return jsonResult({
+            status: "queued",
+            thread_id: args.thread_id,
+            hint: `Thread is ${thread.status} — message queued to mailbox and will be delivered at the next turn boundary.`,
+          });
+        }
+
         const profile = await profileStore.get(thread.profile);
         if (!profile) return errorResult(`profile '${thread.profile}' no longer exists`);
         const sandbox = sandboxFor(thread);
@@ -344,7 +367,15 @@ const tools = [
         const thread = await threadMgr.getThread(args.thread_id);
         if (!thread) return errorResult(`no thread '${args.thread_id}'`);
 
-        const result = await wait(args.thread_id, args.timeout_ms);
+        // If the thread is not actively running, check the tracker with a
+        // short timeout. A settled promise returns immediately; if nothing
+        // is tracked (e.g. after MCP server restart) we fall through to the
+        // null path below and report the persisted state.
+        const effectiveTimeout = thread.status === ThreadStatus.RUNNING
+          ? args.timeout_ms
+          : Math.min(args.timeout_ms ?? 2000, 2000);
+
+        const result = await wait(args.thread_id, effectiveTimeout);
 
         if (result === null) {
           // Nothing was tracked — return whatever the persisted state says.
@@ -658,4 +689,4 @@ async function recoverStaleRuns() {
 // ---- boot -----------------------------------------------------------------
 
 await recoverStaleRuns();
-await runStdioServer({ name: "agnz", version: "0.9.8", instructions: INSTRUCTIONS, tools });
+await runStdioServer({ name: "agnz", version: "0.9.9", instructions: INSTRUCTIONS, tools });
