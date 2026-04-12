@@ -5,13 +5,13 @@ Companion to [SKILL.md](SKILL.md). This covers the full `.md` + frontmatter form
 ## Where agent files live
 
 ```
-<cwd>/.claude/agnz/agents/
+<cwd>/.claude/agents/
 ├── researcher.md
 ├── editor.md
 └── tester.md
 ```
 
-Per-project only — no user-wide fallback. If you want a library of reusable roles, keep them in a template repo and copy them in.
+User-wide agents also supported at `~/.claude/agents/` — project-local agents (per-cwd) take precedence over user-wide ones when names collide.
 
 ## File format
 
@@ -59,7 +59,7 @@ and, if relevant, a bullet list of file:line references.
 | `description` | yes | string | How Parent Claude routes tasks to this role. Use `\|` for multi-line with `<example>` blocks (see below). **Be specific.** |
 | `model` | no | string | agnz profile name (e.g. `lmstudio-devstral`). Falls back to the active profile if absent. |
 | `color` | no | string | CC-compatible visual identifier (`blue`/`cyan`/`green`/`yellow`/`magenta`/`red`). Stored for future use. |
-| `tools` | no | string array — **whitelist** | Only listed tools are available; all others denied. Profile is the upper bound — listing a tool can never promote it beyond what the profile allows. |
+| `tools` | no | string array — **whitelist** | Listed tools are permanently `allow`; tools NOT listed default to `ask` (not `deny`). If absent, all tools are available with their sandbox-default policy. Profile is the upper bound — listing a tool can never promote it beyond what the profile allows. |
 | `disallowedTools` | no | string array — **blacklist** | Listed tools are denied regardless of the whitelist or profile. |
 | `skills` | no | string array | Allowlist of project-local skills the agent may load via the `Skill` tool. If absent, all skills are available. |
 | `temperature` | no | number | Overrides the profile's `temperature` for this role. |
@@ -103,7 +103,7 @@ Keep it in prose with concrete instructions. Avoid vague "you are helpful" langu
 
 The available tools in agnz (PascalCase, matching CC naming):
 
-| Tool | Default policy | Description |
+| Tool | Sandbox default | Description |
 |---|---|---|
 | `LS` | allow | List directory contents |
 | `Read` | allow | Read file contents |
@@ -115,9 +115,11 @@ The available tools in agnz (PascalCase, matching CC naming):
 | `Write` | ask | Write a file (pauses for approval) |
 | `Bash` | ask | Run a shell command (pauses for approval) |
 
+Note: there is no `defaultPolicy()` function. The "Sandbox default" column shows the effective policy when no `tools:`/`disallowedTools:` is set in the agent def. The sandbox defaults to `ask` for any tool not explicitly listed.
+
 For every tool, the effective policy is `strictest(profile[T], agent[T])`, with strictness ordering `deny > ask > allow`.
 
-- **`tools` (whitelist): Agent def can only restrict.** If the profile says `Edit: ask` and `tools` does not list `Edit`, the effective policy is `deny`. Listing `Edit` in `tools` restores it to the profile's level (`ask`) — it cannot be promoted to `allow`.
+- **`tools` (whitelist): Listed tools become `allow`; unlisted tools fall back to `ask`.** Listing `Edit` in `tools` makes it permanently allowed — it cannot be promoted beyond what the profile permits. If the profile says `Edit: ask`, listing it in `tools` allows it; if the profile says `Edit: deny`, listing it in `tools` cannot unlock it.
 - **`disallowedTools` (blacklist): Always denied.** Overrides both whitelist and profile.
 - **Profile `deny` wins absolutely.** If the profile says `Bash: deny`, no agent definition can unlock it. Upgrade the profile first.
 

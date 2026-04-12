@@ -17,6 +17,8 @@ import {
   readWorkspaceFile,
   formatMessages,
   flushStdoutThen,
+  readThreadMetas,
+  formatThreads
 } from "./_lib.mjs";
 
 try {
@@ -32,10 +34,15 @@ try {
 
   const wsFile = readWorkspaceFile(ws);
   if (wsFile) {
-    const name = wsFile.name || "(unnamed)";
-    const mode = wsFile.mode || "executing";
-    const memberCount = Array.isArray(wsFile.members) ? wsFile.members.length : 0;
-    chunks.push(`[agnz] workspace "${name}" — mode=${mode}, ${memberCount} member(s)\n`);
+    const name = wsFile.name || input.cwd;
+    chunks.push(`[agnz] workspace "${name}"\n`);
+  }
+
+  // Add threads line using readThreadMetas + formatThreads
+  const activeThreads = readThreadMetas(ws);
+  const formattedThreads = formatThreads(activeThreads);
+  if (formattedThreads) {
+    chunks.push(`threads: ${formattedThreads}\n`);
   }
 
   const cursor = readParentCursor(ws);

@@ -22,7 +22,7 @@
 Check whether the project has agent definitions:
 
 ```
-Glob("<cwd>/.claude/agnz/agents/*.md")
+Glob("<cwd>/.claude/agents/*.md")
 ```
 
 Read the `description` field in each file's frontmatter. Pick the agent whose description best matches the task — a `researcher` for read/investigate work, an `editor` for write/refactor tasks. If no definitions exist, omit the `agent` parameter and the sub-agent runs with a generic prompt.

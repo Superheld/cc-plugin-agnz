@@ -29,10 +29,10 @@ Avoid delegation when the work needs deep reasoning — local models are limited
 
 Agent files live at:
 ```
-<cwd>/.claude/agnz/agents/<name>.md
+<cwd>/.claude/agents/<name>.md
 ```
 
-Minimal example — create `<cwd>/.claude/agnz/agents/researcher.md`:
+Minimal example — create `<cwd>/.claude/agents/researcher.md`:
 
 ```markdown
 ---

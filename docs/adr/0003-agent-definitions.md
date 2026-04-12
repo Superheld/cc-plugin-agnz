@@ -33,39 +33,64 @@ No `agents/` subdirectory under `.claude/agnz/` exists. All agent loading goes t
 
 ### 2. File format: Markdown with YAML frontmatter
 
+Agent files use **CC native format**: the description is a plain scalar that
+may span multiple lines including `<example>` blocks; array fields use inline
+JSON arrays. YAML block scalars (`|`, `>`) and block sequences (`- item`) are
+also accepted for backwards compatibility, but CC native is preferred for new
+files.
+
 ```markdown
 ---
 name: researcher
-profile: lmstudio
-description: >
-  Read-heavy code investigation. Good for bulk reads, grep sweeps,
-  "find everywhere X is used", summaries of large modules.
-tools:
-  - Read
-  - Grep
-  - LS
-  - AskUser
-  - SendMessage
+description: Use this agent when the user asks to investigate code, find where
+something is used, trace a data flow, or summarise a module.
+
+<example>
+Context: User wants to find all usages of a function.
+user: "Where is parseAgentDefSource called?"
+assistant: "Let me have the researcher grep for all call sites."
+<commentary>
+Grep sweep across the tree, no edits.
+</commentary>
+</example>
+
+model: lmstudio
+color: blue
+disallowedTools: ["Edit", "Write", "Bash"]
+maxTurns: 40
+---
+
+You are a research sub-agent. Your role is to investigate code: read files,
+search for patterns, and produce concise, factual summaries. You do not modify
+files.
+```
+
+**Array fields: CC native (preferred) vs YAML block (accepted)**
+
+```yaml
+# CC native — single line, JSON array:
+disallowedTools: ["Edit", "Write", "Bash"]
+
+# YAML block — also accepted:
 disallowedTools:
   - Edit
   - Write
   - Bash
-skills:
-  - code-navigation
-maxTurns: 40
----
+```
 
-You are a research sub-agent in the agnz workspace. Your role is to
-investigate code: read files, search for patterns, and produce concise,
-factual summaries. You do not modify files.
+**Text fields: CC native (preferred) vs YAML block scalar (accepted)**
 
-When you take on an item, post a brief `status` message with your plan.
-When you finish, write your findings into the item's `notes` and move it
-to `review` — the parent signs off on `done`.
+```yaml
+# CC native — first line on same key, <example> blocks below, no indicator:
+description: Read-heavy investigation. Does not modify files.
 
-If you need information you cannot determine from the code alone, use
-`AskUser`. If another agent's work would help, send them a `handoff`
-message.
+<example>
+...
+</example>
+
+# YAML block scalar — also accepted:
+description: |
+  Read-heavy investigation. Does not modify files.
 ```
 
 **Frontmatter fields:**
@@ -74,10 +99,10 @@ message.
 |---|---|---|
 | `name` | yes | Unique within the workspace. Lowercase, `[a-z][a-z0-9-]*`. |
 | `profile` | yes | Name of an existing profile in the user-wide profile store. |
-| `description` | yes | One or two sentences. Used by the parent (Claude) to pick which agent to spawn for which task. |
-| `tools` | no | Explicit allowlist of tool names (PascalCase: `Read`, `Grep`, `LS`, `Edit`, `Write`, `Bash`, `AskUser`, `SendMessage`, `Skill`). If set, only listed tools are available. |
-| `disallowedTools` | no | Explicit denylist. Applied on top of the profile's defaultPolicy. |
-| `skills` | no | List of skill names the agent may load on demand from `<cwd>/.claude/skills/<name>/SKILL.md`. A catalog is injected into the system prompt at startup (see ADR 0006). |
+| `description` | yes | Routing description. The **first line** must be self-contained — it is the compact form injected by hooks and displayed in summaries. Subsequent lines may contain `<example>` blocks. Used by the parent to pick which agent to spawn. |
+| `tools` | no | Explicit allowlist of tool names. Format: `["Read", "Grep"]` (CC native) or YAML block sequence. PascalCase names matching CC built-ins: `Read`, `Grep`, `LS`, `Edit`, `Write`, `Bash`, `AskUser`, `SendMessage`, `Skill`. If set, only listed tools are available. |
+| `disallowedTools` | no | Explicit denylist. Format: `["Edit", "Write"]` (CC native) or YAML block sequence. Applied on top of the profile's defaultPolicy. |
+| `skills` | no | Skill names the agent may load on demand via the `Skill` tool from `<cwd>/.claude/skills/<name>/SKILL.md`. Format: `["workspace", "agents"]` (CC native) or YAML block sequence. |
 | `temperature` | no | Override the profile's temperature for this role. |
 | `maxTurns` | no | Override the profile's `maxTurns`. |
 | `prompt` | no | Inline system prompt (alternative to markdown body). CC-compatible. |

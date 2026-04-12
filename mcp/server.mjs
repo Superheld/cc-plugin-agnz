@@ -13,10 +13,16 @@ import { createThreadManager, ThreadStatus } from "../lib/threads.mjs";
 import { createProfileStore } from "../lib/profiles.mjs";
 import { runThread } from "../lib/loop.mjs";
 import { resolveUserDir } from "../lib/data-dir.mjs";
-import { loadAgentDef, buildToolPolicy } from "../lib/agent-defs.mjs";
+import { loadAgentDef, listAgentDefs, buildToolPolicy, parseAgentDefSource, validateAgentDef } from "../lib/agent-defs.mjs";
 import { kick, wait, forget } from "../lib/run-tracker.mjs";
 import { createWorkspaceStore } from "../lib/workspace-store.mjs";
 import { INSTRUCTIONS } from "../lib/prompts.mjs";
+import { dirname, resolve as resolvePath } from "node:path";
+import { fileURLToPath } from "node:url";
+
+// Plugin root: one level up from mcp/server.mjs. Passed to loadAgentDef so
+// agents bundled in agents/ are discoverable regardless of the user's cwd.
+const PLUGIN_ROOT = resolvePath(dirname(fileURLToPath(import.meta.url)), "..");
 
 
 // ---- data dirs ----
@@ -130,7 +136,7 @@ const tools = [
   {
     name: "agent_start",
     description:
-      "Start a sub-agent thread. Pass `agent` with the agent name — the agent definition is loaded automatically and its config (model via mappings, tools, prompt) is applied. Optionally pass `name` to identify the thread.",
+      "Start a sub-agent thread. Pass `agent` (name of a definition file at ~/.claude/agents/ or <cwd>/.claude/agents/) OR `inline` (a raw frontmatter markdown string) to define the agent. One of the two is required. Optionally pass `name` to label the thread.",
     annotations: {
       title: "Start agent thread",
       readOnlyHint: false,
@@ -156,14 +162,22 @@ const tools = [
       properties: {
         name: {
           type: "string",
-          description: "Optional name to identify this thread.",
+          description: "Human-readable name for this agent instance. Used as the message routing address — must be unique among active agents in the workspace.",
+        },
+        description: {
+          type: "string",
+          description: "Optional short description of what this thread is working on. Shown in workspace summaries so the parent knows what each agent is doing.",
         },
         agent: {
           type: "string",
-          description: "Agent name (from ~/.claude/agents/ or <cwd>/.claude/agents/). The agent definition is loaded and its config (model, tools, prompt) is used automatically.",
+          description: "Agent definition name (from ~/.claude/agents/ or <cwd>/.claude/agents/). Mutually exclusive with `inline`.",
+        },
+        inline: {
+          type: "string",
+          description: "Raw frontmatter markdown string defining an ad-hoc agent. Same format as an agent definition file. Mutually exclusive with `agent`.",
         },
       },
-      required: ["agent"],
+      required: ["name"],
     },
     async handler(args) {
       try {
@@ -175,8 +189,24 @@ const tools = [
         let agentDef = null;
         let profileName = args.profile;
 
+        if (!args.agent && !args.inline) {
+          return errorResult("either `agent` (name) or `inline` (frontmatter string) is required");
+        }
+        if (args.agent && args.inline) {
+          return errorResult("`agent` and `inline` are mutually exclusive");
+        }
+
         try {
-          agentDef = await loadAgentDef(cwd, args.agent);
+          if (args.agent) {
+            agentDef = await loadAgentDef(cwd, args.agent, PLUGIN_ROOT);
+          } else {
+            const parsed = parseAgentDefSource(args.inline);
+            // synthesise a name if the inline def omits it
+            if (!parsed.name) parsed.name = `inline-${Date.now()}`;
+            const errs = validateAgentDef(parsed);
+            if (errs.length > 0) return errorResult(`invalid inline agent def: ${errs.join(", ")}`);
+            agentDef = parsed;
+          }
         } catch (err) {
           return errorResult(err.message);
         }
@@ -206,7 +236,8 @@ const tools = [
           profile: profile.name,
           policy,
           agentDef,
-          name: args.name || null,
+          name: args.name,
+          description: args.description || null,
         });
         sandboxFor(thread); // fail fast on bad cwd
         log("info", { event: "thread_started", thread_id: thread.id, cwd: thread.cwd, profile: profile.name, model: profile.model, agent: agentDef.name }, "agnz.mcp");
