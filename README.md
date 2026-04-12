@@ -84,7 +84,7 @@ Verify with `/mcp` — `agnz` should show as connected and the `agent_*` tools s
 LM Studio's default endpoint is `http://localhost:1234/v1`. Run `/agnz:setup add` for an interactive setup, or pass all fields directly:
 
 ```bash
-node ${CLAUDE_PLUGIN_ROOT}/scripts/companion.mjs setup add \
+node ${CLAUDE_PLUGIN_ROOT}/skills/agnz-setup/scripts/companion.mjs setup add \
   lmstudio-devstral \
   http://localhost:1234/v1 \
   mistralai/devstral-small-2-2512

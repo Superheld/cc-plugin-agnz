@@ -6,9 +6,9 @@
 // Currently only `setup` is implemented. Future /agnz:* sub-commands
 // (threads, board, etc.) will hook in here.
 
-import { createProfileStore } from "../lib/profiles.mjs";
-import { resolveUserDir, resolveProjectDir } from "../lib/data-dir.mjs";
-import { createWorkspaceStore } from "../lib/workspace-store.mjs";
+import { createProfileStore } from "../../../lib/profiles.mjs";
+import { resolveUserDir, resolveProjectDir } from "../../../lib/data-dir.mjs";
+import { createWorkspaceStore } from "../../../lib/workspace-store.mjs";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { dirname, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
