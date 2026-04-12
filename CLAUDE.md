@@ -50,6 +50,7 @@ lib/loop.mjs          ← LLM ↔ tool loop, persists transcript
 | `lib/data-dir.mjs` | Resolves two data roots. `resolveUserDir()` returns `~/.claude/agnz/` by default (overridable by `$AGNZ_DATA_DIR`). `resolveProjectDir(cwd)` returns `<cwd>/.claude/agnz/`. |
 | `lib/profiles.mjs` | Named `{baseUrl, apiKey, model, temperature, maxTurns, llmTimeoutMs, ...}` bundles. User-wide. CRUD + ping test. No `defaultPolicy` — policy comes from the agent def, not the profile. |
 | `lib/run-tracker.mjs` | In-memory `Map<threadId, Promise>` for the detach/wait model. Two functions: `kick`, `wait`. |
+| `lib/trace.mjs` | Append-only runtime trace. Writes `<thread-id>.trace.jsonl` alongside the transcript. Two entry types: `thread_start` (first run only — tools + system prompt) and `turn_start` (before every LLM call — current system prompt). Always fire-and-forget; failures are silent so tracing never crashes the loop. |
 | `lib/llm/openai-compatible.mjs` | Native-fetch HTTP client for `/v1/chat/completions`. Works with LM Studio, Ollama, OpenRouter, anything OpenAI-compatible. |
 | `lib/tools/registry.mjs` | Tool registry. Wraps tool descriptors, serialises to OpenAI `tools[]` schema. |
 | `lib/tools/{LS,Read,Grep}.mjs` | Read-only tools. |
