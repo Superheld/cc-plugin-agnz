@@ -224,13 +224,10 @@ const tools = [
           );
         }
 
-        // Build tool policy from agent def:
-        // - tools (whitelist): allowed
-        // - disallowedTools: denied
-        // - everything else: "ask" (prompt)
-        // Session approvals override this for that session.
+        // Build tool policy: profile.defaultPolicy is the baseline, agent def
+        // overrides with tools (allow) and disallowedTools (deny).
         const availableTools = registry.list().map(t => t.name);
-        const policy = buildToolPolicy(agentDef, availableTools);
+        const policy = buildToolPolicy(agentDef, availableTools, profile.defaultPolicy || {});
 
         const thread = await threadMgr.createThread({
           cwd,
