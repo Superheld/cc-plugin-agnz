@@ -1,7 +1,8 @@
 ---
+name: agnz-info
 description: Show current agnz setup — version, data paths, active profile, and per-project agents/skills/threads.
 argument-hint: "[cwd]"
-allowed-tools: Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/companion.mjs:*)
+allowed-tools: Bash(node *)
 model: haiku
 ---
 

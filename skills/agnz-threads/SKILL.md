@@ -1,7 +1,8 @@
 ---
+name: agnz-threads
 description: List agnz threads in the current project workspace (read-only).
 argument-hint: "list"
-allowed-tools: Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/companion.mjs:*)
+allowed-tools: Bash(node *)
 model: haiku
 ---
 
