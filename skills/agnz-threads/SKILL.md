@@ -1,42 +1,65 @@
 ---
 name: agnz-threads
-description: List agnz threads in the current project workspace (read-only).
-argument-hint: "list"
-allowed-tools: Bash(node *)
+description: Inspect agnz threads in the current project — list all threads or show the full state and transcript of a specific thread. This skill should be used when the user asks to "list threads", "show thread status", "what is the agent doing", "inspect thread X", "show what happened in thread X", "show thread history", "debug agent output", or when a thread is paused and needs resolution.
+argument-hint: "list | <thread-id-prefix>"
+allowed-tools: Bash(node *) Read Glob
 model: haiku
 ---
 
-Inspect agnz threads for the current project. Pure file read against
-`<cwd>/.claude/agnz/threads/` — no MCP call needed, no parent context
-burned on a thread-list pull.
+Read thread state directly from `.claude/agnz/threads/` — no MCP call needed.
 
-## Sub-commands
+## List all threads
 
-- `list` — show every thread in the current workspace with its id,
-  status, profile, agent role (if any), pending pause kind (if any),
-  createdAt, and updatedAt. Sorted by createdAt descending.
-
-## Instructions
-
-The user invoked `/agnz:threads $ARGUMENTS`.
-
-1. Parse `$ARGUMENTS` into a sub-command. Default to `list` if empty.
-2. Run the companion CLI from the project root:
-   ```
-   node ${CLAUDE_PLUGIN_ROOT}/scripts/companion.mjs threads list
-   ```
-3. Print the companion's JSON output verbatim. The shape is
-   `{ cwd, count, threads: [{id, name, description, status, profile, agent, pending, createdAt, updatedAt}] }`.
-4. If `count === 0`, mention that the workspace has no threads yet
-   and point the user at `agent_start` or `/agnz:setup` if no
-   profile is configured.
-
-Do **not** run the command in the background — it finishes in
-milliseconds and the user is waiting on the output.
-
-## Examples
+Read all meta files and summarise:
 
 ```
-/agnz:threads                      → defaults to `list`
-/agnz:threads list                 → show all threads in <cwd>/.claude/agnz/threads/
+Glob: .claude/agnz/threads/*.meta.json
+Read: each .meta.json → id (filename), name, status, agentDef.name, pending.kind, error.message, updatedAt
+```
+
+Key fields per thread:
+
+| Field | Notes |
+|---|---|
+| `id` | UUID — use first 8 chars as short handle |
+| `name` | human label given at agent_start |
+| `status` | `idle` / `running` / `awaiting_input` / `stopped` / `error` |
+| `agentDef.name` | which agent definition is loaded |
+| `pending.kind` | `approval` or `question` when status=awaiting_input |
+| `pending.name` | tool name awaiting approval |
+| `pending.question` | question text when kind=question |
+| `error.message` | set when status=error |
+| `updatedAt` | ms timestamp |
+
+## Inspect one thread
+
+Read meta + tail the transcript:
+
+```
+Read: .claude/agnz/threads/<id>.meta.json   → full state including pending/error detail
+Read: .claude/agnz/threads/<id>.jsonl       → transcript (last N lines)
+```
+
+Transcript line shapes (OpenAI format):
+- `{"role":"user","content":"..."}` — message sent to agent
+- `{"role":"assistant","content":"...","tool_calls":[...]}` — assistant reply; tool_calls has `function.name` + `function.arguments`
+- `{"role":"tool","tool_call_id":"...","content":"..."}` — tool result
+
+When a thread is `awaiting_input`, the `pending` object in meta has everything needed to resolve it:
+- `kind=approval` → `pending.toolCallId`, `pending.name`, `pending.args` — call `agent_approve`
+- `kind=question` → `pending.toolCallId`, `pending.question` — call `agent_answer`
+
+## Terminal shortcut
+
+For a quick formatted view in the terminal (requires `jq`):
+
+```bash
+# list all threads
+bash ${SKILL_BASE_DIR}/scripts/inspect.sh
+
+# inspect one thread (prefix match)
+bash ${SKILL_BASE_DIR}/scripts/inspect.sh <thread-id-prefix>
+
+# wider transcript window
+N_MESSAGES=60 bash ${SKILL_BASE_DIR}/scripts/inspect.sh <thread-id-prefix>
 ```

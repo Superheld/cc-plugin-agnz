@@ -60,15 +60,13 @@ lib/loop.mjs          ← LLM ↔ tool loop, persists transcript
 | `lib/tools/SendMessage.mjs` | The sub-agent's one publishing tool under ADR 0002. Validates the fixed `kind` vocabulary (say/question/answer/handoff/status/error/directive), normalizes `to` as string-or-array, delegates to `event-bus.publish`. |
 | `lib/tools/Skill.mjs` | Framework tool. Provides `list` (catalog) and `load` (full body) actions for project-local skills at `<cwd>/.claude/skills/<name>/SKILL.md`. Auto-allowed when the agent def has `skills:` set. |
 | `lib/agent-defs.mjs` | ADR 0003 loader. Loads agent files from CC standard paths: `~/.claude/agents/*.md` (user), `<cwd>/.claude/agents/*.md` (project), `<pluginRoot>/agents/*.md` (plugin-bundled, lowest priority). Zero-dep parser supporting both **CC native format** (preferred) and legacy YAML block forms. Exports `parseAgentDefSource`, `validateAgentDef`, `buildToolPolicy`, `loadAgentDef`, `listAgentDefs`. Consumed by `mcp/server.mjs` at `agent_start` time and snapshotted onto the thread meta. |
-| `scripts/companion.mjs` | Slash-command dispatcher. Handles `/agnz:setup` and `/agnz:info`. |
+| `skills/agnz-setup/scripts/companion.mjs` | Slash-command dispatcher for `/agnz:setup`. Handles profile CRUD, mapping, and info sub-commands. |
 | `scripts/hooks/{user-prompt-submit,session-start}.mjs` + `_lib.mjs` | Claude Code hook scripts for ADR 0002 §6a/6b. Inject unread `to:parent` messages into Claude's context at prompt/session time and advance the parent cursor (via atomic tmp+rename after stdout drain, so the cursor never advances past messages that didn't reach Claude). Self-contained — no imports from `lib/`. Fast no-op when the current project has no agnz workspace. Wired into Claude Code via `hooks/hooks.json` — auto-enabled when the plugin is installed; scoped to the plugin's lifetime. |
 | `hooks/hooks.json` | Plugin-level hook manifest. Merges into the user's Claude Code hooks when the plugin is enabled, binding `UserPromptSubmit` and `SessionStart` to the `scripts/hooks/*.mjs` scripts with a 5 s timeout. Uses the `{description, hooks: {...}}` wrapper format per plugin-dev guidance. |
 | `agents/` | Plugin-bundled agent definitions (dev, researcher, reviewer, general). Loaded at lowest priority — project and user agents shadow them. |
-| `skills/agnz-setup/` | Skill for `/agnz:setup` profile management. |
-| `skills/agnz-info/` | Skill for `/agnz:info` — version, data paths, active profile. |
-| `skills/agnz-threads/` | Skill for listing threads in the current workspace. |
-| `skills/agnz-inspect/` | Skill + bash script (`scripts/inspect.sh`) for inspecting thread meta and transcript directly from disk. No MCP call needed. |
-| `skills/agents/` | Progressive-disclosure skill for ADR 0003 agent definitions and the `agent_*` lifecycle. `SKILL.md` covers when to delegate + quick define-and-spawn path; `references/defining.md` is the frontmatter field reference; `references/lifecycle.md` is the full MCP tool + conversation reference. |
+| `skills/agnz-setup/` | Skill for `/agnz:setup` — profiles, model→profile mappings, and `info` sub-command (version, data paths, current state). |
+| `skills/agnz-threads/` | Skill for listing and inspecting threads. Reads `.claude/agnz/threads/*.meta.json` and `.jsonl` directly. Includes `scripts/inspect.sh` as a terminal shortcut. |
+| `skills/agnz/` | Progressive-disclosure skill for ADR 0003 agent definitions and the `agent_*` lifecycle. `SKILL.md` covers when to delegate + quick define-and-spawn path; `references/defining.md` is the frontmatter field reference; `references/lifecycle.md` is the full MCP tool + conversation reference. |
 | `.mcp.json` | Tells CC how to spawn the MCP server. Uses `${CLAUDE_PLUGIN_ROOT}` (verified to expand). |
 | `.claude-plugin/plugin.json` | Plugin manifest. |
 
@@ -173,6 +171,10 @@ The old `memory/` directory is gone. The old `threads/` directory under the user
 
 ## Plugin development workflow
 
+### Branching
+
+Day-to-day work (bugfixes, refactoring, new features) lives on the `dev` branch. `main` is release-only — merge `dev` → `main` at release time, then bump the version and push. Never commit directly to `main` except for hotfixes that need to ship immediately.
+
 ### Versioning rule
 
 **Only bump `version` when pushing / publishing a release.** Day-to-day feature work on a branch keeps the current version string. A release bundles several branches' worth of work and bumps once at push time, either on the release commit or immediately before `git push`. This keeps semantic versioning meaningful instead of burning a minor number per refactor Häppchen.
@@ -197,7 +199,7 @@ Verify with `/mcp` — agnz should show as connected and the `agent_*` tools vis
 
 LM Studio default endpoint is `http://localhost:1234/v1`. After installing the plugin, run `/agnz:setup add` (interactive) or directly:
 ```bash
-node ${CLAUDE_PLUGIN_ROOT}/scripts/companion.mjs setup add lmstudio-devstral http://localhost:1234/v1 mistralai/devstral-small-2-2512
+node ${CLAUDE_PLUGIN_ROOT}/skills/agnz-setup/scripts/companion.mjs setup add lmstudio-devstral http://localhost:1234/v1 mistralai/devstral-small-2-2512
 ```
 Profile resolution at thread start: `workspace.json → modelProfileMappings[agentDef.model]` → fallback to `modelProfileMappings["_default"]` → profile name string. Configure mappings via `/agnz:setup`.
 
