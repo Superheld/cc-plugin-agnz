@@ -173,6 +173,10 @@ The old `memory/` directory is gone. The old `threads/` directory under the user
 
 ## Plugin development workflow
 
+### Branching
+
+Day-to-day work (bugfixes, refactoring, new features) lives on the `dev` branch. `main` is release-only — merge `dev` → `main` at release time, then bump the version and push. Never commit directly to `main` except for hotfixes that need to ship immediately.
+
 ### Versioning rule
 
 **Only bump `version` when pushing / publishing a release.** Day-to-day feature work on a branch keeps the current version string. A release bundles several branches' worth of work and bumps once at push time, either on the release commit or immediately before `git push`. This keeps semantic versioning meaningful instead of burning a minor number per refactor Häppchen.
