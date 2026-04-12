@@ -3,6 +3,7 @@ name: dev
 description: Use for implementing features, fixing bugs, refactoring code, and making structural changes. Can read, edit, write files and run shell commands.
 model: inherit
 color: yellow
+tools: ["LS", "Read", "Grep"]
 maxTurns: 40
 ---
 

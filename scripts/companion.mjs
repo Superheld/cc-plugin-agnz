@@ -99,6 +99,52 @@ async function runSetup(args) {
     }
   }
 
+  if (sub === "mapping") {
+    // mapping list|set|remove — manage workspace model→profile mappings.
+    // These live in <cwd>/.claude/agnz/workspace.json, not in profiles.json.
+    const store = createWorkspaceStore(process.cwd());
+    const msub = args[1] || "list";
+
+    if (msub === "list") {
+      const mappings = await store.getModelProfileMappings();
+      const entries = Object.entries(mappings);
+      if (entries.length === 0) {
+        return print("(no mappings — model identifiers fall through to profile name lookup)");
+      }
+      for (const [model, profile] of entries) {
+        const label = model === "_default" ? "_default (fallback)" : model;
+        print(`  ${label} → ${profile}`);
+      }
+      return;
+    }
+
+    if (msub === "set") {
+      const [,, model, profile] = args;
+      if (!model || !profile) return usage("setup mapping set <model> <profile>");
+      const ws = await store.readWorkspace();
+      const mappings = (ws?.modelProfileMappings && typeof ws.modelProfileMappings === "object")
+        ? ws.modelProfileMappings : {};
+      mappings[model] = profile;
+      await store.updateWorkspace({ modelProfileMappings: mappings });
+      return print(`mapped ${model} → ${profile}`);
+    }
+
+    if (msub === "remove") {
+      const [,, model] = args;
+      if (!model) return usage("setup mapping remove <model>");
+      const ws = await store.readWorkspace();
+      const mappings = { ...(ws?.modelProfileMappings || {}) };
+      if (!Object.prototype.hasOwnProperty.call(mappings, model)) {
+        return print(`(no mapping for '${model}')`);
+      }
+      delete mappings[model];
+      await store.updateWorkspace({ modelProfileMappings: mappings });
+      return print(`removed mapping for ${model}`);
+    }
+
+    return usage(`unknown mapping sub-command: ${msub}. Use list, set, or remove.`);
+  }
+
   return usage(`unknown setup sub-command: ${sub}`);
 }
 
@@ -204,6 +250,14 @@ async function runInfo(args) {
     return `  ${dir}\n    ${summary}`;
   }
 
+  // Model→profile mappings from workspace.json
+  const wsStore = createWorkspaceStore(cwd);
+  const mappings = await wsStore.getModelProfileMappings();
+  const mappingEntries = Object.entries(mappings);
+  const mappingLines = mappingEntries.length === 0
+    ? ["  (none — model identifiers fall through to profile name lookup)"]
+    : mappingEntries.map(([m, p]) => `  ${m === "_default" ? "_default (fallback)" : m} → ${p}`);
+
   const lines = [
     `agnz v${version}`,
     "",
@@ -213,6 +267,8 @@ async function runInfo(args) {
     ...(otherProfiles ? ["  other profiles:", otherProfiles] : []),
     "",
     `Per-project (cwd: ${cwd}):`,
+    "  model→profile mappings:",
+    ...mappingLines,
     fmt(agentsDir, agentFiles, "agent" + (agentFiles?.length === 1 ? "" : "s")),
     fmt(threadsDir, threadFiles, "thread" + (threadFiles?.length === 1 ? "" : "s")),
     fmt(skillsDir, skillDirs, "skill" + (skillDirs?.length === 1 ? "" : "s")),

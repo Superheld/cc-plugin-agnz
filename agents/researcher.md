@@ -3,6 +3,7 @@ name: researcher
 description: Use for read-only investigations — understanding how something works, finding usages, tracing data flows, or summarising a module.
 model: inherit
 color: blue
+tools: ["LS", "Read", "Grep"]
 disallowedTools: ["Edit", "Write", "Bash"]
 temperature: 0.2
 maxTurns: 30

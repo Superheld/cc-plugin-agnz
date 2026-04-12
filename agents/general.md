@@ -3,6 +3,7 @@ name: general
 description: Use for self-contained tasks that don't fit a specialised role — one-off lookups, quick edits, running a script, or anything ad-hoc. When in doubt, use this.
 model: inherit
 color: cyan
+tools: ["LS", "Read", "Grep"]
 maxTurns: 30
 ---
 
