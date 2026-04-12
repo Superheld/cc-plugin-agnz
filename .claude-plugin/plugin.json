@@ -1,6 +1,6 @@
 {
   "name": "agnz",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "description": "Sandboxed local-model agent for Claude Code. Exposes an MCP server so Claude can converse with a locally-hosted LLM (LM Studio, Ollama, any OpenAI-compatible endpoint) that has its own scoped file-system access and memory.",
   "homepage": "https://github.com/Superheld/cc-plugin-agnz",
   "repository": "https://github.com/Superheld/cc-plugin-agnz",

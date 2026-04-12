@@ -195,11 +195,48 @@ If you just want to know where the sub-agent is right now without blocking, Read
 
 ## Messages and mailboxes — agent↔agent communication
 
-Sub-agents can send messages to each other (and to the parent) via the `SendMessage` tool. The messages land in `<cwd>/.claude/agnz/messages.jsonl`. Each sub-agent automatically drains its inbox at the top of every turn — messages addressed to it get injected as synthetic user messages, and the thread's `inboxCursor` advances so the same message is not redelivered.
+Sub-agents address each other by the `name` given at `agent_start`. Messages are sent via the `SendMessage` tool (always-allowed, no approval needed) and land in `<cwd>/.claude/agnz/messages.jsonl`.
 
-Key vocabulary on a message: `kind` ∈ `say | question | answer | handoff | status | error | directive`. The schema is in the `workspace` skill's reference.
+### Sending a message
 
-For the parent to see mail, enable the `UserPromptSubmit` and `SessionStart` hooks that ship with the plugin — see the top-level readme.
+```
+SendMessage({
+  to: "writer",            // agent name, or "parent", or ["a", "b"] for broadcast
+  kind: "handoff",         // see kinds below
+  body: "Investigation complete. Key files: lib/auth.js, lib/tokens.js",
+  urgent: false            // true → OS notification when addressed to parent
+})
+```
+
+### Message kinds
+
+| Kind | Purpose |
+|---|---|
+| `say` | Informational — status update, FYI |
+| `question` | Ask another agent something; expect an `answer` back |
+| `answer` | Response to a `question` |
+| `handoff` | Pass work ownership to another agent |
+| `status` | Structured progress signal |
+| `error` | Report a failure to another agent or parent |
+| `directive` | Instruction from parent or lead agent to a sub-agent |
+
+### Receiving messages
+
+Each sub-agent drains its inbox at the **top of every turn**. Messages addressed to it (`to` matches the agent's name) are injected as synthetic user messages. The `inboxCursor` advances so the same message is never redelivered across MCP restarts.
+
+### Parent as recipient
+
+Agents message the parent via `to: "parent"`. The `UserPromptSubmit` and `SessionStart` hooks (auto-enabled by the plugin) inject unread parent-addressed mail into Claude's context at the next prompt submission or session start. No polling needed.
+
+Set `urgent: true` on a message to also fire an OS notification (macOS/Linux).
+
+### Inspecting the message log
+
+```
+Read <cwd>/.claude/agnz/messages.jsonl
+```
+
+The log is append-only. Each line is `{ id, ts, from, to, kind, body, urgent? }`. Useful for debugging agent communication without blocking on MCP calls.
 
 ## What is deliberately NOT available
 

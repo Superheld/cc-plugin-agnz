@@ -4,14 +4,15 @@ Companion to [SKILL.md](SKILL.md). This covers the full `.md` + frontmatter form
 
 ## Where agent files live
 
+agnz resolves agent names in three layers (project shadows user shadows plugin):
+
 ```
-<cwd>/.claude/agents/
-├── researcher.md
-├── editor.md
-└── tester.md
+<cwd>/.claude/agents/      ← project-local (highest priority)
+~/.claude/agents/          ← user-wide
+<plugin>/agents/           ← plugin-bundled: dev, researcher, reviewer, general
 ```
 
-User-wide agents also supported at `~/.claude/agents/` — project-local agents (per-cwd) take precedence over user-wide ones when names collide.
+Plugin-bundled agents are available in every project without any setup. Create a file in `<cwd>/.claude/agents/` with the same name to override a plugin agent for a specific project.
 
 ## File format
 
@@ -65,33 +66,35 @@ and, if relevant, a bullet list of file:line references.
 | `temperature` | no | number | Overrides the profile's `temperature` for this role. |
 | `maxTurns` | no | positive integer | Overrides the profile's `maxTurns`. |
 
-### Multi-line description with `<example>` blocks
+### Description format
 
-Use `|` (literal block) to preserve newlines in the description — required for CC-style `<example>` blocks:
+Three supported forms, all parsed correctly by agnz:
 
+**Plain prose** (most common):
 ```yaml
-description: |
-  Use this agent when [conditions]. Examples:
-
-  <example>
-  Context: [Scenario]
-  user: "[What the user says]"
-  assistant: "[How Claude should respond]"
-  <commentary>
-  [Why this agent fits]
-  </commentary>
-  </example>
+description: Read-heavy code investigation. Bulk reads, grep sweeps, summaries of large modules.
 ```
 
-Use `>` (folded block) when you want a simple prose description without newlines:
-
+**Folded block** (`>`) — for longer prose without preserved newlines:
 ```yaml
 description: >
   Read-heavy code investigation. Bulk reads, grep sweeps,
   summaries of large modules.
 ```
 
-The parser also supports plain one-line scalars for short descriptions.
+**Multi-line with `<example>` blocks** — CC native format, plain indented continuation lines:
+```yaml
+description: Use this agent when the user asks to investigate code. Examples:
+
+  <example>
+  Context: User wants to understand the codebase structure.
+  user: "How does request logging work?"
+  assistant: "I'll delegate this to the researcher agent."
+  <commentary>Read-heavy, no edits needed.</commentary>
+  </example>
+```
+
+The parser detects where the description ends by looking for the next known frontmatter key (`model:`, `tools:`, etc.) at column 0. `<example>` content is excluded from this detection so `user:` and `model:` inside examples don't accidentally terminate the description.
 
 ### The markdown body = system prompt
 

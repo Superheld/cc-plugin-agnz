@@ -1,5 +1,23 @@
 # agnz orchestration — when and how to delegate
 
+## Thread reuse — resume before recreating
+
+Every thread has a name, a purpose, and a transcript. Check existing threads first:
+
+```
+/agnz:threads list
+```
+
+Resume an `idle` thread by sending to it:
+
+```
+agent_send({ thread_id: "...", message: "Continue: now write the tests." })
+```
+
+The thread already has all context from previous turns — the sub-agent picks up where it left off. Only create a new thread when the task or role is genuinely different.
+
+Threads in `stopped` or `error` state cannot be resumed — start fresh in those cases.
+
 ## The routing decision
 
 **Delegate to a sub-agent when:**
