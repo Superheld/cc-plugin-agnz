@@ -1,17 +1,17 @@
 ---
 name: agents
-version: 0.2.0
-description: "This skill should be used when the user asks to 'use agnz', 'delegate this to an agent', 'spawn an agent', 'create an agent definition', 'write an agent file', 'define a role for the sub-agent', or when a task involves reading many files, bulk grep sweeps, or mechanical edits across multiple files where a local model can do the work. Also load when an agnz thread is paused and needs resolution via agent_approve or agent_answer, or when the user asks about running two agents in parallel."
+version: 0.3.0
+description: "This skill should be used when the user asks to 'use agnz', 'delegate this to an agent', 'spawn an agent', 'resume a thread', 'continue with the agent', 'create an agent definition', 'write an agent file', 'define a role for the sub-agent', when agents should communicate or hand off work to each other, or when a task involves reading many files, bulk grep sweeps, or mechanical edits across multiple files where a local model can do the work. Also load when an agnz thread is paused and needs resolution via agent_approve or agent_answer, or when the user asks about running two agents in parallel."
 ---
 
 # agnz agents
 
 `agnz` delegates work to a locally-hosted LLM running as a sandboxed sub-agent. This skill covers:
 
-1. **Defining** a named role — a `.md` file that gives the sub-agent its identity, system prompt, and tool policy.
-2. **Spawning** and talking to it via the `agent_*` MCP tools.
-
-For setup (profiles, data paths) see the `workspace` skill.
+1. **Thread identity** — threads are persistent; resume them, don't recreate.
+2. **Defining** a named role — a `.md` file with identity, system prompt, and tool policy.
+3. **Spawning** and talking to it via the `agent_*` MCP tools.
+4. **Team model** — agents can address and hand off work to each other.
 
 ## When to delegate
 
@@ -23,36 +23,38 @@ A sub-agent's intermediate tool calls do **not** consume parent context — only
 
 Avoid delegation when the work needs deep reasoning — local models are limited.
 
+## Thread identity — resume, don't recreate
+
+Every thread has a name, a purpose, and a persistent transcript. Before starting a new thread, check what's already there:
+
+```
+/agnz:threads list
+```
+
+If a thread for this task is `idle`, send to it directly — it already has context from earlier turns:
+
+```
+agent_send({ thread_id: "...", message: "Continue: now add the tests." })
+```
+
+Starting a fresh thread discards that context. Only create a new thread when the role or task is genuinely different from what exists.
+
+Threads that are `stopped` or `error` cannot be resumed. Start a fresh thread in that case.
+
 ## Quick path — define and spawn
 
 ### Step 1 — create the agent file
 
-Agent files live at:
-```
-<cwd>/.claude/agents/<name>.md
-```
-
-Minimal example — create `<cwd>/.claude/agents/researcher.md`:
+Plugin-bundled agents (`dev`, `researcher`, `reviewer`, `general`) are available in every project. For project-specific roles create a file at `<cwd>/.claude/agents/<name>.md`:
 
 ```markdown
 ---
 name: researcher
-description: |
+description: >
   Use this agent when the user asks to investigate code, find usages,
-  or summarise a module. Examples:
-
-  <example>
-  Context: User wants to understand the codebase.
-  user: "How does request logging work?"
-  assistant: "I'll delegate this to the researcher agent."
-  <commentary>Read-heavy, no edits needed.</commentary>
-  </example>
-model: lmstudio-devstral
-color: blue
-disallowedTools:
-  - Edit
-  - Write
-  - Bash
+  or summarise a module.
+model: inherit
+disallowedTools: ["Edit", "Write", "Bash"]
 ---
 
 Investigate code and produce concise, factual summaries.
@@ -62,9 +64,11 @@ Do not modify files. Finish with a one-paragraph summary.
 ### Step 2 — spawn
 
 ```
-agent_start({ cwd: "/abs/path/to/project", agent: "researcher" })
+agent_start({ name: "researcher-1", agent: "researcher" })
 → { thread_id: "abc...", profile: "lmstudio-devstral", policy: {...} }
 ```
+
+`name` is the routing address for messages and for identifying the thread later.
 
 ### Step 3 — send a task
 
@@ -75,64 +79,80 @@ agent_send({ thread_id: "abc...", message: "Summarise how request logging works.
 
 ## Agent file — frontmatter fields
 
-agnz agent files follow the same format as CC's built-in agent definitions. The main difference is `tools`: CC uses an array of names to grant access; agnz uses a policy map `{toolName: allow|ask|deny}`.
+Agent files follow CC's native agent format. Fields:
 
 | Field | Required | Notes |
 |---|---|---|
-| `name` | yes | `[a-z][a-z0-9_-]*`. Unique in the workspace. |
-| `description` | yes | How Parent Claude picks this role. Use `\|` for multi-line with `<example>` blocks. **Be specific.** |
-| `model` | no | agnz profile name (e.g. `lmstudio-devstral`). Falls back to active profile if absent. |
-| `color` | no | `blue`/`cyan`/`green`/`yellow`/`magenta`/`red`. Stored for future UI use. |
-| `tools` | no | String array — **whitelist**. Only listed tools are available; all others denied. Profile is the upper bound. |
-| `disallowedTools` | no | String array — **blacklist**. Listed tools are denied, overrides the whitelist. |
-| `skills` | no | String array — allowlist for the `Skill` tool. Absent = all project-local skills available. |
+| `name` | yes | `[a-z][a-z0-9_-]*`. Unique in the workspace. Also the mailbox address for messages. |
+| `description` | yes | How Parent Claude picks this role. Plain prose or `>` block. Use `<example>` blocks for routing examples. |
+| `model` | no | agnz profile name or `inherit`/`sonnet`/`haiku`/`opus` (mapped via workspace). Falls back to active profile if absent. |
+| `color` | no | `blue`/`cyan`/`green`/`yellow`/`magenta`/`red`. |
+| `tools` | no | JSON array — **whitelist**. Listed tools become `allow`; others default to `ask`. |
+| `disallowedTools` | no | JSON array — **blacklist**. Overrides whitelist and profile. |
+| `skills` | no | JSON array — allowlist for `Skill` tool. |
 | `temperature` | no | LLM sampling temperature override. |
 | `maxTurns` | no | Loop ceiling override. |
 
-**Critical rule:** The profile's `defaultPolicy` is the ceiling. Listing a tool in `tools` can never promote it beyond the profile's decision. To unlock a tool, update the profile.
+**Profile is the upper bound.** `tools:` can grant up to what the profile allows — it cannot unlock a tool the profile denies.
 
 ## The six MCP tools
 
 | Tool | When |
 |---|---|
-| `agent_start` | Create a thread. Returns `thread_id`. |
+| `agent_start` | Create a thread. Requires `name` (routing address) + `agent` (def name) or `inline` (frontmatter string). |
 | `agent_send` | Send a task. Sync by default — blocks until done or paused. |
 | `agent_approve` | Resolve an approval pause (sub-agent wants to run a gated tool). |
 | `agent_answer` | Resolve a question pause (sub-agent called `AskUser`). |
 | `agent_wait` | Block for the next event on a detached thread. |
 | `agent_stop` | End a thread. Transcripts persist. |
 
-**There is no `agent_status` or `agent_list_threads`.** Read `<cwd>/.claude/agnz/threads/*.meta.json` directly.
+**There is no `agent_status` or `agent_list_threads`.** Read `<cwd>/.claude/agnz/threads/*.meta.json` directly, or use `/agnz:threads list`.
 
 ### The three outcomes of agent_send
 
-1. **`status: "final"`** — sub-agent finished. Round is over.
-2. **`status: "awaiting_input"`, `kind: "approval"`** — sub-agent wants to run a gated tool. Resolve with `agent_approve(thread_id, tool_call_id, decision: "allow"|"deny", persist?: true)`. Use `persist: true` to avoid repeated pauses for the same tool.
+1. **`status: "final"`** — sub-agent finished. Thread is idle; you can send again.
+2. **`status: "awaiting_input"`, `kind: "approval"`** — sub-agent wants a gated tool. Resolve with `agent_approve(thread_id, tool_call_id, "allow"|"deny", persist?: true)`.
 3. **`status: "awaiting_input"`, `kind: "question"`** — sub-agent called `AskUser`. Resolve with `agent_answer(thread_id, tool_call_id, answer: "...")`.
+
+## Team model
+
+Sub-agents address each other by the `name` given at `agent_start`. A researcher can hand off to a writer without going through the parent:
+
+```
+# Inside the researcher agent — tool call:
+SendMessage({ to: "writer", kind: "handoff", body: "Investigation complete. Findings: ..." })
+```
+
+The writer drains its inbox at the start of its next turn and receives the message as a synthetic user message. No parent involvement needed.
+
+Message kinds: `say`, `question`, `answer`, `handoff`, `status`, `error`, `directive`.
+
+**Parent as recipient:** Agents can message the parent via `to: "parent"`. The `UserPromptSubmit` and `SessionStart` hooks (auto-enabled by the plugin) inject unread parent-addressed mail into Claude's context at the next prompt. Mark a message `urgent: true` to also trigger an OS notification.
+
+**Reading the log:** All messages are appended to `<cwd>/.claude/agnz/messages.jsonl` — inspect it directly to see the full message history across agents.
 
 ## Concurrency
 
 ```
-agent_start A → thread_A
-agent_start B → thread_B
-agent_send(A, task, detach: true)
-agent_send(B, task, detach: true)
-agent_wait(A) → outcome_A
-agent_wait(B) → outcome_B
+agent_start({name: "researcher-auth",  agent: "researcher"}) → thread_A
+agent_start({name: "researcher-billing", agent: "researcher"}) → thread_B
+agent_send({thread_id: A, message: "...", detach: true})
+agent_send({thread_id: B, message: "...", detach: true})
+agent_wait({thread_id: A}) → outcome_A
+agent_wait({thread_id: B}) → outcome_B
 ```
 
 Node's event loop gives real parallelism. Two agents finish in roughly the time one would take.
 
 ## Common pitfalls
 
-- **Vague description.** The description is how the right role gets picked. "Helper" routes nothing; "Read-heavy code investigation, no file writes" routes well.
+- **Always creating new threads.** Check `/agnz:threads list` first. Resuming preserves context.
+- **Vague description.** "Helper" routes nothing; "Read-heavy code investigation, no file writes" routes well.
 - **Trying to expand tool policy from an agent def.** Only the profile can grant access. The agent def can only restrict.
 - **Editing an agent file while a thread runs.** The thread uses a snapshot taken at `agent_start` — edits need a fresh thread.
 
 ## Reference files
 
-For deeper content, read the file using the base directory shown in the skill header:
-
-- **`references/defining.md`** — full frontmatter spec, the tool-policy merge model with worked examples, three complete example roles (researcher / editor / tester), snapshot-on-spawn semantics.
-- **`references/lifecycle.md`** — full MCP tool signatures, error recovery, the detach + wait pattern in depth, agent-to-agent messaging via `SendMessage`.
-- **`references/orchestration.md`** — when to delegate vs. do it yourself, how to write a task brief, handling outcomes and pauses, parallel run patterns.
+- **`references/defining.md`** — full frontmatter spec, tool-policy merge model, example roles.
+- **`references/lifecycle.md`** — full MCP tool signatures, detach + wait pattern, team messaging in depth.
+- **`references/orchestration.md`** — when to delegate, thread reuse, task briefing, handling outcomes.
