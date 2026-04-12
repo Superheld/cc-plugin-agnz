@@ -36,6 +36,52 @@ Configuration for the **agnz** plugin. Two things live here:
 ```
 After this, any agent def with `model: sonnet` (or `model: inherit`, or no model) runs via the `lmstudio` profile — no changes to the agent files needed.
 
+## Profile fields
+
+All fields stored in `~/.claude/agnz/profiles.json`:
+
+| Field | Required | Default | Notes |
+|---|---|---|---|
+| `baseUrl` | yes | — | OpenAI-compatible endpoint, e.g. `http://localhost:1234/v1` |
+| `model` | yes | — | Model identifier as the server expects it, e.g. `mistralai/devstral-small-2-2512` |
+| `apiKey` | no | `null` | Bearer token; LM Studio / Ollama don't require one |
+| `temperature` | no | `0.2` | Sampling temperature |
+| `maxTokens` | no | `null` | Max tokens per response; `null` = server default |
+| `maxTurns` | no | `20` | Max loop turns before the thread pauses |
+| `llmTimeoutMs` | no | `null` (= 10 min) | Increase for large/slow models on CPU |
+
+## Fresh project setup
+
+Complete flow from zero to first agent run:
+
+```
+# 1. Add a profile (interactive — will ask for baseUrl + model)
+/agnz:setup add lmstudio
+
+# 2. Verify reachability
+/agnz:setup test lmstudio
+
+# 3. Map CC model identifiers → this profile
+#    (so agent defs with model: sonnet/inherit/etc. route to your local model)
+/agnz:setup mapping set _default lmstudio
+/agnz:setup mapping set inherit  lmstudio
+/agnz:setup mapping set sonnet   lmstudio
+
+# 4. Confirm the full picture
+/agnz:setup
+/agnz:setup mapping list
+```
+
+After step 3, any agent def — whether it uses `model: sonnet`, `model: inherit`, or omits `model` entirely — will resolve to `lmstudio`. No agent files need editing.
+
+**Multiple local models:** create one profile per endpoint/model, then point specific CC model names at each:
+```
+/agnz:setup add devstral   # fast, small — for research tasks
+/agnz:setup add qwen-coder # large — for editing tasks
+/agnz:setup mapping set inherit devstral
+/agnz:setup mapping set sonnet  qwen-coder
+```
+
 ## Instructions
 
 The user invoked `/agnz:setup $ARGUMENTS`.

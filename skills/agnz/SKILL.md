@@ -66,7 +66,7 @@ Do not modify files. Finish with a one-paragraph summary.
 
 ```
 agent_start({ name: "researcher-1", agent: "researcher" })
-→ { thread_id: "abc...", profile: "lmstudio-devstral", policy: {...} }
+→ { thread_id: "abc...", name: "researcher-1", agent: "researcher" }
 ```
 
 `name` is the routing address for messages and for identifying the thread later.
