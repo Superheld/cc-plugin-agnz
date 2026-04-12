@@ -41,16 +41,28 @@ const threadMgr = createThreadManager();
 const profileStore = createProfileStore({ dataDir: USER_DIR });
 const registry = createRegistry();
 
-// Sandboxes are cached per-thread in memory; rebuilt from persisted
-// thread.policy on first use after a server restart.
+// Sandboxes are cached per-thread in memory; rebuilt from agentDef on first
+// use after a server restart (policy is not stored in thread meta).
 const sandboxes = new Map();
 function sandboxFor(thread) {
   let sb = sandboxes.get(thread.id);
   if (!sb) {
-    sb = createSandbox({ root: thread.cwd, policy: thread.policy || undefined });
+    const availableTools = registry.list().map(t => t.name);
+    const policy = thread.agentDef ? buildToolPolicy(thread.agentDef, availableTools) : {};
+    sb = createSandbox({ root: thread.cwd, policy });
     sandboxes.set(thread.id, sb);
   }
   return sb;
+}
+
+// Resolve the LLM profile for a thread at call time. Profile is not stored in
+// thread meta — it is always re-derived from agentDef.model via workspace
+// mappings so profile changes take effect without restarting the thread.
+async function resolveProfile(thread) {
+  const store = createWorkspaceStore(thread.cwd);
+  const modelIdentifier = thread.agentDef?.model || "_default";
+  const profileName = await store.resolveModelToProfile(modelIdentifier);
+  return profileStore.get(profileName);
 }
 
 // ---- result helpers ----
@@ -150,13 +162,9 @@ const tools = [
       properties: {
         thread_id: { type: "string" },
         name: { type: ["string", "null"] },
-        cwd: { type: "string" },
-        profile: { type: "string" },
-        model: { type: "string" },
-        policy: { type: "object", additionalProperties: { type: "string" } },
         agent: { type: "string" },
       },
-      required: ["thread_id", "cwd", "profile", "model", "policy", "agent"],
+      required: ["thread_id", "agent"],
     },
     inputSchema: {
       type: "object",
@@ -236,8 +244,6 @@ const tools = [
 
         const thread = await threadMgr.createThread({
           cwd,
-          profile: profile.name,
-          policy,
           agentDef,
           name: args.name,
           description: args.description || null,
@@ -247,10 +253,6 @@ const tools = [
         return jsonResult({
           thread_id: thread.id,
           name: args.name || null,
-          cwd: thread.cwd,
-          profile: profile.name,
-          model: profile.model,
-          policy: thread.policy,
           agent: agentDef.name,
         });
       } catch (err) {
@@ -310,8 +312,8 @@ const tools = [
           });
         }
 
-        const profile = await profileStore.get(thread.profile);
-        if (!profile) return errorResult(`profile '${thread.profile}' no longer exists`);
+        const profile = await resolveProfile(thread);
+        if (!profile) return errorResult(`no profile found for thread '${args.thread_id}'. Run /agnz:setup add.`);
         const sandbox = sandboxFor(thread);
 
         const promise = kick(args.thread_id, () =>
@@ -581,8 +583,8 @@ async function loadPaused(threadId, expectedKind) {
       ),
     };
   }
-  const profile = await profileStore.get(thread.profile);
-  if (!profile) return { error: errorResult(`profile '${thread.profile}' no longer exists`) };
+  const profile = await resolveProfile(thread);
+  if (!profile) return { error: errorResult(`no profile found for thread '${threadId}'. Run /agnz:setup add.`) };
   const sandbox = sandboxFor(thread);
   return { thread, profile, sandbox };
 }
@@ -689,4 +691,4 @@ async function recoverStaleRuns() {
 // ---- boot -----------------------------------------------------------------
 
 await recoverStaleRuns();
-await runStdioServer({ name: "agnz", version: "0.9.9", instructions: INSTRUCTIONS, tools });
+await runStdioServer({ name: "agnz", version: "0.9.10", instructions: INSTRUCTIONS, tools });
