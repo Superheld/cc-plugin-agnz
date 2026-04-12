@@ -1,4 +1,5 @@
 ---
+name: setup
 description: Configure local-model profiles for the agnz agent (list, add, remove, use, test).
 argument-hint: "list | add <name> | remove <name> | use <name> | test [name]"
 allowed-tools: Bash(node *) AskUserQuestion

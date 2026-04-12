@@ -1,4 +1,5 @@
 ---
+name: threads
 description: List agnz threads in the current project workspace (read-only).
 argument-hint: "list"
 allowed-tools: Bash(node *)

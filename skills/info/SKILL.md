@@ -1,4 +1,5 @@
 ---
+name: info
 description: Show current agnz setup — version, data paths, active profile, and per-project agents/skills/threads.
 argument-hint: "[cwd]"
 allowed-tools: Bash(node *)
