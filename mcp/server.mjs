@@ -224,10 +224,11 @@ const tools = [
           );
         }
 
-        // Build tool policy: profile.defaultPolicy is the baseline, agent def
-        // overrides with tools (allow) and disallowedTools (deny).
+        // Policy comes from the agent def frontmatter only:
+        // tools (whitelist) → allow, disallowedTools → deny, else → ask.
+        // Skill is auto-allowed if the def has skills configured.
         const availableTools = registry.list().map(t => t.name);
-        const policy = buildToolPolicy(agentDef, availableTools, profile.defaultPolicy || {});
+        const policy = buildToolPolicy(agentDef, availableTools);
 
         const thread = await threadMgr.createThread({
           cwd,
