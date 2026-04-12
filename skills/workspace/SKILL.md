@@ -13,7 +13,8 @@ description: "This skill should be used when agnz needs to be configured, when a
 | Location | What lives there | Scope |
 |---|---|---|
 | `~/.claude/agnz/` | `profiles.json`, `thread-index.json` | User-wide — shared across all projects |
-| `<cwd>/.claude/agnz/` | `workspace.json`, `threads/`, `agents/` | Per-project — lives with the code |
+| `<cwd>/.claude/agnz/` | `workspace.json`, `threads/` | Per-project — lives with the code |
+| `<plugin>/agents/` | `dev.md`, `researcher.md`, … | Plugin-bundled agent definitions |
 | `<cwd>/.claude/skills/` | Project-local skills for sub-agents | Per-project |
 
 Override the user-wide root by setting `$AGNZ_DATA_DIR`.
@@ -26,7 +27,7 @@ To see version, active profile, and all per-project paths at once:
 node ${CLAUDE_PLUGIN_ROOT}/scripts/companion.mjs info [/abs/path/to/project]
 ```
 
-Or use the `/agnz:info` slash command. Output includes plugin version, active profile with endpoint/model/policy, and agents/threads/skills paths with file counts.
+Or use the `/agnz:info` slash command. Output includes plugin version, active profile with endpoint/model, and plugin-agents/threads/skills paths with file counts.
 
 ## Setup in 30 seconds
 
@@ -67,7 +68,7 @@ Thread status values: `idle`, `running`, `awaiting_input`, `stopped`, `error`. A
 
 **`no profile named '<x>'`** — the profile was renamed or removed. Run `/agnz:setup list` to see what's actually there.
 
-**Stale `defaultPolicy` after plugin upgrade** — new tools added to the plugin don't retroactively appear in old profiles. Recreate the profile (`/agnz:setup remove` then `add`) to pick up the current default policy.
+**Profile has unexpected fields after plugin upgrade** — if a profile was created with an old plugin version it may carry stale fields. Recreate it (`/agnz:setup remove` then `add`) to get a clean profile with current defaults.
 
 ## Reference files
 

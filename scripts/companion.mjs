@@ -117,6 +117,8 @@ async function runThreads(args) {
     const threads = await store.listThreads();
     const summary = threads.map((t) => ({
       id: t.id,
+      name: t.name || null,
+      description: t.description || null,
       status: t.status,
       profile: t.profile,
       agent: t.agentDef?.name || null,
@@ -140,8 +142,7 @@ async function runThreads(args) {
 async function runInfo(args) {
   const cwd = args[0] || process.cwd();
 
-  // Plugin version from plugin.json, which lives two directories up from
-  // this script (scripts/ → repo root → .claude-plugin/plugin.json).
+  // Plugin version + root derived from this script's location.
   const scriptDir = dirname(fileURLToPath(import.meta.url));
   const pluginJsonPath = resolvePath(scriptDir, "..", ".claude-plugin", "plugin.json");
   let version = "unknown";
@@ -161,14 +162,11 @@ async function runInfo(args) {
   if (allProfiles.active) {
     const p = allProfiles.profiles.find((x) => x.name === allProfiles.active);
     if (p) {
-      const policyStr = Object.entries(p.defaultPolicy || {})
-        .map(([t, d]) => `${t}=${d}`)
-        .join("  ");
       profileLines = [
         `  active: ${p.name}`,
         `    endpoint: ${p.baseUrl}`,
         `    model:    ${p.model}`,
-        `    policy:   ${policyStr || "(default)"}`,
+        ...(p.llmTimeoutMs != null ? [`    timeout:  ${p.llmTimeoutMs}ms`] : []),
       ].join("\n");
     }
   }
@@ -178,9 +176,10 @@ async function runInfo(args) {
     .map((p) => `    - ${p.name} (${p.baseUrl})`)
     .join("\n");
 
-  // Per-project paths.
+  // Per-project paths. Plugin agents live in <pluginRoot>/agents/.
+  const pluginRoot = resolvePath(scriptDir, "..");
   const projectDir = resolveProjectDir(cwd);
-  const agentsDir = resolvePath(projectDir, "agents");
+  const agentsDir = resolvePath(pluginRoot, "agents");
   const threadsDir = resolvePath(projectDir, "threads");
   const skillsDir = resolvePath(cwd, ".claude", "skills");
 
