@@ -229,7 +229,8 @@ const tools = [
         // - disallowedTools: denied
         // - everything else: "ask" (prompt)
         // Session approvals override this for that session.
-        const policy = buildToolPolicy(agentDef);
+        const availableTools = registry.list().map(t => t.name);
+        const policy = buildToolPolicy(agentDef, availableTools);
 
         const thread = await threadMgr.createThread({
           cwd,
