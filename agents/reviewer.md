@@ -3,6 +3,7 @@ name: reviewer
 description: Use to review code changes before committing — checks correctness, consistency, and potential regressions. Does not edit files.
 model: inherit
 color: blue
+tools: ["LS", "Read", "Grep"]
 disallowedTools: ["Edit", "Write"]
 temperature: 0.1
 maxTurns: 20

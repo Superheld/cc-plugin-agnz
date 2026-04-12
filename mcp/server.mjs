@@ -212,7 +212,10 @@ const tools = [
         }
 
         // Map model identifier from agent def to profile name via workspace mappings.
-        // The resolved profile carries the actual model (whatever the endpoint serves).
+        // Resolution: mappings[model] → mappings["_default"] → model string as profile name.
+        // NOTE: activeProfile in profiles.json is NOT consulted here — it is a UI-only
+        // convenience for setup commands. Profile routing is fully controlled by
+        // workspace.json → modelProfileMappings.
         const store = createWorkspaceStore(cwd);
         const modelIdentifier = agentDef.model || "_default";
         profileName = await store.resolveModelToProfile(modelIdentifier);
@@ -655,4 +658,4 @@ async function recoverStaleRuns() {
 // ---- boot -----------------------------------------------------------------
 
 await recoverStaleRuns();
-await runStdioServer({ name: "agnz", version: "0.9.7", instructions: INSTRUCTIONS, tools });
+await runStdioServer({ name: "agnz", version: "0.9.8", instructions: INSTRUCTIONS, tools });
