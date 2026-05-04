@@ -8,41 +8,24 @@ Parent Claude talks to it over MCP. The sub-agent does the heavy file work — r
 
 - **Save tokens.** Use a free local model for grunt work instead of burning Anthropic credits on dozens of intermediate file reads.
 - **Keep Parent Claude's context small.** Only the sub-agent's final answer ever lands in the parent transcript.
-- **Stay in control.** The sub-agent runs inside a sandbox: locked to a single working directory, tiered permissions (read-only by default, mutating tools require approval, shell is denied unless allowed by the agent def).
+- **Stay in control.** The sub-agent runs inside a sandbox: locked to a single working directory, tiered permissions defined by the agent definition.
 - **Concurrency for free.** Sub-agents run in parallel via Node's event loop — no workers, no IPC. Two parallel runs measured at ~5.5s vs. ~10s sequential.
 
-## Status (v0.9.10)
+## MCP tool surface
 
-What works today:
-
-- MCP boot, the lifecycle-only `agent_*` toolset (6 tools for agent process control)
-- `agent_start(agent: "<name>")` → `agent_send` → final answer (sub-agent does work independently)
-- Approval pause + resume via `agent_approve` (session-scoped, optional `persist`)
-- `AskUser` pause + resume via `agent_answer`
-- Detached runs via `agent_send(detach=true)` + `agent_wait`, multiple parallel sub-agents finishing concurrently
-- Per-project workspace at `<cwd>/.claude/agnz/`, user-wide profiles at `~/.claude/agnz/`
-- **Agent definitions** (ADR 0003) — any Claude Code agent `.md` file can be started as an agnz sub-agent. Pass `agent: "<name>"` to `agent_start`; the def is loaded from `<cwd>/.claude/agents/`, `~/.claude/agents/`, or the plugin-bundled `agents/` directory (first match wins). Plugin-bundled defaults: `dev`, `researcher`, `reviewer`, `general`.
-- **modelProfileMappings** — map agent model identifiers to profile names in `workspace.json`. One profile per model, resolved at call time — no stale copies in thread meta.
-- **Permissions** — tool policy is derived from the agent def's `tools:` / `disallowedTools:` frontmatter fields at runtime. Nothing stored in thread meta.
-- **Skills** (ADR 0005) — project-local instruction sets at `<cwd>/.claude/skills/<name>/SKILL.md`. Sub-agents load them on demand via `Skill({action:"load", name:"..."})`. Agent defs can declare a `skills:` allowlist.
-- **Mailbox communication** (ADR 0002) — sub-agents publish messages via `SendMessage`; parent Claude receives them as hook injections at prompt/session time.
-
-**Zero npm dependencies.** The MCP stdio server is hand-rolled (~150 lines). The plugin ships as pure source — Claude Code copies it to its cache on every install and there is no `npm install` step.
-
-## The current MCP tools
-
-Only six, all about process lifecycle:
+Two namespaces, clearly separated:
 
 | Tool | Purpose |
 |---|---|
-| `agent_start` | Start a thread with an agent. `agent_start({agent: "name", name?: "routing-address"})`. |
-| `agent_send` | Send a message. Sync by default; `detach=true` returns immediately. |
-| `agent_wait` | Block on a detached run until the next event (final / pause / error). |
-| `agent_approve` | Resolve an approval pause (allow/deny, optional `persist`). |
-| `agent_answer` | Resolve an `AskUser` pause with a free-text answer. |
-| `agent_stop` | Kill a live thread. Transcripts remain on disk. |
+| `agent_start` | Start a thread. Pass `agent` (def name) or `inline` (raw frontmatter string). |
+| `agent_stop` | Hard-stop a running thread. Aborts the in-flight LLM call via AbortController. Transcript stays on disk. |
+| `thread_send` | Send a message. Always returns immediately — agent runs in background. Idle/stopped threads resume; error threads are blocked (use `agent_start`). |
+| `thread_approve` | Resolve an approval pause (allow/deny, optional `persist`). Agent resumes in background. |
+| `thread_answer` | Resolve an `AskUser` question pause with a free-text answer. Agent resumes in background. |
 
-Anything else — inspecting a thread, listing threads, reading transcripts — the parent does by opening files under `<cwd>/.claude/agnz/threads/` directly, or via the bundled `/agnz:inspect` skill.
+All three `thread_*` tools return immediately. Results come back via `SendMessage(to: "parent")` — the `UserPromptSubmit` hook injects unread parent mail into your next prompt automatically. The agent also auto-notifies parent on completion, max-turns, error, and any pause — so nothing goes silently missing.
+
+Anything else — inspecting a thread, listing threads, reading transcripts — the parent does by reading files under `<cwd>/.claude/agnz/` directly, or via the bundled `/agnz:threads` skill.
 
 ## Architecture at a glance
 
@@ -50,26 +33,35 @@ Anything else — inspecting a thread, listing threads, reading transcripts — 
 Claude Code (Parent)
     │
     ▼  MCP stdio JSON-RPC
-mcp/server.mjs             ← 6 agent_* lifecycle tools
+mcp/server.mjs          ← agent_start, agent_stop, thread_send/approve/answer
     │
     ▼
-lib/loop.mjs               ← LLM ↔ tool loop, persists transcript
+lib/loop.mjs            ← LLM ↔ tool loop, persists transcript
     │
-    ├──▶ tools/            (Read, Edit, Write, Grep, LS, Bash,
-    │                       AskUser, SendMessage, Skill)
-    ├──▶ sandbox.mjs       (cwd lock + tiered permission policy)
-    ├──▶ agent-defs.mjs    (named roles from .claude/agents/ and plugin agents/)
-    ├──▶ workspace-store   (<cwd>/.claude/agnz/ — threads, workspace.json)
-    ├──▶ thread-index      (user-wide id → cwd map)
-    ├──▶ profiles.mjs      (named LLM endpoint configs, user-wide)
-    └──▶ llm/openai-compatible.mjs   (native fetch, no SDK)
+    ├──▶ tools/         (Read, Edit, Write, Grep, LS, Bash, AskUser, SendMessage, Skill)
+    ├──▶ sandbox.mjs    (cwd lock + tiered permission policy)
+    ├──▶ agent-defs.mjs (named roles from .claude/agents/ and plugin agents/)
+    ├──▶ workspace-store (<cwd>/.claude/agnz/ — threads, workspace.json)
+    ├──▶ thread-index   (user-wide id → cwd map)
+    ├──▶ profiles.mjs   (named LLM endpoint configs, user-wide)
+    └──▶ llm/openai-compatible.mjs  (native fetch, no SDK)
 ```
 
-For the deep dive — module map, agent loop, detach/wait model, sandbox semantics — see [`CLAUDE.md`](./CLAUDE.md).
+For the deep dive — module map, agent loop, sandbox semantics — see [`CLAUDE.md`](./CLAUDE.md).
+
+## What the agent sees
+
+Each turn the agent receives a system prompt composed of:
+
+1. **Sandbox framing** — cwd, tool workflow rules, messaging instructions
+2. **CLAUDE.md files** — `<cwd>/CLAUDE.md` at startup; subdirectory `CLAUDE.md` files are added as the agent accesses files in those directories (CC-style, but scoped to the sandbox)
+3. **Tool restrictions** — which tools are allowed/denied per the agent def
+4. **Skills catalog** — names + descriptions of available skills; agent loads full content on demand via `Skill({action:"load", name:"..."})`
+5. **Agent body** — the role definition from the agent def frontmatter
 
 ## Install
 
-This repo is a plain Claude Code plugin — **not** a marketplace. Claude Code can only install plugins through a marketplace, so you first register one that lists `agnz`, then install from it. The canonical marketplace for this plugin is [`Superheld/claude-bauchladen`](https://github.com/Superheld/claude-bauchladen):
+This repo is a plain Claude Code plugin. The canonical marketplace is [`Superheld/claude-bauchladen`](https://github.com/Superheld/claude-bauchladen):
 
 ```
 /plugin marketplace add Superheld/claude-bauchladen
@@ -77,11 +69,19 @@ This repo is a plain Claude Code plugin — **not** a marketplace. Claude Code c
 /reload-plugins
 ```
 
-Verify with `/mcp` — `agnz` should show as connected and the `agent_*` tools should be visible.
+Verify with `/mcp` — `agnz` should show as connected and the tools visible.
+
+After code changes, update in place:
+
+```
+/plugin marketplace update agnz && /plugin install agnz@agnz && /reload-plugins
+```
+
+If reload doesn't take effect, the MCP process has outlived it — `pkill -f "node.*agnz.*server.mjs"` and CC will respawn it.
 
 ## Configure a profile (LM Studio example)
 
-LM Studio's default endpoint is `http://localhost:1234/v1`. Run `/agnz:setup add` for an interactive setup, or pass all fields directly:
+LM Studio's default endpoint is `http://localhost:1234/v1`. Run `/agnz:setup add` for interactive setup, or pass all fields directly:
 
 ```bash
 node ${CLAUDE_PLUGIN_ROOT}/skills/agnz-setup/scripts/companion.mjs setup add \
@@ -90,13 +90,21 @@ node ${CLAUDE_PLUGIN_ROOT}/skills/agnz-setup/scripts/companion.mjs setup add \
   mistralai/devstral-small-2-2512
 ```
 
-Profile resolution at thread start: `workspace.json → modelProfileMappings[model]` → fallback to `modelProfileMappings["_default"]` → profile name string. Configure with `/agnz:setup`.
+Profile resolution at thread start: `workspace.json → modelProfileMappings[model]` → fallback to `_default`. Configure with `/agnz:setup`.
+
+## Agent definitions
+
+Any Claude Code agent `.md` file works as an agnz agent definition. Pass `agent: "<name>"` to `agent_start`; the def is resolved from `<cwd>/.claude/agents/`, `~/.claude/agents/`, then the plugin-bundled `agents/` directory (first match wins).
+
+Plugin-bundled defaults: `dev`, `researcher`, `reviewer`, `general`.
+
+The `tools:` frontmatter field lists tools that run without approval. Anything not listed requires `thread_approve`. `disallowedTools:` blocks tools entirely.
 
 ## Data layout
 
 Two independent roots:
 
-**User-wide** — profiles and cross-project settings. Default: `~/.claude/agnz/`. Override with `$AGNZ_DATA_DIR`.
+**User-wide** — profiles and cross-project index. Default: `~/.claude/agnz/`. Override with `$AGNZ_DATA_DIR`.
 
 ```
 ~/.claude/agnz/
@@ -111,43 +119,36 @@ Two independent roots:
 ├── agents/
 │   └── <name>.md            ← agent definitions (shared with CC)
 ├── agnz/
-│   ├── workspace.json       ← shared workspace metadata + modelProfileMappings
+│   ├── workspace.json       ← shared metadata + modelProfileMappings
+│   ├── messages.jsonl       ← event bus for inter-agent communication
+│   ├── cursors/             ← parent read-cursor state (hook delivery tracking)
 │   └── threads/
 │       ├── <thread-id>.meta.json
-│       └── <thread-id>.jsonl
+│       ├── <thread-id>.jsonl
+│       └── <thread-id>.trace.jsonl
 └── skills/
     └── <name>/
-        └── SKILL.md         ← project-local skills (ADR 0005)
+        └── SKILL.md         ← project-local skills
 ```
-
-Agent definitions live at `<cwd>/.claude/agents/` (the CC-standard path) — not under `agnz/`. This means the same `.md` files work for both Claude Code's built-in `Agent` tool and for agnz.
 
 ## Bundled skills
 
 | Skill | Slash command | Purpose |
 |---|---|---|
-| `agnz-setup` | `/agnz:setup` | Manage LLM profiles (add, remove, use, test) |
-| `agnz-info` | `/agnz:info` | Show version, data paths, active profile |
-| `agnz-threads` | `/agnz:threads` | List threads in the current workspace |
-| `agnz-inspect` | — | Run `inspect.sh` to dump thread meta + formatted transcript |
-| `agents` | — | Progressive-disclosure reference for agent definitions and the `agent_*` lifecycle |
-
-## Where this is going
-
-Design decisions are captured as ADRs under [`docs/adr/`](./docs/adr/).
+| `agnz-setup` | `/agnz:setup` | Manage LLM profiles (add, remove, use, test, mappings) |
+| `agnz-threads` | `/agnz:threads` | List and inspect threads in the current workspace |
+| `agnz` | — | Progressive-disclosure reference for agent definitions and the full tool lifecycle |
 
 ## Conventions
 
-- **Native Node only.** No npm dependencies in the plugin.
-- **Comments explain *why*, not what.** The code already says what it does.
-- **JSONL for streams, JSON for snapshots.** Thread transcripts are append-only; thread metadata is rewritten in place.
-- **Two data roots, two lifetimes.** User-wide under `~/.claude/agnz/` for cross-project personal state. Per-project under `<cwd>/.claude/agnz/` for work-in-progress state that belongs with the code.
+- **Native Node only.** No npm dependencies.
+- **Comments explain *why*, not what.**
+- **JSONL for streams, JSON for snapshots.** Transcripts are append-only; thread meta is rewritten in place.
+- **Two data roots, two lifetimes.** User-wide under `~/.claude/agnz/` for cross-project state. Per-project under `<cwd>/.claude/agnz/` for workspace state.
 
-## ADRs are living documents
+## ADRs
 
-The files under [`docs/adr/`](./docs/adr/) are *not* one-time decisions that get archived after implementation. They are the authoritative description of how the system works *right now* — updated whenever the implementation diverges, a tradeoff shifts, or a decision is revisited. An ADR can be amended, partially superseded, or fully replaced by a newer ADR. The current status of each ADR (proposed / implemented / superseded / rejected) is written inside the file itself.
-
-If you change something that an ADR describes, update the ADR.
+Design decisions are captured as ADRs under [`docs/adr/`](./docs/adr/) — authoritative descriptions of how the system works right now, updated as the implementation evolves.
 
 ## License
 
