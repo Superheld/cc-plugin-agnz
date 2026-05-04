@@ -14,7 +14,7 @@ import { createProfileStore } from "../lib/profiles.mjs";
 import { runThread } from "../lib/loop.mjs";
 import { resolveUserDir } from "../lib/data-dir.mjs";
 import { loadAgentDef, listAgentDefs, buildToolPolicy, parseAgentDefSource, validateAgentDef } from "../lib/agent-defs.mjs";
-import { kick, wait, forget } from "../lib/run-tracker.mjs";
+import { kick, forget } from "../lib/run-tracker.mjs";
 import { createWorkspaceStore } from "../lib/workspace-store.mjs";
 import { publish } from "../lib/event-bus.mjs";
 import { INSTRUCTIONS } from "../lib/prompts.mjs";
@@ -265,7 +265,7 @@ const tools = [
   {
     name: "agent_send",
     description:
-      "Send a user message to a thread. Default mode (detach=false) blocks until the sub-agent finishes, pauses, or hits max_turns. With detach=true the sub-agent runs in the background and the call returns immediately with {status: 'started'} — use agent_wait to retrieve the outcome later. Detach mode lets you run multiple sub-agents concurrently or do other work while one is thinking.",
+      "Send a user message to a thread. The sub-agent always runs in the background — the call returns immediately with {status: 'started'}. Use agent_wait(thread_id) to block until the next event, or read the thread meta file for a non-blocking status check.",
     annotations: {
       title: "Send message to agent",
       readOnlyHint: false,
@@ -279,10 +279,6 @@ const tools = [
       properties: {
         thread_id: { type: "string" },
         message: { type: "string", description: "The user message for the agent." },
-        detach: {
-          type: "boolean",
-          description: "If true, return immediately and let the sub-agent run in the background. Default false.",
-        },
       },
       required: ["thread_id", "message"],
     },
@@ -316,88 +312,23 @@ const tools = [
         if (!profile) return errorResult(`no profile found for thread '${args.thread_id}'. Run /agnz:setup add.`);
         const sandbox = sandboxFor(thread);
 
-        const promise = kick(args.thread_id, () =>
+        kick(args.thread_id, () =>
           runThread({
             thread,
             threadMgr,
             sandbox,
             registry,
             profile,
+            pluginRoot: PLUGIN_ROOT,
             userMessage: args.message,
           }),
         );
 
-        if (args.detach === true) {
-          return jsonResult({
-            status: "started",
-            thread_id: args.thread_id,
-            hint: "Sub-agent is running in the background. Call agent_wait(thread_id) to block until next event. For a non-blocking check, read the thread's meta file at <cwd>/.claude/agnz/threads/<thread_id>.meta.json.",
-          });
-        }
-
-        const outcome = await promise;
-        return formatOutcome(outcome, args.thread_id);
-      } catch (err) {
-        return errorResult(err.message);
-      }
-    },
-  },
-
-  {
-    name: "agent_wait",
-    description:
-      "Block until a detached sub-agent reaches its next event (final response, pause, error). Use this after agent_send(detach=true) or agent_approve(detach=true). Optional timeout returns {status: 'still_running'} if nothing happens in time. Multiple concurrent waits on the same thread are safe.",
-    annotations: {
-      title: "Wait for agent event",
-      readOnlyHint: true,
-      openWorldHint: false,
-    },
-    outputSchema: OUTCOME_SCHEMA,
-    inputSchema: {
-      type: "object",
-      properties: {
-        thread_id: { type: "string" },
-        timeout_ms: {
-          type: "number",
-          description: "Optional timeout in milliseconds. If the sub-agent doesn't reach an event in this time, return {status: 'still_running'} without disturbing it.",
-        },
-      },
-      required: ["thread_id"],
-    },
-    async handler(args) {
-      try {
-        const thread = await threadMgr.getThread(args.thread_id);
-        if (!thread) return errorResult(`no thread '${args.thread_id}'`);
-
-        // If the thread is not actively running, check the tracker with a
-        // short timeout. A settled promise returns immediately; if nothing
-        // is tracked (e.g. after MCP server restart) we fall through to the
-        // null path below and report the persisted state.
-        const effectiveTimeout = thread.status === ThreadStatus.RUNNING
-          ? args.timeout_ms
-          : Math.min(args.timeout_ms ?? 2000, 2000);
-
-        const result = await wait(args.thread_id, effectiveTimeout);
-
-        if (result === null) {
-          // Nothing was tracked — return whatever the persisted state says.
-          return jsonResult({
-            status: "no_run_tracked",
-            thread_id: args.thread_id,
-            current_state: thread.status,
-            hint: "No background run was tracked for this thread. Either nothing has been started since the MCP server restarted, or the run already completed and was cleared. Read the thread's meta file at <cwd>/.claude/agnz/threads/<thread_id>.meta.json for the persisted state.",
-          });
-        }
-        if (result.timedOut) {
-          const fresh = await threadMgr.getThread(args.thread_id);
-          return jsonResult({
-            status: "still_running",
-            thread_id: args.thread_id,
-            current_state: fresh.status,
-            hint: "Sub-agent has not produced an event yet. Call agent_wait again to keep waiting.",
-          });
-        }
-        return formatOutcome(result.outcome, args.thread_id);
+        return jsonResult({
+          status: "started",
+          thread_id: args.thread_id,
+          hint: "Sub-agent is running in the background. For a non-blocking status check, read the thread's meta file at <cwd>/.claude/agnz/threads/<thread_id>.meta.json. The agent will report results via SendMessage(to: 'parent') — the hook delivers them at your next prompt.",
+        });
       } catch (err) {
         return errorResult(err.message);
       }
@@ -407,7 +338,7 @@ const tools = [
   {
     name: "agent_approve",
     description:
-      "Resolve a pending APPROVAL pause (sub-agent wants to run a tool that requires consent). Allow or deny the call. Set persist=true to apply the decision to all future calls of the same tool in this thread. Set detach=true to let the sub-agent continue in the background — use agent_wait afterwards. For AskUser pauses, use agent_answer instead.",
+      "Resolve a pending APPROVAL pause (sub-agent wants to run a tool that requires consent). Allow or deny the call. Set persist=true to apply the decision to all future calls of the same tool in this thread. The sub-agent resumes in the background. For AskUser pauses, use agent_answer instead.",
     annotations: {
       title: "Approve pending tool call",
       readOnlyHint: false,
@@ -423,7 +354,6 @@ const tools = [
         tool_call_id: { type: "string" },
         decision: { type: "string", enum: ["allow", "deny"] },
         persist: { type: "boolean" },
-        detach: { type: "boolean" },
       },
       required: ["thread_id", "tool_call_id", "decision"],
     },
@@ -432,13 +362,14 @@ const tools = [
         const { thread, profile, sandbox, error } = await loadPaused(args.thread_id, "approval");
         if (error) return error;
 
-        const promise = kick(args.thread_id, () =>
+        kick(args.thread_id, () =>
           runThread({
             thread,
             threadMgr,
             sandbox,
             registry,
             profile,
+            pluginRoot: PLUGIN_ROOT,
             userMessage: null,
             resumeInput: {
               toolCallId: args.tool_call_id,
@@ -448,14 +379,11 @@ const tools = [
           }),
         );
 
-        if (args.detach === true) {
-          return jsonResult({
-            status: "started",
-            thread_id: args.thread_id,
-            hint: "Sub-agent resumed in the background. Use agent_wait for the next event.",
-          });
-        }
-        return formatOutcome(await promise, args.thread_id);
+        return jsonResult({
+          status: "started",
+          thread_id: args.thread_id,
+          hint: "Sub-agent resumed in the background. Use agent_wait for the next event.",
+        });
       } catch (err) {
         return errorResult(err.message);
       }
@@ -465,7 +393,7 @@ const tools = [
   {
     name: "agent_answer",
     description:
-      "Resolve a pending QUESTION pause (sub-agent called AskUser and is waiting for clarification). Provide a free-text answer; the sub-agent will see it as the tool result and continue. Set detach=true to let the sub-agent continue in the background — use agent_wait afterwards.",
+      "Resolve a pending QUESTION pause (sub-agent called AskUser and is waiting for clarification). Provide a free-text answer; the sub-agent will see it as the tool result and continue in the background.",
     annotations: {
       title: "Answer agent question",
       readOnlyHint: false,
@@ -480,7 +408,6 @@ const tools = [
         thread_id: { type: "string" },
         tool_call_id: { type: "string" },
         answer: { type: "string", description: "The answer to the sub-agent's question." },
-        detach: { type: "boolean" },
       },
       required: ["thread_id", "tool_call_id", "answer"],
     },
@@ -489,13 +416,14 @@ const tools = [
         const { thread, profile, sandbox, error } = await loadPaused(args.thread_id, "question");
         if (error) return error;
 
-        const promise = kick(args.thread_id, () =>
+        kick(args.thread_id, () =>
           runThread({
             thread,
             threadMgr,
             sandbox,
             registry,
             profile,
+            pluginRoot: PLUGIN_ROOT,
             userMessage: null,
             resumeInput: {
               toolCallId: args.tool_call_id,
@@ -504,14 +432,11 @@ const tools = [
           }),
         );
 
-        if (args.detach === true) {
-          return jsonResult({
-            status: "started",
-            thread_id: args.thread_id,
-            hint: "Sub-agent resumed in the background. Use agent_wait for the next event.",
-          });
-        }
-        return formatOutcome(await promise, args.thread_id);
+        return jsonResult({
+          status: "started",
+          thread_id: args.thread_id,
+          hint: "Sub-agent resumed in the background. Use agent_wait for the next event.",
+        });
       } catch (err) {
         return errorResult(err.message);
       }

@@ -31,17 +31,14 @@ The thread is persisted at `<cwd>/.claude/agnz/threads/<id>.meta.json` and is re
 
 ### `agent_send`
 
-Send a user message (task or follow-up).
+Send a user message (task or follow-up). Always returns immediately with `{status: "started"}`. Use `agent_wait` to collect the outcome.
 
 ```
 agent_send({
   thread_id: "abc...",
   message: "Find all call sites of parseConfig and summarize.",
-  detach: false                   // default: block until done/paused
 })
 ```
-
-Three possible outcomes (see below).
 
 ### `agent_approve`
 
@@ -53,7 +50,6 @@ agent_approve({
   tool_call_id: "...",            // the id from the pending payload
   decision: "allow" | "deny",
   persist: false,                 // optional — upgrade tool to `allow` for the rest of the thread
-  detach: false                   // optional — like agent_send
 })
 ```
 
@@ -68,22 +64,8 @@ agent_answer({
   thread_id: "abc...",
   tool_call_id: "...",
   answer: "Use the US English spelling.",
-  detach: false
 })
 ```
-
-### `agent_wait`
-
-Block on a detached thread until its next event.
-
-```
-agent_wait({
-  thread_id: "abc...",
-  timeout_ms: 30000              // optional — returns {status: "still_running"} if no event
-})
-```
-
-Multiple concurrent waits on the same thread are safe.
 
 ### `agent_stop`
 
@@ -93,9 +75,15 @@ Mark the thread as stopped. In-memory sandbox state is dropped; the persisted tr
 agent_stop({ thread_id: "abc..." })
 ```
 
-## The three outcomes
+## How results arrive
 
-Every sync `agent_send` / `agent_approve` / `agent_answer` returns exactly one of these:
+Agents always run in the background. Results come via `SendMessage(to: "parent")` — the `UserPromptSubmit` hook injects unread parent mail into your next Claude prompt. No polling, no blocking.
+
+For a non-blocking status check at any time: read `<cwd>/.claude/agnz/threads/<id>.meta.json` directly.
+
+## The three agent states
+
+When an agent pauses or finishes, the meta file reflects one of these:
 
 ### 1. `status: "final"`
 
@@ -148,11 +136,9 @@ Resolve with `agent_approve`. If you deny, the denial is injected as the tool re
 
 The sub-agent called `AskUser`. `options` and `context` may be missing. Resolve with `agent_answer`.
 
-## The detach + wait pattern — concurrency
+## Concurrency — running agents in parallel
 
-Every resolving call (`agent_send`, `agent_approve`, `agent_answer`) accepts `detach: true`. When set, the call returns immediately with `{status: "started"}` and the sub-agent runs in the background. You then pick it up later with `agent_wait(thread_id)`.
-
-Why bother: while a sub-agent awaits a `fetch()` to the local LLM, Node's event loop is free. You can kick off a second sub-agent in parallel, do your own work in the main Claude thread, or poll thread state via Read on the meta files.
+All calls (`agent_send`, `agent_approve`, `agent_answer`) return immediately with `{status: "started"}`. Agents run in the background via Node's event loop. You can kick off multiple agents without waiting for any of them.
 
 ### Two agents working in parallel
 
@@ -160,24 +146,13 @@ Why bother: while a sub-agent awaits a `fetch()` to the local LLM, Node's event 
 thread_A = agent_start({cwd, agent: "researcher"})
 thread_B = agent_start({cwd, agent: "researcher"})
 
-agent_send({thread_id: A, message: "Investigate how auth works",   detach: true})
-agent_send({thread_id: B, message: "Investigate how billing works", detach: true})
+agent_send({thread_id: A, message: "Investigate how auth works"})
+agent_send({thread_id: B, message: "Investigate how billing works"})
 
-outcome_A = agent_wait({thread_id: A})
-outcome_B = agent_wait({thread_id: B})
+# Both are now running. Results arrive via SendMessage(to: "parent") at the next prompt.
 ```
 
 Both finish in roughly max(A, B) wall time, not A+B.
-
-### A long editor you don't want to block on
-
-```
-agent_send({thread_id: E, message: "Rename requestId to traceId across the service", detach: true})
-# ... do something else in Parent Claude ...
-outcome = agent_wait({thread_id: E, timeout_ms: 60000})
-if outcome.status === "still_running":
-  # keep waiting, or come back later
-```
 
 ### Peeking without waiting
 
