@@ -44,6 +44,18 @@ const registry = createRegistry();
 // Sandboxes are cached per-thread in memory; rebuilt from agentDef on first
 // use after a server restart (policy is not stored in thread meta).
 const sandboxes = new Map();
+
+// One AbortController per thread so agent_stop can cancel an in-flight run.
+const abortControllers = new Map();
+
+// Start or replace an in-flight run for a thread, wiring a fresh AbortSignal.
+function kickWithAbort(threadId, runFn) {
+  abortControllers.get(threadId)?.abort();
+  const controller = new AbortController();
+  abortControllers.set(threadId, controller);
+  return kick(threadId, () => runFn(controller.signal));
+}
+
 function sandboxFor(thread) {
   let sb = sandboxes.get(thread.id);
   if (!sb) {
@@ -96,11 +108,11 @@ function errorResult(message) {
 // auto-approve of safe reads.
 
 // Shared outcome schema for every tool that goes through formatOutcome().
-// The shape is a discriminated union on `status` — all agent_send /
-// agent_wait / agent_approve / agent_answer results use this. Rather
-// than encoding the union as oneOf (which MCP 2025-06-18 clients do
-// validate), we list all possible fields as optional and leave status
-// as the discriminator. This matches what the handlers actually emit.
+// The shape is a discriminated union on `status` — thread_send /
+// thread_approve / thread_answer all use this. Rather than encoding
+// the union as oneOf (which MCP 2025-06-18 clients do validate), we
+// list all possible fields as optional and leave status as the
+// discriminator. This matches what the handlers actually emit.
 const OUTCOME_SCHEMA = {
   type: "object",
   properties: {
@@ -263,11 +275,11 @@ const tools = [
   },
 
   {
-    name: "agent_send",
+    name: "thread_send",
     description:
-      "Send a user message to a thread. The sub-agent always runs in the background — the call returns immediately with {status: 'started'}. Use agent_wait(thread_id) to block until the next event, or read the thread meta file for a non-blocking status check.",
+      "Send a message to a thread. Returns immediately — the agent runs in the background. If the thread is idle or stopped, this starts a new run. If the thread is running or paused, the message is queued to the mailbox and delivered at the next turn boundary. Blocked on error-status threads — use agent_start to create a fresh thread instead.",
     annotations: {
-      title: "Send message to agent",
+      title: "Send message to thread",
       readOnlyHint: false,
       destructiveHint: true,
       idempotentHint: false,
@@ -278,7 +290,7 @@ const tools = [
       type: "object",
       properties: {
         thread_id: { type: "string" },
-        message: { type: "string", description: "The user message for the agent." },
+        message: { type: "string", description: "The message for the agent." },
       },
       required: ["thread_id", "message"],
     },
@@ -287,12 +299,15 @@ const tools = [
         const thread = await threadMgr.getThread(args.thread_id);
         if (!thread) return errorResult(`no thread '${args.thread_id}'`);
 
-        // If the thread is active (running or paused awaiting input), route the
-        // message through the shared mailbox instead of injecting it directly.
-        // The loop's drainMailbox() will deliver it at the next natural turn
-        // boundary — exactly the same path as agent-to-agent messages (ADR 0002).
-        // This prevents role-alternation errors on strict models (Mistral etc.)
-        // and makes the parent a first-class participant in the message system.
+        if (thread.status === ThreadStatus.ERROR) {
+          return errorResult(
+            `thread '${args.thread_id}' is in error state: ${thread.error?.message ?? "unknown error"}. ` +
+            `Use agent_start to create a fresh thread.`,
+          );
+        }
+
+        // Active thread: route through mailbox so the loop drains it at the
+        // next turn boundary. Avoids role-alternation errors on strict models.
         if (thread.status === ThreadStatus.RUNNING || thread.status === ThreadStatus.AWAITING_INPUT) {
           const agentName = thread.agentDef?.name || thread.agentName || `agent-${thread.id.slice(0, 8)}`;
           await publish(thread.cwd, {
@@ -304,15 +319,16 @@ const tools = [
           return jsonResult({
             status: "queued",
             thread_id: args.thread_id,
-            hint: `Thread is ${thread.status} — message queued to mailbox and will be delivered at the next turn boundary.`,
+            hint: `Thread is ${thread.status} — message queued and will be delivered at the next turn boundary.`,
           });
         }
 
+        // idle or stopped: start a new run (stopped transcript is preserved).
         const profile = await resolveProfile(thread);
         if (!profile) return errorResult(`no profile found for thread '${args.thread_id}'. Run /agnz:setup add.`);
         const sandbox = sandboxFor(thread);
 
-        kick(args.thread_id, () =>
+        kickWithAbort(args.thread_id, (signal) =>
           runThread({
             thread,
             threadMgr,
@@ -321,13 +337,14 @@ const tools = [
             profile,
             pluginRoot: PLUGIN_ROOT,
             userMessage: args.message,
+            signal,
           }),
         );
 
         return jsonResult({
           status: "started",
           thread_id: args.thread_id,
-          hint: "Sub-agent is running in the background. For a non-blocking status check, read the thread's meta file at <cwd>/.claude/agnz/threads/<thread_id>.meta.json. The agent will report results via SendMessage(to: 'parent') — the hook delivers them at your next prompt.",
+          hint: "Agent running in the background. Results arrive via the UserPromptSubmit hook at your next prompt. Non-blocking status check: read <cwd>/.claude/agnz/threads/<thread_id>.meta.json.",
         });
       } catch (err) {
         return errorResult(err.message);
@@ -336,9 +353,9 @@ const tools = [
   },
 
   {
-    name: "agent_approve",
+    name: "thread_approve",
     description:
-      "Resolve a pending APPROVAL pause (sub-agent wants to run a tool that requires consent). Allow or deny the call. Set persist=true to apply the decision to all future calls of the same tool in this thread. The sub-agent resumes in the background. For AskUser pauses, use agent_answer instead.",
+      "Resolve a pending APPROVAL pause — the agent wants to run a tool that requires consent. Allow or deny the call. Set persist=true to silently allow all future calls of the same tool in this thread. The agent resumes in the background. For AskUser question pauses, use thread_answer instead.",
     annotations: {
       title: "Approve pending tool call",
       readOnlyHint: false,
@@ -353,7 +370,7 @@ const tools = [
         thread_id: { type: "string" },
         tool_call_id: { type: "string" },
         decision: { type: "string", enum: ["allow", "deny"] },
-        persist: { type: "boolean" },
+        persist: { type: "boolean", description: "If true, remember this decision for all future calls of the same tool in this thread." },
       },
       required: ["thread_id", "tool_call_id", "decision"],
     },
@@ -362,7 +379,7 @@ const tools = [
         const { thread, profile, sandbox, error } = await loadPaused(args.thread_id, "approval");
         if (error) return error;
 
-        kick(args.thread_id, () =>
+        kickWithAbort(args.thread_id, (signal) =>
           runThread({
             thread,
             threadMgr,
@@ -376,13 +393,14 @@ const tools = [
               decision: args.decision === "allow" ? Decision.ALLOW : Decision.DENY,
               persist: args.persist === true,
             },
+            signal,
           }),
         );
 
         return jsonResult({
           status: "started",
           thread_id: args.thread_id,
-          hint: "Sub-agent resumed in the background. Use agent_wait for the next event.",
+          hint: "Agent resumed in the background. Results arrive via the hook at your next prompt.",
         });
       } catch (err) {
         return errorResult(err.message);
@@ -391,9 +409,9 @@ const tools = [
   },
 
   {
-    name: "agent_answer",
+    name: "thread_answer",
     description:
-      "Resolve a pending QUESTION pause (sub-agent called AskUser and is waiting for clarification). Provide a free-text answer; the sub-agent will see it as the tool result and continue in the background.",
+      "Resolve a pending QUESTION pause — the agent called AskUser and is waiting for clarification. Provide a free-text answer; the agent sees it as the tool result and resumes in the background. For tool approval pauses, use thread_approve instead.",
     annotations: {
       title: "Answer agent question",
       readOnlyHint: false,
@@ -407,7 +425,7 @@ const tools = [
       properties: {
         thread_id: { type: "string" },
         tool_call_id: { type: "string" },
-        answer: { type: "string", description: "The answer to the sub-agent's question." },
+        answer: { type: "string", description: "The answer to the agent's question." },
       },
       required: ["thread_id", "tool_call_id", "answer"],
     },
@@ -416,7 +434,7 @@ const tools = [
         const { thread, profile, sandbox, error } = await loadPaused(args.thread_id, "question");
         if (error) return error;
 
-        kick(args.thread_id, () =>
+        kickWithAbort(args.thread_id, (signal) =>
           runThread({
             thread,
             threadMgr,
@@ -429,13 +447,14 @@ const tools = [
               toolCallId: args.tool_call_id,
               answer: args.answer,
             },
+            signal,
           }),
         );
 
         return jsonResult({
           status: "started",
           thread_id: args.thread_id,
-          hint: "Sub-agent resumed in the background. Use agent_wait for the next event.",
+          hint: "Agent resumed in the background. Results arrive via the hook at your next prompt.",
         });
       } catch (err) {
         return errorResult(err.message);
@@ -472,6 +491,8 @@ const tools = [
       if (!thread) return errorResult(`no thread '${args.thread_id}'`);
       await threadMgr.stopThread(args.thread_id);
       sandboxes.delete(args.thread_id);
+      abortControllers.get(args.thread_id)?.abort();
+      abortControllers.delete(args.thread_id);
       forget(args.thread_id);
       return jsonResult({
         thread_id: args.thread_id,
@@ -501,9 +522,9 @@ async function loadPaused(threadId, expectedKind) {
       error: errorResult(
         `thread is awaiting ${actualKind || "unknown"}, not ${expectedKind}. ` +
           (actualKind === "approval"
-            ? "Use agent_approve."
+            ? "Use thread_approve."
             : actualKind === "question"
-              ? "Use agent_answer."
+              ? "Use thread_answer."
               : ""),
       ),
     };
@@ -559,7 +580,7 @@ function formatOutcome(outcome, threadId) {
         options: p.options || undefined,
         context: p.context || undefined,
         hint:
-          "Sub-agent is asking a clarifying question. Reply with agent_answer(thread_id, tool_call_id, answer).",
+          "Agent is asking a clarifying question. Reply with thread_answer(thread_id, tool_call_id, answer).",
       });
     }
     // approval (default)
@@ -572,7 +593,7 @@ function formatOutcome(outcome, threadId) {
       tool: p.name,
       args: previewArgs(p.args),
       hint:
-        "Sub-agent wants to run a tool that needs consent. Reply with agent_approve(thread_id, tool_call_id, decision=allow|deny, persist?). Long string fields in `args` (file contents, diff hunks) are truncated to a length-annotated preview — the full args stay on disk in the thread meta.",
+        "Agent wants to run a tool that needs consent. Reply with thread_approve(thread_id, tool_call_id, decision=allow|deny, persist?). Long string fields in `args` (file contents, diff hunks) are truncated to a length-annotated preview — the full args stay on disk in the thread meta.",
     });
   }
   if (outcome.status === "max_turns") {
@@ -616,4 +637,4 @@ async function recoverStaleRuns() {
 // ---- boot -----------------------------------------------------------------
 
 await recoverStaleRuns();
-await runStdioServer({ name: "agnz", version: "0.10.6", instructions: INSTRUCTIONS, tools });
+await runStdioServer({ name: "agnz", version: "0.11.0", instructions: INSTRUCTIONS, tools });
