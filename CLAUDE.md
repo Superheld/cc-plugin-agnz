@@ -174,12 +174,16 @@ Day-to-day work (bugfixes, refactoring, new features) lives on the `dev` branch.
 
 ### Versioning rule
 
-**Only bump `version` when pushing / publishing a release.** Day-to-day feature work on a branch keeps the current version string. A release bundles several branches' worth of work and bumps once at push time, either on the release commit or immediately before `git push`. This keeps semantic versioning meaningful instead of burning a minor number per refactor Häppchen.
+**Only bump `version` when pushing / publishing a release.** Day-to-day feature work on a branch keeps the current version string. A release bundles several branches' worth of work and bumps once at push time, either on the release commit or immediately before `git push`. This keeps semantic versioning meaningful instead of burning a minor number per refactor.
+
+Semver guidance: patch (`0.x.Y`) for bug fixes, minor (`0.X.0`) for new features or breaking MCP surface changes (removed/renamed tools, changed defaults).
 
 The two files that must move together on a release bump:
 
 - `.claude-plugin/plugin.json`
 - `mcp/server.mjs` (the `runStdioServer` call's `version` field)
+
+The bump commit goes on `dev`, then gets merged to `main` together with the release changes — not as a separate commit on `main`.
 
 ### Iterating locally against the installed plugin
 
