@@ -178,10 +178,9 @@ export function readWorkspaceFile(ws) {
 // noting how many were elided — the rest stay in messages.jsonl.
 const MAX_MESSAGES_IN_INJECTION = 20;
 
-// Per-message text truncation cap. Prevents a single oversized message
-// from blowing out the context even when the count is within bounds.
-// 2000 chars ≈ ~400 tokens — enough for a full agent summary.
-const MAX_TEXT_LENGTH = 2000;
+// No per-message truncation — deliver full content. The message count
+// cap (MAX_MESSAGES_IN_INJECTION) keeps total injection size bounded.
+const MAX_TEXT_LENGTH = Infinity;
 
 /**
  * Format a message list for stdout injection. Applies two caps:
