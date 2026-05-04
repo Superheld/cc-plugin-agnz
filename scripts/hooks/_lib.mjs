@@ -180,7 +180,8 @@ const MAX_MESSAGES_IN_INJECTION = 20;
 
 // Per-message text truncation cap. Prevents a single oversized message
 // from blowing out the context even when the count is within bounds.
-const MAX_TEXT_LENGTH = 200;
+// 2000 chars ≈ ~400 tokens — enough for a full agent summary.
+const MAX_TEXT_LENGTH = 2000;
 
 /**
  * Format a message list for stdout injection. Applies two caps:
