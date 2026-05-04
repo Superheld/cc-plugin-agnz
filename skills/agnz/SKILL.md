@@ -20,7 +20,7 @@ A sub-agent's intermediate tool calls do **not** consume parent context — only
 
 - The work is read-heavy (bulk file reads, grep sweeps)
 - The work is mechanically repetitive (same edit pattern across many files)
-- Two tasks can run in parallel (`detach: true`)
+- Two tasks can run in parallel (both return immediately, collect with `agent_wait`)
 
 Avoid delegation when the work needs deep reasoning — local models are limited.
 
@@ -101,19 +101,18 @@ Agent files follow CC's native agent format. Fields:
 | Tool | When |
 |---|---|
 | `agent_start` | Create a thread. Requires `name` (routing address) + `agent` (def name) or `inline` (frontmatter string). |
-| `agent_send` | Send a task. Sync by default — blocks until done or paused. |
+| `agent_send` | Send a task. Always returns immediately — agent runs in background. |
 | `agent_approve` | Resolve an approval pause (sub-agent wants to run a gated tool). |
 | `agent_answer` | Resolve a question pause (sub-agent called `AskUser`). |
-| `agent_wait` | Block for the next event on a detached thread. |
 | `agent_stop` | End a thread. Transcripts persist. |
 
 **There is no `agent_status` or `agent_list_threads`.** Read `<cwd>/.claude/agnz/threads/*.meta.json` directly, or use `/agnz:threads list`.
 
-### The three outcomes of agent_send
+### How results come back
 
-1. **`status: "final"`** — sub-agent finished. Thread is idle; you can send again.
-2. **`status: "awaiting_input"`, `kind: "approval"`** — sub-agent wants a gated tool. Resolve with `agent_approve(thread_id, tool_call_id, "allow"|"deny", persist?: true)`.
-3. **`status: "awaiting_input"`, `kind: "question"`** — sub-agent called `AskUser`. Resolve with `agent_answer(thread_id, tool_call_id, answer: "...")`.
+Agents run entirely in the background. Results arrive via `SendMessage(to: "parent")` — the `UserPromptSubmit` hook injects unread parent mail into your next Claude prompt automatically. You don't poll; Claude tells you when there's something to read.
+
+Pauses (approval / question) are signalled the same way (OS notification + hook injection). Resolve with `agent_approve` or `agent_answer` — both return immediately and the agent resumes in the background.
 
 ## Team model
 
@@ -137,10 +136,8 @@ Message kinds: `say`, `question`, `answer`, `handoff`, `status`, `error`, `direc
 ```
 agent_start({name: "researcher-auth",  agent: "researcher"}) → thread_A
 agent_start({name: "researcher-billing", agent: "researcher"}) → thread_B
-agent_send({thread_id: A, message: "...", detach: true})
-agent_send({thread_id: B, message: "...", detach: true})
-agent_wait({thread_id: A}) → outcome_A
-agent_wait({thread_id: B}) → outcome_B
+agent_send({thread_id: A, message: "..."})
+agent_send({thread_id: B, message: "..."})
 ```
 
 Node's event loop gives real parallelism. Two agents finish in roughly the time one would take.
@@ -155,5 +152,5 @@ Node's event loop gives real parallelism. Two agents finish in roughly the time 
 ## Reference files
 
 - **`references/defining.md`** — full frontmatter spec, tool-policy merge model, example roles.
-- **`references/lifecycle.md`** — full MCP tool signatures, detach + wait pattern, team messaging in depth.
+- **`references/lifecycle.md`** — full MCP tool signatures, background execution, team messaging in depth.
 - **`references/orchestration.md`** — when to delegate, thread reuse, task briefing, handling outcomes.
