@@ -1,0 +1,11 @@
+{
+  "name": "edit-rename",
+  "description": "Rename the function foo to greet in greet.js, including its call site.",
+  "prompt": "In the file greet.js, rename the function `foo` to `greet` everywhere it appears — both its definition and every call site. Do not change any other behaviour. When done, stop.",
+  "agent": {
+    "name": "eval-editor",
+    "prompt": "You are a careful refactoring agent. Read the file first, then use the Edit tool to make precise changes. Verify the file no longer references the old name. When the task is complete, produce a short final message and stop.",
+    "tools": ["Read", "Edit", "LS", "Grep"],
+    "maxTurns": 12
+  }
+}

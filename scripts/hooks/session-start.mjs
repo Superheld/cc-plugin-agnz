@@ -18,7 +18,7 @@ import {
   formatMessages,
   flushStdoutThen,
   readThreadMetas,
-  formatThreads
+  formatThreadsDetailed
 } from "./_lib.mjs";
 
 try {
@@ -38,11 +38,11 @@ try {
     chunks.push(`[agnz] workspace "${name}"\n`);
   }
 
-  // Add threads line using readThreadMetas + formatThreads
+  // Add a multi-line threads block with per-thread spend (ADR 0011 §3).
   const activeThreads = readThreadMetas(ws);
-  const formattedThreads = formatThreads(activeThreads);
+  const formattedThreads = formatThreadsDetailed(activeThreads);
   if (formattedThreads) {
-    chunks.push(`threads: ${formattedThreads}\n`);
+    chunks.push(formattedThreads + "\n");
   }
 
   const cursor = readParentCursor(ws);
