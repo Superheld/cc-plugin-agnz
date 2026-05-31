@@ -15,6 +15,20 @@ AGNZ_DIR="${AGNZ_DIR:-.claude/agnz}"
 THREADS_DIR="$AGNZ_DIR/threads"
 N_MESSAGES="${N_MESSAGES:-30}"
 
+# trace-stats.mjs lives at the plugin root; resolve it relative to this script
+# (skills/agnz-threads/scripts/ → ../../../lib/). Used for the stats views.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TRACE_STATS="$SCRIPT_DIR/../../../lib/trace-stats.mjs"
+
+# ── stats mode: `inspect.sh stats` → workspace-wide trace aggregation ─────────
+if [ "${1:-}" = "stats" ]; then
+  if command -v node &>/dev/null && [ -f "$TRACE_STATS" ]; then
+    exec node "$TRACE_STATS"
+  fi
+  echo "ERROR: node and $TRACE_STATS are required for stats" >&2
+  exit 1
+fi
+
 if ! command -v jq &>/dev/null; then
   echo "ERROR: jq is required" >&2
   exit 1
@@ -126,6 +140,12 @@ if [ -n "$errmsg" ]; then
   echo
   echo "--- ERROR ---"
   echo "$errmsg"
+fi
+
+# trace stats (turns, tokens, tool outcomes) — best-effort, needs node
+if command -v node &>/dev/null && [ -f "$TRACE_STATS" ]; then
+  echo
+  node "$TRACE_STATS" "$MATCH_ID" 2>/dev/null || true
 fi
 
 # ── transcript ───────────────────────────────────────────────────────────────

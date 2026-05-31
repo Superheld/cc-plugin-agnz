@@ -1,9 +1,14 @@
 # ADR 0011: Observability and evaluation
 
-- **Status:** Proposed
+- **Status:** Partially implemented (§1, §2)
 - **Date:** 2026-05-31
 - **Branch:** `claude/observability-strategy-testing-AZMLM`
 - **Depends on:** [ADR 0001](./0001-workspace-first-architecture.md), [ADR 0002](./0002-communication-mailbox-and-events.md), [ADR 0007](./0007-parent-context.md)
+
+> **Implementation status (2026-05-31):**
+> - **§1 trace schema — done.** `lib/trace.mjs` + `lib/loop.mjs` emit `thread_start`/`turn_start`/`llm_call`/`tool_call`/`repair`/`pause`/`thread_end`. `usage` is folded into `llm_call` (the standalone `usage` event from 0.11.9 is removed). The LLM client is injectable via `ctx.chat` (defaults to the real client) so the loop is testable without a live endpoint. Covered by `tests/loop-trace.test.mjs`.
+> - **§2 aggregation — done.** `lib/trace-stats.mjs` (pure `aggregateTrace` + `aggregateWorkspace` + CLI), surfaced via `inspect.sh stats` and a per-thread stats block. Covered by `tests/trace-stats.test.mjs`.
+> - **§3 parent hook, §4 loop/sandbox/mailbox tests, §5 evals, §6 exporter — not yet.** §6 remains schema-only by design.
 
 ## Context
 
