@@ -139,6 +139,25 @@ Two independent roots:
 | `agnz-threads` | `/agnz:threads` | List and inspect threads in the current workspace |
 | `agnz` | — | Progressive-disclosure reference for agent definitions and the full tool lifecycle |
 
+## Observability & evaluation
+
+Every thread writes an append-only runtime trace next to its transcript
+(`<thread-id>.trace.jsonl`): per-turn LLM latency + token usage, tool outcomes,
+JSON-repair events, and a terminal `thread_end`. From it you get:
+
+- **Stats** — `node ${CLAUDE_PLUGIN_ROOT}/lib/trace-stats.mjs [<thread-id>]` (or
+  `inspect.sh stats`) folds the trace into turns, tokens, latency, tool-error
+  and repair rates, with per-model rollups.
+- **Live spend** — the `SessionStart`/`UserPromptSubmit` hooks inject a per-thread
+  spend line (`dev:1a2b3c4d — running · 5 turns · 1,234 tok`) into Claude's
+  context, so the parent sees what's running without reading files.
+- **Evals** — `node evals/run.mjs` runs fixtures against one or more profiles in
+  throwaway workspaces and scores outcome + trace metrics, ranking profiles by
+  pass rate then token cost. The answer to "which local model for which role?".
+
+Tests: `node --test tests/` (the loop runs against an injectable fake LLM, no
+model needed). Full guide: [`docs/observability.md`](./docs/observability.md).
+
 ## Conventions
 
 - **Native Node only.** No npm dependencies.
