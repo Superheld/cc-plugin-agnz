@@ -49,6 +49,29 @@ When a thread is `awaiting_input`, the `pending` object in meta has everything n
 - `kind=approval` → `pending.toolCallId`, `pending.name`, `pending.args` — call `agent_approve`
 - `kind=question` → `pending.toolCallId`, `pending.question` — call `agent_answer`
 
+## Trace stats (ADR 0011)
+
+Each thread also has a runtime trace at `.claude/agnz/threads/<id>.trace.jsonl`
+(events: `thread_start`, `turn_start`, `llm_call`, `tool_call`, `repair`,
+`pause`, `thread_end`). `lib/trace-stats.mjs` folds it into turns, token spend,
+LLM latency, tool outcomes, and repair rate — the answer to "how much did this
+agent cost and how did it go". Use this when the user asks "how many tokens",
+"how long did it take", "how many tool calls", "which model is cheaper", or to
+compare local models per profile.
+
+```bash
+# workspace-wide totals + per-model breakdown
+node ${CLAUDE_PLUGIN_ROOT}/lib/trace-stats.mjs
+
+# one thread, detailed (turns, tokens, tool outcomes, repairs)
+node ${CLAUDE_PLUGIN_ROOT}/lib/trace-stats.mjs <thread-id>
+
+# machine-readable for further processing
+node ${CLAUDE_PLUGIN_ROOT}/lib/trace-stats.mjs <thread-id> --json
+```
+
+The CLI reads `<cwd>/.claude/agnz/` (override with `AGNZ_CWD`).
+
 ## Terminal shortcut
 
 For a quick formatted view in the terminal (requires `jq`):
@@ -57,7 +80,10 @@ For a quick formatted view in the terminal (requires `jq`):
 # list all threads
 bash ${SKILL_BASE_DIR}/scripts/inspect.sh
 
-# inspect one thread (prefix match)
+# workspace trace stats (turns, tokens, tool outcomes — requires node)
+bash ${SKILL_BASE_DIR}/scripts/inspect.sh stats
+
+# inspect one thread (prefix match) — meta + trace stats + transcript tail
 bash ${SKILL_BASE_DIR}/scripts/inspect.sh <thread-id-prefix>
 
 # wider transcript window

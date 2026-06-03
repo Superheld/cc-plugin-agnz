@@ -220,8 +220,42 @@ function addressesParent(to) {
 }
 
 /**
+ * Fold a thread's trace.jsonl into a tiny spend summary: turns and total
+ * tokens (ADR 0011 §3). Inlined here rather than importing
+ * lib/trace-stats.mjs to keep the hooks self-contained per the convention
+ * at the top of this file. Missing/garbled trace → { turns: 0, tokens: 0 }.
+ */
+export function readThreadSpend(wsDir, threadId) {
+  const path = join(wsDir, "threads", `${threadId}.trace.jsonl`);
+  if (!existsSync(path)) return { turns: 0, tokens: 0 };
+  let raw;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch {
+    return { turns: 0, tokens: 0 };
+  }
+  let turns = 0;
+  let tokens = 0;
+  for (const line of raw.split("\n")) {
+    if (!line) continue;
+    let e;
+    try {
+      e = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (e.type === "thread_start" || e.type === "turn_start") turns += 1;
+    else if (e.type === "llm_call" && e.usage && typeof e.usage.total === "number") {
+      tokens += e.usage.total;
+    }
+  }
+  return { turns, tokens };
+}
+
+/**
  * Read all non-stopped thread metas from the workspace.
- * Returns an array of objects with id, name, status, agent, and updatedAt.
+ * Returns an array of objects with id, name, status, agent, updatedAt,
+ * and a trace-derived spend ({ turns, tokens }).
  */
 export function readThreadMetas(wsDir) {
   const threadsDir = join(wsDir, "threads");
@@ -237,18 +271,44 @@ export function readThreadMetas(wsDir) {
           status: meta.status,
           agent: meta.agentDef?.name || null,
           updatedAt: meta.updatedAt || null,
+          spend: readThreadSpend(wsDir, meta.id),
         }];
       } catch { return []; }
     });
   } catch { return []; }
 }
 
+/** Compact token count with thousands separators (1234 -> "1,234"). */
+function formatTokens(n) {
+  return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
 /**
- * Format a list of threads into a compact string.
+ * Format a list of threads into a compact single line (legacy).
  * Example: "hook-visibility running, researcher idle"
  */
 export function formatThreads(threads) {
   if (!threads || threads.length === 0) return null;
   const pairs = threads.map(t => `${t.name || "?"} ${t.status}`);
   return pairs.join(", ");
+}
+
+/**
+ * Format threads as a multi-line block with short-id, status, and the
+ * trace-derived spend (ADR 0007 §1 layer 2 + ADR 0011 §3). Example:
+ *
+ *   threads (2 active):
+ *     dev:1a2b3c4d — running · 5 turns · 1,234 tok
+ *     reviewer:9f8e7d6c — idle · 12 turns · 3,456 tok
+ */
+export function formatThreadsDetailed(threads) {
+  if (!threads || threads.length === 0) return null;
+  const lines = threads.map(t => {
+    const sid = (t.id || "").slice(0, 8);
+    const label = t.name ? `${t.name}:${sid}` : sid;
+    const s = t.spend || { turns: 0, tokens: 0 };
+    const spend = s.turns || s.tokens ? ` · ${s.turns} turns · ${formatTokens(s.tokens)} tok` : "";
+    return `  ${label} — ${t.status}${spend}`;
+  });
+  return `threads (${threads.length} active):\n${lines.join("\n")}`;
 }

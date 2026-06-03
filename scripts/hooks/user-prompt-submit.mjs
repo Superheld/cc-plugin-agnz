@@ -20,7 +20,7 @@ import {
   formatMessages,
   flushStdoutThen,
   readThreadMetas,
-  formatThreads,
+  formatThreadsDetailed,
 } from "./_lib.mjs";
 import { readFileSync, existsSync, mkdirSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
@@ -57,10 +57,10 @@ try {
 
   // If fingerprint changed or file missing: inject summary + update file
   if (fingerprint !== lastFingerprint) {
-    const formattedThreads = formatThreads(activeThreads);
+    const formattedThreads = formatThreadsDetailed(activeThreads);
     let chunks = [];
     if (formattedThreads) {
-      chunks.push(`[agnz] threads: ${formattedThreads}\n`);
+      chunks.push(`[agnz] ${formattedThreads}\n`);
     }
 
     // Advance cursor only after stdout has been accepted by the kernel —
