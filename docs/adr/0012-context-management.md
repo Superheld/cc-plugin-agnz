@@ -1,6 +1,6 @@
 # ADR 0012: Context management — stop the sub-agent prompt from growing every turn
 
-- **Status:** Proposed
+- **Status:** Phase 1 implemented; phases 2–3 proposed
 - **Date:** 2026-06-10
 - **Branch:** `claude/observability-strategy-testing-AZMLM`
 - **Depends on:** [ADR 0003](./0003-agent-definitions.md), [ADR 0005](./0005-skills-for-agents.md), [ADR 0011](./0011-observability-and-evaluation.md)
@@ -50,6 +50,8 @@ The system prompt must be **byte-identical from turn 0 to the end of the thread*
 - **Visited-subdirectory CLAUDE.md no longer goes into the system prompt.** When the agent first touches a subdirectory that has a CLAUDE.md, inject that file **once** as a single synthetic `user`/tool-style message at that point in the transcript (it then lives in history like any other content, sent once and cached as part of the growing-but-append-only suffix), rather than re-templating the system prompt every turn. `visitedDirs` becomes a "already-injected" set, not a "re-inject-everything-each-turn" set.
 
 Net effect: the system prefix is fixed; only the transcript suffix appends. That restores prefix-cache reuse and removes the system-prompt growth entirely.
+
+> **Implemented (2026-06-10).** `renderSystemPrompt({thread, profile, registry, pluginRoot})` produces the prefix; `runThread` calls it once when `thread.systemPromptSnapshot` is absent and persists the result, and `buildMessages` reuses the snapshot verbatim. Visited-subdir CLAUDE.md no longer reaches the system prompt: file tools queue newly-seen subdirs in `pendingDirMds`, and `drainTopOfTurnContext` injects each subdir's CLAUDE.md once into history — merged into the same single user message as the mailbox drain so two consecutive user turns never occur. Covered by `tests/context-prefix.test.mjs` (byte-stable prefix across turns, subdir CLAUDE.md injected exactly once, snapshot persisted). Snapshot state is in `thread` meta (survives restarts); `pendingDirMds`/`visitedDirs` are in-memory, so a server restart mid-thread may re-inject a subdir CLAUDE.md once more — harmless.
 
 ### Phase 2 — Tool-result compaction in re-sent history
 
