@@ -1,9 +1,17 @@
 # ADR 0011: Observability and evaluation
 
-- **Status:** Proposed
+- **Status:** Implemented (§1–§5); §6 schema-only by design
 - **Date:** 2026-05-31
 - **Branch:** `claude/observability-strategy-testing-AZMLM`
 - **Depends on:** [ADR 0001](./0001-workspace-first-architecture.md), [ADR 0002](./0002-communication-mailbox-and-events.md), [ADR 0007](./0007-parent-context.md)
+
+> **Implementation status (2026-05-31):**
+> - **§1 trace schema — done.** `lib/trace.mjs` + `lib/loop.mjs` emit `thread_start`/`turn_start`/`llm_call`/`tool_call`/`repair`/`pause`/`thread_end`. `usage` is folded into `llm_call` (the standalone `usage` event from 0.11.9 is removed). The LLM client is injectable via `ctx.chat` (defaults to the real client) so the loop is testable without a live endpoint. Covered by `tests/loop-trace.test.mjs`.
+> - **§2 aggregation — done.** `lib/trace-stats.mjs` (pure `aggregateTrace` + `aggregateWorkspace` + CLI), surfaced via `inspect.sh stats` and a per-thread stats block. Covered by `tests/trace-stats.test.mjs`.
+> - **§4 testing — done.** Fake-LLM harness (`tests/_fake-llm.mjs`) + `node:test` coverage for the sandbox (path/symlink escape, permissions), loop pause/resume (approval allow/deny, question, leftover-drain), error propagation, and mailbox drain/cursor. Files: `tests/sandbox.test.mjs`, `tests/loop-resume.test.mjs`, `tests/mailbox.test.mjs`, `tests/loop-trace.test.mjs`.
+> - **§3 parent hook — done.** The `SessionStart`/`UserPromptSubmit` hooks now inject a multi-line threads block with a trace-derived spend line per active thread (`<name>:<short-id> — <status> · <turns> turns · <tokens> tok`). The token/turn fold is inlined in `scripts/hooks/_lib.mjs` (`readThreadSpend`) to keep the hooks self-contained. Covered by `tests/hooks.test.mjs`. The full ADR 0007 agents block and `mode:` line remain ADR 0007's scope.
+> - **§5 evals — done.** `evals/` harness: `run.mjs` runs fixtures against named profiles in throwaway workspaces and scores the outcome + trace metrics; `score.mjs` is the pure, unit-tested scorecard (`tests/evals-score.test.mjs`). Ships two fixtures (`create-file`, `edit-rename`).
+> - **§6 exporter — not yet, schema-only by design.** The trace fields are OTel-mappable; an opt-in exporter behind `AGNZ_OTEL_ENDPOINT` can be added as a pure reader without touching the loop.
 
 ## Context
 

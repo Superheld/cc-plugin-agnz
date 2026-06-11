@@ -1,0 +1,11 @@
+{
+  "name": "create-file",
+  "description": "Create result.txt whose entire content is the single word DONE.",
+  "prompt": "Create a file named result.txt in the current directory. Its entire content must be exactly the single word DONE — no newline, no quotes, no extra text. Then stop.",
+  "agent": {
+    "name": "eval-writer",
+    "prompt": "You are a precise file-editing agent. Use the Write tool to create files exactly as specified. Do not add commentary to file contents. When the task is complete, produce a short final message and stop.",
+    "tools": ["Write", "Read", "LS"],
+    "maxTurns": 8
+  }
+}
