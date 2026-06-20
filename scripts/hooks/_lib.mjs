@@ -270,6 +270,12 @@ export function readThreadMetas(wsDir) {
           name: meta.name || null,
           status: meta.status,
           agent: meta.agentDef?.name || null,
+          // Rolling summary (loop-maintained) → description → agent-def role.
+          // Lets the parent see reusable context per thread (ADR 0007).
+          summary:
+            meta.summary ||
+            meta.description ||
+            (meta.agentDef?.description ? String(meta.agentDef.description).split("\n")[0] : null),
           updatedAt: meta.updatedAt || null,
           spend: readThreadSpend(wsDir, meta.id),
         }];
@@ -284,13 +290,19 @@ function formatTokens(n) {
 }
 
 /**
- * Format a list of threads into a compact single line (legacy).
- * Example: "hook-visibility running, researcher idle"
+ * Format a list of threads into a compact, reuse-informative string. Each
+ * thread shows its name, status, and a short rolling summary so the parent
+ * can decide to resume (`send <name>`) instead of spawning a new one.
+ * Example: "researcher (idle): summarised request logging; dev (running)"
  */
 export function formatThreads(threads) {
   if (!threads || threads.length === 0) return null;
-  const pairs = threads.map(t => `${t.name || "?"} ${t.status}`);
-  return pairs.join(", ");
+  return threads
+    .map((t) => {
+      const s = t.summary ? `: ${String(t.summary).slice(0, 70)}` : "";
+      return `${t.name || "?"} (${t.status})${s}`;
+    })
+    .join("; ");
 }
 
 /**
