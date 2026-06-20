@@ -1,22 +1,22 @@
 # agnz orchestration — when and how to delegate
 
+All invocations are CLI calls via Bash: `node "$CLAUDE_PLUGIN_ROOT/bin/agnz.mjs" <verb> …`.
+
 ## Thread reuse — resume before recreating
 
 Every thread has a name, a purpose, and a transcript. Check existing threads first:
 
-```
-/agnz:threads list
-```
-
-Resume an `idle` thread by sending to it:
-
-```
-agent_send({ thread_id: "...", message: "Continue: now write the tests." })
+```bash
+agnz list          # (or the /agnz:threads skill)
 ```
 
-The thread already has all context from previous turns — the sub-agent picks up where it left off. Only create a new thread when the task or role is genuinely different.
+`send <name>` **reuses** the most recent live thread of that name — the sub-agent picks up where it left off with all its context:
 
-Threads in `stopped` or `error` state cannot be resumed — start fresh in those cases.
+```bash
+agnz send researcher-1 "Continue: now write the tests."
+```
+
+Only `start` a new thread when the task or role is genuinely different. Threads in `error` state cannot be resumed — `start` fresh (their transcript is preserved for inspection).
 
 ## The routing decision
 
@@ -37,17 +37,11 @@ Threads in `stopped` or `error` state cannot be resumed — start fresh in those
 
 ## Picking an agent
 
-Check whether the project has agent definitions:
-
-```
-Glob("<cwd>/.claude/agents/*.md")
-```
-
-Read the `description` field in each file's frontmatter. Pick the agent whose description best matches the task — a `researcher` for read/investigate work, an `editor` for write/refactor tasks. If no definitions exist, omit the `agent` parameter and the sub-agent runs with a generic prompt.
+Bundled agents (`dev`, `researcher`, `reviewer`, `general`) work everywhere. For project roles, check `<cwd>/.claude/agents/*.md` and read each `description` to match the task — a `researcher` for read/investigate work, a `dev` for write/refactor tasks. With no fitting def, pass `--inline "<frontmatter>"` for an ad-hoc role.
 
 ## Writing a good task brief
 
-Write the message to `agent_send` as if briefing a capable colleague who cannot ask follow-up questions:
+Write the task you pass to `agnz start`/`send` as if briefing a capable colleague who cannot ask follow-up questions:
 
 - What to do (concrete action, not "look into")
 - What to produce (a summary, a list, a patch, a file path)
@@ -59,33 +53,29 @@ Write the message to `agent_send` as if briefing a capable colleague who cannot 
 
 ## Handling outcomes
 
-The return value of `agent_send` / `agent_wait` has a `content` field when `status: "final"`. Use that directly — do **not** re-read the transcript unless you need detail the summary omitted.
+With `--wait`, the call returns a `content` field when `status: "final"` — use that directly, don't re-read the transcript unless you need detail the summary omitted. Detached (default): the final answer arrives via the message hook at your next prompt; `agnz show <id>` peeks any time.
 
-If `status: "max_turns"`, read the last few lines of the transcript:
-```
-Read <cwd>/.claude/agnz/threads/<id>.jsonl  (last ~20 lines)
-```
-Then either re-send with a continuation message or handle what was completed so far.
+If `status: "max_turns"`, the work so far is persisted — `agnz send <id> "continue"` to resume, or read the transcript tail (`<cwd>/.claude/agnz/threads/<id>.jsonl`) for what was done.
 
 ## Handling pauses
 
-**Approval pause** (`kind: "approval"`): a gated tool wants to run. Inspect the tool and arguments in the return value, then:
-- `agent_approve({ thread_id, decision: "allow" })` — allow once
-- `agent_approve({ thread_id, decision: "allow", persist: true })` — allow for the rest of the thread
-- `agent_approve({ thread_id, decision: "deny" })` — deny
+**Approval pause** (`kind: "approval"`): a gated tool wants to run. Inspect the pending tool/args (`agnz show <id>` or the meta), then:
+- `agnz approve <id> allow` — allow once
+- `agnz approve <id> allow --persist` — allow this tool for the rest of the run
+- `agnz approve <id> deny` — deny (injected as the tool result; the agent may try another way)
 
-**Question pause** (`kind: "question"`): the sub-agent called `AskUser`. Read the question in the return value and call:
-- `agent_answer({ thread_id, answer: "<your answer>" })`
+**Question pause** (`kind: "question"`): the sub-agent called `AskUser`:
+- `agnz answer <id> "<your answer>"`
+
+**Runaway**: `agnz interrupt <id> ["directive"]` aborts the current step and leaves the thread resumable.
 
 ## Parallel runs
 
-```
-agent_start A → thread_A
-agent_start B → thread_B
-agent_send(A, task, detach: true)   // returns immediately
-agent_send(B, task, detach: true)   // returns immediately
-agent_wait(A) → outcome_A
-agent_wait(B) → outcome_B
+```bash
+agnz start auth    "Investigate how auth works"    --agent researcher
+agnz start billing "Investigate how billing works" --agent researcher
+# Both run as separate detached processes; results arrive via the hook at the next prompt.
+agnz list          # see status/spend of both; a pause on one doesn't block the other
 ```
 
-Both threads run concurrently via Node's event loop. Handle pauses for each independently — a pause on A does not block B.
+Each run is its own OS process — genuine parallelism, nothing resident between runs.

@@ -1,223 +1,136 @@
 # Sub-agent lifecycle
 
-Companion to [SKILL.md](SKILL.md). Details of the conversation flow between Parent Claude and an agnz sub-agent.
+Companion to [SKILL.md](SKILL.md). The full conversation flow between Parent Claude and an agnz sub-agent, driven by the **`agnz` CLI** (there is no MCP server — see [ADR 0014](../../../docs/adr/0014-cli-replaces-mcp.md)).
 
-> **⚠ Outdated:** this file describes the removed **MCP tools** (`agent_*`/`thread_*`). agnz is now **CLI-only** — the verbs (`agnz start/send/approve/answer/stop/interrupt/list/show`) in [SKILL.md](SKILL.md) are authoritative. See [ADR 0014](../../../docs/adr/0014-cli-replaces-mcp.md). The *conversation flow* (background runs, pauses, results via the hook) below still applies; only the tool *names/invocation* changed (MCP tool → Bash CLI call).
+Invoke every verb via Bash; each prints JSON to stdout:
 
-## The six tools
+```bash
+node "$CLAUDE_PLUGIN_ROOT/bin/agnz.mjs" <verb> [args...]
+```
 
-All return JSON. Parent Claude calls them; the sub-agent doesn't see them.
+## The verbs
 
-### `agent_start`
+### `start`
 
 Create a thread locked to a working directory.
 
-```
-agent_start({
-  cwd: "/abs/path/to/project",    // required — the sandbox root
-  agent: "researcher",            // optional — agent def name (ADR 0003)
-  profile: "lmstudio-devstral",   // optional — ignored if `agent` is set
-  system_prompt: "..."            // optional — ignored if `agent` is set
-})
-→ {
-  thread_id: "abc...",
-  cwd: "/abs/path/to/project",
-  profile: "lmstudio-devstral",
-  model: "mistralai/devstral-small-2-2512",
-  policy: { Read: "allow", Edit: "deny", ... },
-  agent: "researcher" | null
-}
+```bash
+agnz start researcher-1 "Find all call sites of parseConfig and summarize." \
+  --agent researcher --cwd /abs/path
+→ {"thread_id":"abc…","name":"researcher-1","agent":"researcher","status":"started"}
 ```
 
-The thread is persisted at `<cwd>/.claude/agnz/threads/<id>.meta.json` and is recoverable across MCP restarts.
+`--inline "<frontmatter>"` defines an ad-hoc role instead of `--agent`. Without a task, the thread starts `idle`. `--wait` runs it inline and returns the outcome (see below). The thread is persisted at `<cwd>/.claude/agnz/threads/<id>.meta.json`, recoverable across runs.
 
-### `agent_send`
+### `send`
 
-Send a user message (task or follow-up). Always returns immediately with `{status: "started"}`. Use `agent_wait` to collect the outcome.
+Send a task or follow-up. **Reuses** the most recent live thread of that name (resume), so a follow-up keeps its context; pass a thread-id to target one exactly.
 
-```
-agent_send({
-  thread_id: "abc...",
-  message: "Find all call sites of parseConfig and summarize.",
-})
+```bash
+agnz send researcher-1 "Now also check the test files."
+→ {"thread_id":"abc…","status":"started"}   # or "queued" if the thread is mid-run
 ```
 
-### `agent_approve`
+### `approve`
 
-Resolve an `awaiting_input` / `kind: "approval"` pause.
+Resolve an `awaiting_input` / approval pause. No `tool_call_id` needed — the thread's pending call is used.
 
-```
-agent_approve({
-  thread_id: "abc...",
-  tool_call_id: "...",            // the id from the pending payload
-  decision: "allow" | "deny",
-  persist: false,                 // optional — upgrade tool to `allow` for the rest of the thread
-})
+```bash
+agnz approve abc allow --persist
 ```
 
-`persist: true` is how you stop being paged for every single `Edit` after you've decided "yes this agent can edit".
+`--persist` upgrades that tool to `allow` for the rest of this run, so you stop being paged for every `Edit`.
 
-### `agent_answer`
+### `answer`
 
-Resolve an `awaiting_input` / `kind: "question"` pause. The sub-agent called `AskUser` because it genuinely could not decide something on its own.
+Resolve an `awaiting_input` / question pause (the sub-agent called `AskUser`).
 
-```
-agent_answer({
-  thread_id: "abc...",
-  tool_call_id: "...",
-  answer: "Use the US English spelling.",
-})
+```bash
+agnz answer abc "Use the US English spelling."
 ```
 
-### `agent_stop`
+### `interrupt`
 
-Mark the thread as stopped. In-memory sandbox state is dropped; the persisted transcript remains.
+Hard-interrupt a working/runaway agent: abort the current step (kills a runaway `Bash`/`Grep` too), leave the thread resumable, optionally queue a directive that drains on the next run.
 
+```bash
+agnz interrupt abc "Stop — the approach is wrong, use the existing helper instead."
 ```
-agent_stop({ thread_id: "abc..." })
+
+### `stop`
+
+End a thread (signals its runner; the transcript persists).
+
+```bash
+agnz stop abc
 ```
+
+### `list` / `show`
+
+```bash
+agnz list                 # threads in this workspace: name, status, summary, spend
+agnz show abc             # full state + pending + last transcript messages
+```
+
+`list` opportunistically recovers threads whose runner died (a crash leaves no daemon to clean up) by marking them `error`.
 
 ## How results arrive
 
-Agents always run in the background. Results come via `SendMessage(to: "parent")` — the `UserPromptSubmit` hook injects unread parent mail into your next Claude prompt. No polling, no blocking.
+By default a run is **detached**: `start`/`send`/`approve`/`answer` spawn a short-lived runner that works in the background and exits. The result reaches the parent via `SendMessage(to:"parent")` → `messages.jsonl` → the `UserPromptSubmit` hook injects unread parent mail into your next prompt. An OS notification fires for urgent mail. No polling.
 
-For a non-blocking status check at any time: read `<cwd>/.claude/agnz/threads/<id>.meta.json` directly.
+Pass **`--wait`** to block until the segment pauses/finishes and get the outcome JSON directly in the same call — best for short tasks. For a non-blocking status peek any time: `agnz show <id>`, or read the meta file directly.
 
-## The three agent states
+## The three outcome states
 
-When an agent pauses or finishes, the meta file reflects one of these:
+`agnz show <id>` (or the meta file) reflects one of:
 
-### 1. `status: "final"`
+**1. `final`** — free text; the agent finished its turn and is idle. Send again to follow up.
 
-```
-{
-  status: "final",
-  thread_id: "abc...",
-  content: "Request logging is handled by middleware/logger.js...",
-  finish_reason: "stop"
-}
-```
+**2. `awaiting_input` / approval** — the agent wants to run a gated tool (usually `Edit`/`Write`/`Bash`). Long string args are truncated to a length-annotated preview to protect your context; the full args stay in the meta under `pending.args`. Resolve with `agnz approve <id> allow|deny`. A deny is injected as the tool result and the agent continues — it may try another approach.
 
-Free text. The sub-agent finished its turn and is idle. You can send again (follow-up), stop it, or leave it.
+**3. `awaiting_input` / question** — the agent called `AskUser` because it genuinely could not decide. `options`/`context` may be present. Resolve with `agnz answer <id> "…"`.
 
-### 2. `status: "awaiting_input", kind: "approval"`
+## Concurrency — agents in parallel
 
-```
-{
-  status: "awaiting_input",
-  kind: "approval",
-  thread_id: "abc...",
-  tool_call_id: "...",
-  tool: "Edit",
-  args: {
-    path: "src/logger.js",
-    old_string: "<string: 245 chars, head: \"function log(level, msg)...\">",
-    new_string: "<string: 312 chars, head: \"function log(level, msg, meta)...\">"
-  },
-  hint: "Sub-agent wants to run a tool that needs consent..."
-}
+Each detached run is its own OS process, so multiple agents run in genuine parallel:
+
+```bash
+agnz start auth    "Investigate how auth works"    --agent researcher
+agnz start billing "Investigate how billing works" --agent researcher
+# Both running as separate processes; results arrive via the hook at the next prompt.
 ```
 
-The sub-agent wanted to run a gated tool (usually `Edit` or `Write`). Long string args are truncated to a length-annotated preview to protect your context — the full args are always readable in `<cwd>/.claude/agnz/threads/<id>.meta.json` under `pending.args` if you need to audit.
-
-Resolve with `agent_approve`. If you deny, the denial is injected as the tool result and the sub-agent continues — it may try a different approach.
-
-### 3. `status: "awaiting_input", kind: "question"`
-
-```
-{
-  status: "awaiting_input",
-  kind: "question",
-  thread_id: "abc...",
-  tool_call_id: "...",
-  question: "Should the new field be optional or required?",
-  options: ["optional", "required"],
-  context: "I'm editing the UserProfile type..."
-}
-```
-
-The sub-agent called `AskUser`. `options` and `context` may be missing. Resolve with `agent_answer`.
-
-## Concurrency — running agents in parallel
-
-All calls (`agent_send`, `agent_approve`, `agent_answer`) return immediately with `{status: "started"}`. Agents run in the background via Node's event loop. You can kick off multiple agents without waiting for any of them.
-
-### Two agents working in parallel
-
-```
-thread_A = agent_start({cwd, agent: "researcher"})
-thread_B = agent_start({cwd, agent: "researcher"})
-
-agent_send({thread_id: A, message: "Investigate how auth works"})
-agent_send({thread_id: B, message: "Investigate how billing works"})
-
-# Both are now running. Results arrive via SendMessage(to: "parent") at the next prompt.
-```
-
-Both finish in roughly max(A, B) wall time, not A+B.
-
-### Peeking without waiting
-
-If you just want to know where the sub-agent is right now without blocking, Read the thread meta file directly — no MCP call needed. The `status` field tells you everything (`running`, `awaiting_input`, `idle`, `stopped`, `error`), and `pending` tells you what kind of pause if any.
+Both finish in roughly max(A, B) wall time, not A+B. Nothing stays resident between runs — an idle thread is just files on disk.
 
 ## Error recovery
 
-**Thread returned `status: "error"`.** Check `error.message` in the thread meta for the cause. Most common: the local runtime (LM Studio / Ollama) was down when the send fired. Start the runtime and send again.
-
-**Thread wedged — every send returns a jinja template / alternation error.** A previous send failed mid-turn and left the transcript in a state the model's prompt template rejects. No fix today; stop the thread and start a fresh one.
-
-**Approval pause that you accidentally answered with `agent_answer`.** You'll get a clear error: "thread is awaiting approval, not question. Use agent_approve." Just retry with the right tool.
-
-**Sub-agent won't stop narrating / keeps babbling.** Its role's system prompt is too vague. Edit the role file (see `defining.md`), start a fresh thread, retry. Snapshot-on-spawn means the running thread won't pick up the new prompt.
+- **`status: "error"`.** Check `error.message` in the meta. Most common: the local runtime (LM Studio / Ollama / MLX) was down when the send fired. Start it and `agnz send` again — but an `error` thread is dead; `start` a fresh one (its transcript is preserved for inspection).
+- **Wedged thread** (every send returns a jinja/alternation error). A previous send failed mid-turn and left the transcript in a state the model's template rejects. `stop` it and `start` fresh.
+- **Wrong resolver** — `agnz approve` on a question pause (or vice versa) returns a clear error telling you which verb to use.
+- **Runaway / babbling** — `agnz interrupt <id>` aborts it now; if the role prompt is too vague, edit the role file (see `defining.md`) and `start` a fresh thread (a running thread keeps its snapshot).
 
 ## Messages and mailboxes — agent↔agent communication
 
-Sub-agents address each other by the `name` given at `agent_start`. Messages are sent via the `SendMessage` tool (always-allowed, no approval needed) and land in `<cwd>/.claude/agnz/messages.jsonl`.
-
-### Sending a message
+Sub-agents address each other by the `name` they were started with, via their always-allowed `SendMessage` tool. Messages land in `<cwd>/.claude/agnz/messages.jsonl`.
 
 ```
-SendMessage({
-  to: "writer",            // agent name, or "parent", or ["a", "b"] for broadcast
-  kind: "handoff",         // see kinds below
-  body: "Investigation complete. Key files: lib/auth.js, lib/tokens.js",
-  urgent: false            // true → OS notification when addressed to parent
-})
+SendMessage({ to: "writer", kind: "handoff", text: "Investigation complete. Key files: lib/auth.js", urgent: false })
 ```
-
-### Message kinds
 
 | Kind | Purpose |
 |---|---|
 | `say` | Informational — status update, FYI |
-| `question` | Ask another agent something; expect an `answer` back |
-| `answer` | Response to a `question` |
-| `handoff` | Pass work ownership to another agent |
+| `question` / `answer` | Ask another agent / respond |
+| `handoff` | Pass work ownership |
 | `status` | Structured progress signal |
-| `error` | Report a failure to another agent or parent |
-| `directive` | Instruction from parent or lead agent to a sub-agent |
+| `error` | Report a failure |
+| `directive` | Instruction from parent or lead agent |
 
-### Receiving messages
-
-Each sub-agent drains its inbox at the **top of every turn**. Messages addressed to it (`to` matches the agent's name) are injected as synthetic user messages. The `inboxCursor` advances so the same message is never redelivered across MCP restarts.
-
-### Parent as recipient
-
-Agents message the parent via `to: "parent"`. The `UserPromptSubmit` and `SessionStart` hooks (auto-enabled by the plugin) inject unread parent-addressed mail into Claude's context at the next prompt submission or session start. No polling needed.
-
-Set `urgent: true` on a message to also fire an OS notification (macOS/Linux).
-
-### Inspecting the message log
-
-```
-Read <cwd>/.claude/agnz/messages.jsonl
-```
-
-The log is append-only. Each line is `{ id, ts, from, to, kind, body, urgent? }`. Useful for debugging agent communication without blocking on MCP calls.
+Each sub-agent **drains its inbox at the top of every turn** — messages addressed to it are injected as synthetic user messages, and `inboxCursor` advances so nothing is redelivered. Agents reach the parent via `to: "parent"` (delivered by the hooks; `urgent: true` also fires an OS notification). The log is append-only; read `messages.jsonl` to debug communication.
 
 ## What is deliberately NOT available
 
-- **No streaming.** Outcomes are single events. Intermediate tool calls are invisible to the parent until the sub-agent pauses or finishes.
-- **No `agent_status` / `agent_list_threads`.** Read the files; the MCP surface is for live-process operations only.
-- **`Bash` is gated.** Policy ships as `ask` — the first call pauses for parent approval. Use `persist: true` on the first `agent_approve` to unlock for the rest of the thread.
-- **No runtime reload of agent definitions.** A running thread keeps its snapshot. Start a new thread to pick up edits.
+- **No streaming.** Outcomes are single events; intermediate tool calls are invisible until the agent pauses or finishes (or use `--wait` to block for the segment).
+- **No daemon.** Nothing runs between runs; state lives in files.
+- **`Bash` is gated.** Policy ships as `ask`; the first call pauses for approval. `agnz approve <id> allow --persist` unlocks it for the run. Note: Bash is **not** path-confined — it is the sandbox escape hatch, gated only by approval (ADR 0003).
+- **No runtime reload of agent definitions.** A running thread keeps its snapshot; `start` a new thread to pick up edits.
