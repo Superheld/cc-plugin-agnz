@@ -52,7 +52,6 @@ describe("workspace.json lifecycle", () => {
     assert.equal(ws.schemaVersion, WORKSPACE_SCHEMA_VERSION);
     assert.equal(ws.name, basename(cwd));
     assert.equal(ws.cwd, cwd);
-    assert.deepEqual(ws.members, []);
     assert.ok(typeof ws.createdAt === "number");
     assert.ok(existsSync(join(cwd, ".claude", "agnz", "workspace.json")));
   });

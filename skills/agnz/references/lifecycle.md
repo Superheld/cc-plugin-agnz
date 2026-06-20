@@ -1,6 +1,8 @@
 # Sub-agent lifecycle
 
-Companion to [SKILL.md](SKILL.md). Details of the six MCP tools and the conversation flow between Parent Claude and an agnz sub-agent.
+Companion to [SKILL.md](SKILL.md). Details of the conversation flow between Parent Claude and an agnz sub-agent.
+
+> **⚠ Outdated:** this file describes the removed **MCP tools** (`agent_*`/`thread_*`). agnz is now **CLI-only** — the verbs (`agnz start/send/approve/answer/stop/interrupt/list/show`) in [SKILL.md](SKILL.md) are authoritative. See [ADR 0011](../../../docs/adr/0011-cli-replaces-mcp.md). The *conversation flow* (background runs, pauses, results via the hook) below still applies; only the tool *names/invocation* changed (MCP tool → Bash CLI call).
 
 ## The six tools
 
