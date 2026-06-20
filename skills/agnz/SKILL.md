@@ -112,4 +112,4 @@ node "$CLAUDE_PLUGIN_ROOT/bin/agnz.mjs" start billing "…" --agent researcher
 - **`references/lifecycle.md`** — background execution and team messaging in depth.
 - **`references/orchestration.md`** — when to delegate, thread reuse, outcomes.
 
-> Note: the reference files still describe the older MCP tool names in places; the CLI verbs above are authoritative.
+> The reference files (`references/lifecycle.md`, `references/orchestration.md`, `references/defining.md`) cover the CLI lifecycle, orchestration, and frontmatter in depth.

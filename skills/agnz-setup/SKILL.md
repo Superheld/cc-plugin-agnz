@@ -31,7 +31,7 @@ Configuration and status for the **agnz** plugin. Three things live here:
 
 ## How mappings work
 
-When `agent_start` resolves a profile it looks up `agentDef.model` in the mapping table. `_default` is the fallback for any unmatched model. Without a mapping the model identifier is used directly as a profile name.
+When `agnz start` resolves a profile it looks up `agentDef.model` in the mapping table. `_default` is the fallback for any unmatched model. Without a mapping the model identifier is used directly as a profile name.
 
 **Typical project setup — all agents run locally:**
 ```

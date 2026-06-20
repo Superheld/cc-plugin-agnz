@@ -206,7 +206,7 @@ Note: `Bash` has policy `ask` by default so the first run will pause for approva
 
 ## Snapshot-on-spawn — what that means for you
 
-When you call `agent_start(cwd, agent: "researcher")`, `agnz` reads the file *once*, parses it, resolves its profile, merges the effective policy, and stores the result as a **snapshot** on the thread meta. From that moment the thread is running against the snapshot — editing the file afterwards does not affect the running thread.
+When you run `agnz start <name> --agent researcher`, agnz reads the file *once*, parses it, resolves its profile, merges the effective policy, and stores the result as a **snapshot** on the thread meta. From that moment the thread is running against the snapshot — editing the file afterwards does not affect the running thread.
 
 Implications:
 

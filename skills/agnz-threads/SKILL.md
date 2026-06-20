@@ -22,7 +22,7 @@ Key fields per thread:
 | Field | Notes |
 |---|---|
 | `id` | UUID — use first 8 chars as short handle |
-| `name` | human label given at agent_start |
+| `name` | human label given at agnz start |
 | `status` | `idle` / `running` / `awaiting_input` / `stopped` / `error` |
 | `agentDef.name` | which agent definition is loaded |
 | `pending.kind` | `approval` or `question` when status=awaiting_input |
@@ -46,8 +46,8 @@ Transcript line shapes (OpenAI format):
 - `{"role":"tool","tool_call_id":"...","content":"..."}` — tool result
 
 When a thread is `awaiting_input`, the `pending` object in meta has everything needed to resolve it:
-- `kind=approval` → `pending.toolCallId`, `pending.name`, `pending.args` — call `agent_approve`
-- `kind=question` → `pending.toolCallId`, `pending.question` — call `agent_answer`
+- `kind=approval` → `pending.toolCallId`, `pending.name`, `pending.args` — call `agnz approve`
+- `kind=question` → `pending.toolCallId`, `pending.question` — call `agnz answer`
 
 ## Trace stats (ADR 0011)
 
