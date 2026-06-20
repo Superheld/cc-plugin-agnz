@@ -2,7 +2,9 @@
 
 **A Claude Code plugin that exposes a locally-hosted LLM (LM Studio, Ollama, any OpenAI-compatible endpoint) as a sandboxed sub-agent.**
 
-Parent Claude talks to it over MCP. The sub-agent does the heavy file work — reading, grepping, mechanical edits — and Parent Claude only sees the distilled outcome. Same value model as the built-in `Agent` tool, but the model is one *you* control and host.
+> **Note (2026-06):** agnz now runs **CLI-only** — the parent drives it via `bin/agnz.mjs` (from Bash), not an MCP server. The "MCP tool surface" and architecture sections below are mid-update; see [ADR 0014](./docs/adr/0014-cli-replaces-mcp.md) and `skills/agnz/SKILL.md` for the current surface and verbs (`start`/`send`/`approve`/`answer`/`stop`/`interrupt`/`list`/`show`).
+
+Parent Claude talks to it through the `agnz` CLI (Bash). The sub-agent does the heavy file work — reading, grepping, mechanical edits — and Parent Claude only sees the distilled outcome. Same value model as the built-in `Agent` tool, but the model is one *you* control and host.
 
 ## Why
 

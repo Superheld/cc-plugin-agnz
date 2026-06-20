@@ -1,8 +1,10 @@
 # agnz — Sandboxed local-model agent for Claude Code
 
-A Claude Code plugin that exposes a **locally-hosted LLM** (LM Studio, Ollama, etc.) as a sandboxed sub-agent. Parent Claude talks to it via MCP. The sub-agent does the heavy file work; Parent Claude orchestrates and only sees the distilled outcome — keeping its context window small.
+A Claude Code plugin that exposes a **locally-hosted LLM** (LM Studio, Ollama, etc.) as a sandboxed sub-agent. Parent Claude talks to it via a CLI (`bin/agnz.mjs`, invoked from Bash); there is no MCP server (removed — see ADR 0014). The sub-agent does the heavy file work; Parent Claude orchestrates and only sees the distilled outcome — keeping its context window small.
 
 This file is the in-repo guidance for future Claude sessions working on the codebase. It reflects the current state of `main`: ADR 0001 (workspace-first), ADR 0002 (mailbox communication), ADR 0003 (agent definitions) are implemented. ADR 0004 (board) is still design-in-progress. ADR 0005 is superseded by ADR 0006. ADRs 0006–0008 and 0010 are proposed/roadmap. ADR 0009 (tool configuration) is **partially superseded** — the `allowedCommands` workspace store approach was abandoned in favour of the simpler session-only model described below. All ADRs live in [`docs/adr/`](./docs/adr/) — see the ADR section at the bottom.
+
+> **⚠ Status (CLI pivot, 2026-06 — this file is mid-update).** agnz no longer uses MCP. The parent drives it through the **`bin/agnz.mjs` CLI** (verbs: `start`/`send`/`approve`/`answer`/`stop`/`interrupt`/`list`/`show`), invoked from Bash; each run is a detached `lib/runner.mjs` process. **Removed:** `mcp/server.mjs`, `mcp/jsonrpc.mjs`, `lib/run-tracker.mjs`, `.mcp.json`. **Added:** `bin/agnz.mjs`, `lib/runner.mjs`, `lib/orchestrate.mjs`, `lib/proc-lock.mjs`, `lib/skills.mjs`, `lib/atomic-write.mjs`, `lib/file-lock.mjs`. The persistence layer is hardened for cross-process concurrency (atomic tmp+rename writes + `lib/proc-lock.mjs` mkdir locks on `messages.jsonl`/`meta.json`/the index). `node --test tests/*.test.mjs` is green (45 tests). See **ADR 0014** for the pivot and `skills/agnz/SKILL.md` for the current parent-facing surface. **Sections below that still describe MCP tools (`agent_*`/`thread_*`) are historical until rewritten.**
 
 ## Why this exists
 
