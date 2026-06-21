@@ -320,7 +320,13 @@ export function formatThreadsDetailed(threads) {
     const label = t.name ? `${t.name}:${sid}` : sid;
     const s = t.spend || { turns: 0, tokens: 0 };
     const spend = s.turns || s.tokens ? ` · ${s.turns} turns · ${formatTokens(s.tokens)} tok` : "";
-    return `  ${label} — ${t.status}${spend}`;
+    // Second line: the rolling summary (→ description → role, fallback-chained
+    // in readThreadMetas). This is what lets the parent see what a thread did
+    // without opening its transcript — even weeks later. Collapse whitespace so
+    // a multi-line final answer can't break the block; cap the length.
+    const summary = t.summary ? String(t.summary).replace(/\s+/g, " ").trim() : "";
+    const sumLine = summary ? `\n      ${summary.slice(0, 100)}` : "";
+    return `  ${label} — ${t.status}${spend}${sumLine}`;
   });
   return `threads (${threads.length} active):\n${lines.join("\n")}`;
 }

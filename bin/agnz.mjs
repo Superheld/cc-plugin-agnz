@@ -179,7 +179,17 @@ async function main() {
         cwd,
         agentDef,
         name,
-        description: typeof flags.description === "string" ? flags.description : null,
+        // The founding purpose of the thread, used as a durable legibility
+        // label (agnz list / the parent hook) long after the transcript has
+        // scrolled away. Prefer an explicit --description; otherwise fall back
+        // to the initial task so a thread always says what it was started for,
+        // even if it never reaches a final answer.
+        description:
+          typeof flags.description === "string"
+            ? flags.description
+            : typeof message === "string"
+              ? message.slice(0, 200)
+              : null,
       });
       // Fail fast on a bad cwd / policy.
       createSandbox({ root: thread.cwd, policy: buildToolPolicy(agentDef, registry.list().map((t) => t.name)) });
