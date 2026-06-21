@@ -80,6 +80,37 @@ test("formatThreadsDetailed renders short-id, status, and spend", () => {
   assert.match(out, /9f8e7d6c — idle$/m);
 });
 
+test("formatThreadsDetailed renders the summary as an indented second line", () => {
+  const out = formatThreadsDetailed([
+    {
+      id: "1a2b3c4d5e6f",
+      name: "cleanup",
+      status: "idle",
+      spend: { turns: 6, tokens: 100 },
+      summary: "Deleted 5 error-state threads and their files",
+    },
+  ]);
+  assert.match(out, /cleanup:1a2b3c4d — idle · 6 turns · 100 tok/);
+  assert.match(out, /\n {6}Deleted 5 error-state threads and their files/);
+});
+
+test("formatThreadsDetailed collapses whitespace and caps the summary", () => {
+  const out = formatThreadsDetailed([
+    {
+      id: "abcdef12",
+      name: "probe",
+      status: "idle",
+      spend: { turns: 0, tokens: 0 },
+      summary: "line one\n  line two\twith\ttabs " + "x".repeat(200),
+    },
+  ]);
+  // newlines/tabs become single spaces so the block can't be broken
+  assert.match(out, /probe:abcdef12 — idle\n {6}line one line two with tabs x+/);
+  // the rendered summary line is capped (100 chars of summary + 6 indent)
+  const summaryLine = out.split("\n").find((l) => l.includes("line one"));
+  assert.ok(summaryLine.trim().length <= 100, `summary line too long: ${summaryLine.length}`);
+});
+
 test("formatThreadsDetailed returns null for an empty list", () => {
   assert.equal(formatThreadsDetailed([]), null);
   assert.equal(formatThreadsDetailed(null), null);
