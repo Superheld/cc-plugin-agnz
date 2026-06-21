@@ -1,0 +1,9 @@
+#!/bin/sh
+# Clean `agnz` entrypoint. Claude Code adds each enabled plugin's bin/ to the
+# parent shell's PATH, so the parent (and you, in a terminal) can run
+# `agnz <verb>` from any working directory — no $CLAUDE_PLUGIN_ROOT needed.
+# Delegates to the real ESM CLI sitting next to this script. A thin sh wrapper
+# (rather than a symlink) survives every plugin-copy/install mechanism, and a
+# rename to an extensionless file is not an option: there is no
+# package.json "type":"module", so Node would load agnz.mjs's ESM as CJS.
+exec node "$(dirname "$0")/agnz.mjs" "$@"

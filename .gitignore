@@ -164,3 +164,4 @@ data/
 # Live-test scratch dir for sub-agent runs (created on demand)
 tmp/
 
+.in_use/

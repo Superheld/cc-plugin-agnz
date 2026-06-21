@@ -4,7 +4,7 @@ The parent (and you, in a terminal) drive agnz through `bin/agnz.mjs`. There is
 no MCP server (see [ADR 0014](./adr/0014-cli-replaces-mcp.md)).
 
 ```bash
-node "$CLAUDE_PLUGIN_ROOT/bin/agnz.mjs" <verb> [positional…] [--flags]
+agnz <verb> [positional…] [--flags]
 ```
 
 Every verb prints a JSON object (or array) to **stdout**. Errors print
