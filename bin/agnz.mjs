@@ -76,11 +76,14 @@ function parseArgs(argv) {
 // recent live thread that goes by that name in this workspace (idle/stopped/
 // running/awaiting — never an errored one). This is the reuse-by-name default.
 async function resolveTarget(tm, cwd, token) {
-  const byId = await tm.getThread(token);
+  // Self-heal the workspace first: re-register any on-disk thread missing from
+  // the index, so a ghost is resolvable by id or name (otherwise send <name>
+  // would spawn a duplicate instead of resuming the existing thread).
+  const threads = await tm.reconcileWorkspace(cwd);
+  const byId = threads.find((t) => t.id === token) || (await tm.getThread(token));
   if (byId) return byId;
-  const threads = await tm.listThreads();
   const candidates = threads
-    .filter((t) => t.cwd === cwd && t.name === token && t.status !== "error")
+    .filter((t) => t.name === token && t.status !== "error")
     .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
   return candidates[0] || null;
 }
@@ -179,7 +182,17 @@ async function main() {
         cwd,
         agentDef,
         name,
-        description: typeof flags.description === "string" ? flags.description : null,
+        // The founding purpose of the thread, used as a durable legibility
+        // label (agnz list / the parent hook) long after the transcript has
+        // scrolled away. Prefer an explicit --description; otherwise fall back
+        // to the initial task so a thread always says what it was started for,
+        // even if it never reaches a final answer.
+        description:
+          typeof flags.description === "string"
+            ? flags.description
+            : typeof message === "string"
+              ? message.slice(0, 200)
+              : null,
       });
       // Fail fast on a bad cwd / policy.
       createSandbox({ root: thread.cwd, policy: buildToolPolicy(agentDef, registry.list().map((t) => t.name)) });
@@ -306,8 +319,11 @@ async function main() {
     }
 
     case "list": {
-      let threads = await tm.listThreads();
-      if (!flags.all) threads = threads.filter((t) => t.cwd === cwd);
+      // Default: reconcile the current workspace directly — its threads/ dir is
+      // the source of truth, so a ghost (meta on disk, index entry lost) still
+      // appears and gets re-registered. --all uses the index-driven scan, which
+      // self-heals every workspace the index knows about.
+      let threads = flags.all ? await tm.listThreads() : await tm.reconcileWorkspace(cwd);
       threads = await Promise.all(threads.map((t) => recoverIfStale(tm, t)));
       if (typeof flags.status === "string") threads = threads.filter((t) => t.status === flags.status);
       out(

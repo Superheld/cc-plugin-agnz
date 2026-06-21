@@ -5,7 +5,7 @@ Companion to [SKILL.md](SKILL.md). The full conversation flow between Parent Cla
 Invoke every verb via Bash; each prints JSON to stdout:
 
 ```bash
-node "$CLAUDE_PLUGIN_ROOT/bin/agnz.mjs" <verb> [args...]
+agnz <verb> [args...]
 ```
 
 ## The verbs

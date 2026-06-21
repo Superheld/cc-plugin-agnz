@@ -13,7 +13,7 @@ Parent Claude drives it through the `agnz` CLI (from Bash). The sub-agent does t
 
 ## The CLI
 
-There is no MCP server. The parent calls the CLI via Bash; every verb prints a JSON object/array to stdout so the outcome is parseable. The binary lives at `$CLAUDE_PLUGIN_ROOT/bin/agnz.mjs`.
+There is no MCP server. The parent calls the CLI via Bash; every verb prints a JSON object/array to stdout so the outcome is parseable. When the plugin is enabled, Claude Code puts its `bin/` on the parent shell's `PATH`, so the parent runs `agnz <verb>` from any working directory — no `$CLAUDE_PLUGIN_ROOT` needed. (Developing in this repo, `node bin/agnz.mjs <verb>` works too.)
 
 | Verb | Purpose |
 |---|---|
@@ -74,7 +74,7 @@ This repo is a plain Claude Code plugin. The canonical marketplace is [`Superhel
 Installing wires the hooks (result delivery + spend summary), the bundled agents, and the skills. The parent invokes the CLI via Bash; verify with:
 
 ```bash
-node "$CLAUDE_PLUGIN_ROOT/bin/agnz.mjs" list
+agnz list
 ```
 
 After code changes, update in place: `/plugin marketplace update agnz && /plugin install agnz@agnz && /reload-plugins`.

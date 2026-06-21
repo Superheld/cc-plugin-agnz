@@ -62,15 +62,19 @@ running/awaiting — never errored) and resumes it, instead of spawning a new on
   opportunistically: `list`/`show` mark a `running` thread whose runner pid is dead
   as `error`.
 - **Discoverability moves to the skill/docs.** The parent learns the verbs from
-  `skills/agnz/SKILL.md`; there is no MCP tool schema. The CLI is located at
-  `$CLAUDE_PLUGIN_ROOT/bin/agnz.mjs`.
+  `skills/agnz/SKILL.md`; there is no MCP tool schema. Claude Code adds an
+  enabled plugin's `bin/` to the parent shell's `PATH`, so the parent invokes
+  `agnz <verb>` by bare name from any cwd — `bin/agnz` is a thin sh wrapper over
+  the ESM `bin/agnz.mjs`. No `$CLAUDE_PLUGIN_ROOT` lookup is required.
 - `.mcp.json` is removed; `plugin.json` no longer advertises an MCP server.
 
 ## Open
 
-- **CLI location.** Whether `$CLAUDE_PLUGIN_ROOT` is reliably set in the parent's
-  Bash environment needs verification; if not, the plugin needs another way to
-  surface the binary path.
-- The reference docs under `skills/agnz/references/` still describe the old MCP
-  tool names in places — the SKILL.md verbs are authoritative until they are
-  rewritten.
+- **CLI location — resolved.** `$CLAUDE_PLUGIN_ROOT` is *not* set in the parent's
+  ad-hoc Bash, but it does not need to be: Claude Code adds an enabled plugin's
+  `bin/` to the parent shell's `PATH`. The parent calls `agnz <verb>` by bare
+  name from any cwd (verified from an unrelated working directory). `bin/agnz`
+  is a thin sh wrapper over `bin/agnz.mjs` so the clean command works without a
+  `package.json "type":"module"`.
+- **Reference docs — resolved.** `skills/agnz/references/` no longer mention the
+  old MCP tool names; lifecycle/orchestration were rewritten to the CLI verbs.

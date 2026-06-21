@@ -1,6 +1,6 @@
 # agnz orchestration — when and how to delegate
 
-All invocations are CLI calls via Bash: `node "$CLAUDE_PLUGIN_ROOT/bin/agnz.mjs" <verb> …`.
+All invocations are CLI calls via Bash: `agnz <verb> …`.
 
 ## Thread reuse — resume before recreating
 
