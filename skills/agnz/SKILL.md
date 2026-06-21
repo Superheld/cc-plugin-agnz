@@ -11,10 +11,12 @@ description: "This skill should be used when the user asks to 'use agnz', 'deleg
 
 ## Invoking the CLI
 
-Call the CLI with Bash. The binary lives at `$CLAUDE_PLUGIN_ROOT/bin/agnz.mjs`:
+Call the CLI with Bash. When the plugin is enabled, Claude Code adds its `bin/`
+to your `PATH`, so `agnz` runs from any working directory — no path prefix or
+`$CLAUDE_PLUGIN_ROOT` needed:
 
 ```bash
-node "$CLAUDE_PLUGIN_ROOT/bin/agnz.mjs" <verb> [args...]
+agnz <verb> [args...]
 ```
 
 Every verb prints a JSON object (or array) to stdout, so you can parse the outcome. Errors print `{"error":"..."}` and exit non-zero.
@@ -47,8 +49,8 @@ Add `--wait` to `start`/`send`/`approve`/`answer` to run the segment synchronous
 Threads are persistent. **`send <name>` reuses** the most recent live thread of that name instead of spawning a new one — so a follow-up keeps its context:
 
 ```bash
-node "$CLAUDE_PLUGIN_ROOT/bin/agnz.mjs" list
-node "$CLAUDE_PLUGIN_ROOT/bin/agnz.mjs" send researcher "Continue: now add the tests."
+agnz list
+agnz send researcher "Continue: now add the tests."
 ```
 
 `start` always creates a fresh thread. Only `start` a new one when the role/task is genuinely different. Error-status threads are dead — start fresh.
@@ -71,7 +73,7 @@ Investigate code and produce concise, factual summaries. Don't modify files.
 Then:
 
 ```bash
-node "$CLAUDE_PLUGIN_ROOT/bin/agnz.mjs" start researcher-1 "Summarise how request logging works." --agent researcher
+agnz start researcher-1 "Summarise how request logging works." --agent researcher
 → {"thread_id":"abc…","name":"researcher-1","agent":"researcher","status":"started"}
 ```
 
@@ -102,8 +104,8 @@ Sub-agents address each other by `name` via their `SendMessage` tool (`kind`: sa
 Each detached run is its own OS process, so multiple agents run in true parallel:
 
 ```bash
-node "$CLAUDE_PLUGIN_ROOT/bin/agnz.mjs" start auth    "…" --agent researcher
-node "$CLAUDE_PLUGIN_ROOT/bin/agnz.mjs" start billing "…" --agent researcher
+agnz start auth    "…" --agent researcher
+agnz start billing "…" --agent researcher
 ```
 
 ## Reference files
