@@ -74,10 +74,80 @@ test("formatThreadsDetailed renders short-id, status, and spend", () => {
     { id: "1a2b3c4d5e6f", name: "dev", status: "running", spend: { turns: 5, tokens: 1234 } },
     { id: "9f8e7d6c", name: null, status: "idle", spend: { turns: 0, tokens: 0 } },
   ]);
-  assert.match(out, /threads \(2 active\):/);
+  // header is honest: N open, and how many of those are merely idle
+  assert.match(out, /threads \(2 open · 1 idle\):/);
   assert.match(out, /dev:1a2b3c4d — running · 5 turns · 1,234 tok/);
-  // a zero-spend thread omits the spend suffix
+  // a zero-spend thread with no timestamp omits both the spend and age suffix
   assert.match(out, /9f8e7d6c — idle$/m);
+});
+
+test("formatThreadsDetailed header drops the idle breakdown when none are idle", () => {
+  const out = formatThreadsDetailed([
+    { id: "1a2b3c4d", name: "dev", status: "running", spend: { turns: 1, tokens: 10 } },
+  ]);
+  assert.match(out, /threads \(1 open\):/);
+});
+
+test("formatThreadsDetailed renders a compact age tag from updatedAt", () => {
+  const now = Date.parse("2026-07-20T12:00:00Z");
+  const out = formatThreadsDetailed(
+    [
+      {
+        id: "1a2b3c4d",
+        name: "dev",
+        status: "idle",
+        updatedAt: "2026-07-17T12:00:00Z", // 3 days earlier
+        spend: { turns: 2, tokens: 40 },
+      },
+    ],
+    now,
+  );
+  assert.match(out, /dev:1a2b3c4d — idle · 3d · 2 turns · 40 tok/);
+});
+
+test("formatThreadsDetailed accepts epoch-millis timestamps (real meta format)", () => {
+  const now = 1782065400570;
+  const twoHoursMs = 2 * 60 * 60 * 1000;
+  const out = formatThreadsDetailed(
+    [
+      {
+        id: "1a2b3c4d",
+        name: "dev",
+        status: "idle",
+        updatedAt: now - twoHoursMs, // number, not ISO string
+        spend: { turns: 0, tokens: 0 },
+      },
+    ],
+    now,
+  );
+  assert.match(out, /dev:1a2b3c4d — idle · 2h$/m);
+});
+
+test("formatThreadsDetailed sorts live work above idle threads", () => {
+  const out = formatThreadsDetailed([
+    { id: "aaaaaaaa", name: "old", status: "idle", spend: { turns: 0, tokens: 0 } },
+    { id: "bbbbbbbb", name: "live", status: "running", spend: { turns: 0, tokens: 0 } },
+  ]);
+  const lines = out.split("\n").filter((l) => l.includes(" — "));
+  assert.match(lines[0], /live:bbbbbbbb — running/);
+  assert.match(lines[1], /old:aaaaaaaa — idle/);
+});
+
+test("formatThreadsDetailed appends a close-nudge only above the idle threshold", () => {
+  const fourIdle = Array.from({ length: 4 }, (_, i) => ({
+    id: `id${i}`.padEnd(8, "0"),
+    name: `t${i}`,
+    status: "idle",
+    spend: { turns: 0, tokens: 0 },
+  }));
+  assert.doesNotMatch(formatThreadsDetailed(fourIdle), /agnz stop <id>/);
+
+  const fiveIdle = [
+    ...fourIdle,
+    { id: "id4_____", name: "t4", status: "idle", spend: { turns: 0, tokens: 0 } },
+  ];
+  const out = formatThreadsDetailed(fiveIdle);
+  assert.match(out, /tip: 5 idle threads finished\? close with 'agnz stop <id>'/);
 });
 
 test("formatThreadsDetailed renders the summary as an indented second line", () => {

@@ -57,13 +57,18 @@ Hard-interrupt a working/runaway agent: abort the current step (kills a runaway 
 agnz interrupt abc "Stop — the approach is wrong, use the existing helper instead."
 ```
 
-### `stop`
+### `stop` — end and archive a thread
 
-End a thread (signals its runner; the transcript persists).
+Closes a thread: signals its runner if one is live, sets status `stopped`, and **keeps the transcript** on disk. A stopped thread drops out of the workspace list — and out of the summary the parent sees each prompt — so this is also the **cleanup verb**.
 
 ```bash
 agnz stop abc
+→ {"thread_id":"abc","status":"stopped","note":"archived — transcript kept; resume with 'agnz send'"}
 ```
+
+`stop` **archives, it does not delete.** The `.meta.json` + `.jsonl` stay for later inspection (read them directly). Use it when an `idle` thread's work is done and you won't resume it.
+
+**Keeping the workspace legible.** Threads stay listed as long as they are *open* — and `idle` counts as open, like a paused conversation you can resume with `send`. Nothing decays them automatically; that is deliberate, so you never lose a thread you meant to continue. The flip side: finished threads you leave `idle` pile up in the parent's per-prompt summary and slowly cost context. The workspace block shows each thread's age (e.g. `idle · 3d`) and, once idle threads accumulate, a one-line reminder. The habit: when a sub-agent's job is truly done, `stop` it. Resuming later still works — the transcript is kept.
 
 ### `list` / `show`
 
