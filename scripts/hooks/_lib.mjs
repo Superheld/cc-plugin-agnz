@@ -253,7 +253,19 @@ export function readThreadSpend(wsDir, threadId) {
 }
 
 /**
- * Read all non-stopped thread metas from the workspace.
+ * Single source of truth for "which threads does the lead see". A thread
+ * stays listed as long as it is *open* — idle counts as open (finished but
+ * resumable, like a paused conversation). `stopped` is the archive state:
+ * the lead closes a thread it no longer needs with `agnz stop`, which hides
+ * it here while keeping its transcript on disk. So the list is pruned by
+ * deliberate cleanup, not by status decay.
+ */
+export function isListedThread(status) {
+  return status !== "stopped";
+}
+
+/**
+ * Read all listed (non-stopped) thread metas from the workspace.
  * Returns an array of objects with id, name, status, agent, updatedAt,
  * and a trace-derived spend ({ turns, tokens }).
  */
@@ -264,7 +276,7 @@ export function readThreadMetas(wsDir) {
     return files.flatMap(f => {
       try {
         const meta = JSON.parse(readFileSync(join(threadsDir, f), "utf8"));
-        if (meta.status === "stopped") return [];
+        if (!isListedThread(meta.status)) return [];
         return [{
           id: meta.id,
           name: meta.name || null,
@@ -305,19 +317,70 @@ export function formatThreads(threads) {
     .join("; ");
 }
 
+// Sort priority for the thread block: live work first, then paused-for-input,
+// then idle (finished but resumable), errors last. Within a status group the
+// most-recently-touched thread comes first, so stale threads sink toward the
+// bottom where they read as "cleanup candidates" (N4).
+const STATUS_ORDER = { running: 0, awaiting_input: 1, idle: 2, error: 3 };
+
+// Above this many idle threads the block appends one line nudging the lead to
+// close finished ones (N2). Below it the list stays nag-free — the per-thread
+// age tag alone signals staleness (N3). Set high so the hint only fires on
+// real clutter, honouring the context-diet goal.
+const IDLE_NUDGE_THRESHOLD = 5;
+
+// Timestamps in thread meta are epoch millis (numbers), but ISO strings show
+// up in tests and older metas — accept both. Returns ms or null.
+function parseTs(v) {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v === "string") {
+    const n = Date.parse(v);
+    return Number.isNaN(n) ? null : n;
+  }
+  return null;
+}
+
+/** Human-compact age from a timestamp: "now" / "5m" / "3h" / "2d". */
+function formatAge(updatedAt, now) {
+  const then = parseTs(updatedAt);
+  if (then === null) return "";
+  const secs = Math.max(0, Math.floor((now - then) / 1000));
+  if (secs < 60) return "now";
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
 /**
- * Format threads as a multi-line block with short-id, status, and the
- * trace-derived spend (ADR 0007 §1 layer 2 + ADR 0011 §3). Example:
+ * Format threads as a multi-line block with short-id, status, age, and the
+ * trace-derived spend (ADR 0007 §1 layer 2 + ADR 0011 §3). Threads stay
+ * listed until the lead closes them (`agnz stop`), so the header is honest
+ * about how many are *open* vs merely *idle* (finished, resumable), and a
+ * per-thread age tag surfaces staleness without nagging. Example:
  *
- *   threads (2 active):
- *     dev:1a2b3c4d — running · 5 turns · 1,234 tok
- *     reviewer:9f8e7d6c — idle · 12 turns · 3,456 tok
+ *   threads (2 open · 1 idle):
+ *     dev:1a2b3c4d — running · now · 5 turns · 1,234 tok
+ *     reviewer:9f8e7d6c — idle · 2h · 12 turns · 3,456 tok
+ *
+ * `now` is injectable so the age formatting is deterministic under test.
  */
-export function formatThreadsDetailed(threads) {
+export function formatThreadsDetailed(threads, now = Date.now()) {
   if (!threads || threads.length === 0) return null;
-  const lines = threads.map(t => {
+
+  const sorted = [...threads].sort((a, b) => {
+    const pa = STATUS_ORDER[a.status] ?? 9;
+    const pb = STATUS_ORDER[b.status] ?? 9;
+    if (pa !== pb) return pa - pb;
+    return (parseTs(b.updatedAt) || 0) - (parseTs(a.updatedAt) || 0);
+  });
+
+  const lines = sorted.map(t => {
     const sid = (t.id || "").slice(0, 8);
     const label = t.name ? `${t.name}:${sid}` : sid;
+    const age = formatAge(t.updatedAt, now);
+    const ageTag = age ? ` · ${age}` : "";
     const s = t.spend || { turns: 0, tokens: 0 };
     const spend = s.turns || s.tokens ? ` · ${s.turns} turns · ${formatTokens(s.tokens)} tok` : "";
     // Second line: the rolling summary (→ description → role, fallback-chained
@@ -326,7 +389,20 @@ export function formatThreadsDetailed(threads) {
     // a multi-line final answer can't break the block; cap the length.
     const summary = t.summary ? String(t.summary).replace(/\s+/g, " ").trim() : "";
     const sumLine = summary ? `\n      ${summary.slice(0, 100)}` : "";
-    return `  ${label} — ${t.status}${spend}${sumLine}`;
+    return `  ${label} — ${t.status}${ageTag}${spend}${sumLine}`;
   });
-  return `threads (${threads.length} active):\n${lines.join("\n")}`;
+
+  const idle = sorted.filter(t => t.status === "idle").length;
+  const header = idle > 0
+    ? `threads (${sorted.length} open · ${idle} idle):`
+    : `threads (${sorted.length} open):`;
+
+  // N2: only when idle clutter actually accumulates. `stop` archives (hides
+  // from the list) — it does not delete; the transcript stays and the thread
+  // can still be resumed, so the nudge is safe to act on.
+  const nudge = idle >= IDLE_NUDGE_THRESHOLD
+    ? `\n  tip: ${idle} idle threads finished? close with 'agnz stop <id>' — the transcript is kept.`
+    : "";
+
+  return `${header}\n${lines.join("\n")}${nudge}`;
 }
