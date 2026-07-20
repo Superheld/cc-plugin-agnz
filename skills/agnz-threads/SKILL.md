@@ -72,6 +72,27 @@ node ${CLAUDE_PLUGIN_ROOT}/lib/trace-stats.mjs <thread-id> --json
 
 The CLI reads `<cwd>/.claude/agnz/` (override with `AGNZ_CWD`).
 
+## Hygiene
+
+The workspace block (ADR 0007) collapses idle threads older than 24h into one
+line, so keeping the thread list clean is what keeps it readable. Decision
+rules:
+
+- **`awaiting_input` older than a few days** — answer it (`agnz answer`) or
+  stop it (`agnz stop`). The question behind it is probably obsolete by now,
+  and unlike idle threads, awaiting threads never decay on their own — that's
+  deliberate (nothing auto-expires; the list is pruned only by deliberate
+  cleanup, never silently).
+- **`idle` threads whose context you won't reuse** — `agnz stop` them. This
+  archives, not deletes: the thread drops out of the workspace block, its
+  transcript is kept on disk, and it's still resumable later via `agnz send`.
+- **Resume vs. start fresh** — prefer `agnz send <name>` over a fresh `agnz
+  start` when all three hold: the agent role fits the new task, the task sits
+  in the topic area of the thread's rolling summary, and the thread isn't
+  already heavy (high turns/tokens in the workspace block means you'd be
+  paying to drag a full context along for an unrelated ask). Otherwise, start
+  fresh — a heavy or off-topic thread costs more to resume than to replace.
+
 ## Terminal shortcut
 
 For a quick formatted view in the terminal (requires `jq`):
