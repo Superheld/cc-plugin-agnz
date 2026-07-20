@@ -28,7 +28,7 @@ One JSON object per line, each stamped with `ts`. Event types:
 | `type` | Emitted | Key fields |
 |---|---|---|
 | `thread_start` | once, first run | `agent`, `model`, `profile`, `maxTurns`, `tools[]`, `systemPrompt` |
-| `turn_start` | before every LLM call | `turn`, `systemPrompt` |
+| `turn_start` | before every LLM call | `turn` |
 | `llm_call` | around each model call | `latencyMs`, `finishReason`, `usage{prompt,completion,total}` |
 | `tool_call` | around each tool dispatch | `name`, `latencyMs`, `outcome` (`ok`/`error`/`denied`) |
 | `repair` | malformed tool-call JSON repaired | `tool`, `recovered` (bool) |

@@ -132,13 +132,22 @@ test("a complete run emits thread_start, llm_call, tool_call, thread_end", async
   const trace = await waitForTrace(projectCwd, thread.id, (t) => t.some((e) => e.type === "thread_end"));
   const byType = (t) => trace.filter((e) => e.type === t);
 
-  // Exactly one thread_start, carrying the enriched metadata.
+  // Exactly one thread_start, carrying the enriched metadata (incl. the one
+  // canonical systemPrompt copy).
   const starts = byType("thread_start");
   assert.equal(starts.length, 1, "exactly one thread_start");
   assert.equal(starts[0].model, "fake-model");
   assert.equal(starts[0].agent, "tracer");
   assert.equal(starts[0].profile, "fake-profile");
   assert.ok(Array.isArray(starts[0].tools) && starts[0].tools.length > 0);
+  assert.equal(typeof starts[0].systemPrompt, "string");
+  assert.ok(starts[0].systemPrompt.length > 0);
+
+  // turn_start must NOT duplicate the (frozen, byte-identical) system prompt
+  // into every trace line — ADR 0012 phase 1 made that guaranteed ballast.
+  const turnStarts = byType("turn_start");
+  assert.ok(turnStarts.length >= 1, "expected at least one turn_start");
+  for (const t of turnStarts) assert.equal(t.systemPrompt, undefined);
 
   // One llm_call per turn, with latency and normalized usage.
   const llmCalls = byType("llm_call");
