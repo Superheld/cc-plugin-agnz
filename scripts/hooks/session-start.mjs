@@ -18,7 +18,9 @@ import {
   formatMessages,
   flushStdoutThen,
   readThreadMetas,
-  formatThreadsDetailed
+  formatThreadsDetailed,
+  computeThreadFingerprint,
+  writeWsFingerprint
 } from "./_lib.mjs";
 
 try {
@@ -59,6 +61,17 @@ try {
         writeParentCursor(ws, unread[unread.length - 1].id);
       } catch (cursorErr) {
         process.stderr.write(`[agnz hook cursor write failed: ${cursorErr?.message || cursorErr}]\n`);
+      }
+    }
+    if (!err) {
+      // SessionStart just displayed the full thread block (it fires on
+      // startup/resume/clear AND after every context compaction), so seed the
+      // fingerprint — the first UserPromptSubmit afterwards must not redundantly
+      // re-show the same block.
+      try {
+        writeWsFingerprint(ws, computeThreadFingerprint(activeThreads));
+      } catch (fpErr) {
+        process.stderr.write(`[agnz hook fingerprint write failed: ${fpErr?.message || fpErr}]\n`);
       }
     }
     process.exit(0);
