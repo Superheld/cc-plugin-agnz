@@ -7,7 +7,7 @@
 //   agnz send   <name|id> "message"   [--wait]
 //   agnz approve <id> allow|deny      [--persist]
 //   agnz answer <id> "answer text"
-//   agnz stop   <id>
+//   agnz stop   <id>                  (archive: hide from list, keep transcript)
 //   agnz list   [--status <s>] [--all]
 //   agnz show   <id>
 //
@@ -288,7 +288,14 @@ async function main() {
         }
       }
       await tm.stopThread(id);
-      out({ thread_id: id, status: "stopped" });
+      // `stop` archives, it does not delete: the transcript stays on disk and
+      // the thread drops out of the workspace list. Say so, so the lead learns
+      // it can safely close finished threads to keep the list legible.
+      out({
+        thread_id: id,
+        status: "stopped",
+        note: "archived — transcript kept; resume with 'agnz send'",
+      });
       return;
     }
 
