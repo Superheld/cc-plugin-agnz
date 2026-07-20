@@ -78,6 +78,56 @@ export function readParentCursor(ws) {
 }
 
 /**
+ * Write a JSON object to `path` atomically: serialise to a sibling tmp file
+ * (`${path}.tmp.${pid}` — pid-scoped so concurrent hook processes never clash
+ * on the same tmp name) then renameSync onto the final path. rename is atomic
+ * on POSIX, so a crash mid-write can never leave a half-written file behind.
+ */
+export function atomicWriteJson(path, obj) {
+  const tmpPath = `${path}.tmp.${process.pid}`;
+  writeFileSync(tmpPath, JSON.stringify(obj), "utf8");
+  renameSync(tmpPath, path);
+}
+
+/**
+ * Read the workspace thread fingerprint from cursors/parent-ws.json — the
+ * "id:status set last shown to the parent". The UserPromptSubmit hook re-injects
+ * the thread block only when this differs from the current set. Missing or
+ * malformed file → null (treated as "nothing shown yet").
+ */
+export function readWsFingerprint(ws) {
+  const path = resolve(ws, "cursors", "parent-ws.json");
+  if (!existsSync(path)) return null;
+  try {
+    const data = JSON.parse(readFileSync(path, "utf8"));
+    return typeof data?.threadFingerprint === "string" ? data.threadFingerprint : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Persist the workspace thread fingerprint. Same atomic tmp+rename discipline
+ * as writeParentCursor, and — like it — only safe to call AFTER the block has
+ * actually been flushed to Claude, or the parent would be told a state was
+ * shown that it never saw.
+ */
+export function writeWsFingerprint(ws, fingerprint) {
+  const dir = resolve(ws, "cursors");
+  mkdirSync(dir, { recursive: true });
+  atomicWriteJson(resolve(dir, "parent-ws.json"), { threadFingerprint: fingerprint });
+}
+
+/**
+ * The fingerprint of a thread set: sorted "id:status" pairs joined by ",".
+ * Order-independent (sorted) so the same set in a different array order yields
+ * the same string — the hook keys "did the visible state change" off this.
+ */
+export function computeThreadFingerprint(threads) {
+  return threads.map((t) => `${t.id}:${t.status}`).sort().join(",");
+}
+
+/**
  * Persist the parent cursor atomically via tmp-file + rename. The rename
  * is an atomic operation on POSIX so a crash mid-write cannot leave a
  * half-written cursor file behind. Callers must ONLY invoke this AFTER
@@ -88,10 +138,7 @@ export function readParentCursor(ws) {
 export function writeParentCursor(ws, cursor) {
   const dir = resolve(ws, "cursors");
   mkdirSync(dir, { recursive: true });
-  const finalPath = resolve(dir, "parent.json");
-  const tmpPath = resolve(dir, `parent.json.tmp.${process.pid}`);
-  writeFileSync(tmpPath, JSON.stringify({ cursor }), "utf8");
-  renameSync(tmpPath, finalPath);
+  atomicWriteJson(resolve(dir, "parent.json"), { cursor });
 }
 
 /**
@@ -100,11 +147,11 @@ export function writeParentCursor(ws, cursor) {
  * never reached Claude" race: the write callback fires after the OS has
  * accepted the bytes, so we're safe to mark the messages as delivered.
  *
- * If Node reports `false` from the initial write (kernel buffer full),
- * we wait for the 'drain' event before proceeding.
+ * Even when write() returns false (kernel buffer full), the callback still
+ * runs once the buffer clears, so no separate 'drain' handling is needed.
  */
 export function flushStdoutThen(text, then) {
-  const ok = process.stdout.write(text, (err) => {
+  process.stdout.write(text, (err) => {
     if (err) {
       // Write failed — do NOT advance the cursor; the messages will be
       // redelivered next turn. Surface the error so the outer hook can
@@ -114,11 +161,6 @@ export function flushStdoutThen(text, then) {
     }
     then(null);
   });
-  if (!ok) {
-    // Buffer was full; wait for drain so 'then' isn't called prematurely
-    // by a sync exit.
-    process.stdout.once("drain", () => {});
-  }
 }
 
 /**
@@ -269,7 +311,7 @@ export function isListedThread(status) {
  * Returns an array of objects with id, name, status, agent, updatedAt,
  * and a trace-derived spend ({ turns, tokens }).
  */
-export function readThreadMetas(wsDir) {
+export function readThreadMetas(wsDir, { withSpend = true } = {}) {
   const threadsDir = join(wsDir, "threads");
   try {
     const files = readdirSync(threadsDir).filter(f => f.endsWith(".meta.json"));
@@ -289,7 +331,10 @@ export function readThreadMetas(wsDir) {
             meta.description ||
             (meta.agentDef?.description ? String(meta.agentDef.description).split("\n")[0] : null),
           updatedAt: meta.updatedAt || null,
-          spend: readThreadSpend(wsDir, meta.id),
+          // Folding trace.jsonl is the expensive part (a real workspace carries
+          // hundreds of KB of traces); skip it when the caller only needs
+          // id:status — e.g. computing the fingerprint before deciding to render.
+          spend: withSpend ? readThreadSpend(wsDir, meta.id) : null,
         }];
       } catch { return []; }
     });
@@ -299,22 +344,6 @@ export function readThreadMetas(wsDir) {
 /** Compact token count with thousands separators (1234 -> "1,234"). */
 function formatTokens(n) {
   return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-}
-
-/**
- * Format a list of threads into a compact, reuse-informative string. Each
- * thread shows its name, status, and a short rolling summary so the parent
- * can decide to resume (`send <name>`) instead of spawning a new one.
- * Example: "researcher (idle): summarised request logging; dev (running)"
- */
-export function formatThreads(threads) {
-  if (!threads || threads.length === 0) return null;
-  return threads
-    .map((t) => {
-      const s = t.summary ? `: ${String(t.summary).slice(0, 70)}` : "";
-      return `${t.name || "?"} (${t.status})${s}`;
-    })
-    .join("; ");
 }
 
 // Sort priority for the thread block: live work first, then paused-for-input,
@@ -328,6 +357,12 @@ const STATUS_ORDER = { running: 0, awaiting_input: 1, idle: 2, error: 3 };
 // age tag alone signals staleness (N3). Set high so the hint only fires on
 // real clutter, honouring the context-diet goal.
 const IDLE_NUDGE_THRESHOLD = 5;
+
+// An idle thread older than this (updatedAt vs now) is a stale reuse candidate:
+// its summary/spend is noise in every prompt, so the block collapses all such
+// threads into one aggregate line. Fresh idle threads (<24h) stay in full — they
+// are the ones the parent is most likely to `send` to next.
+const IDLE_COLLAPSE_MS = 24 * 60 * 60 * 1000;
 
 // Timestamps in thread meta are epoch millis (numbers), but ISO strings show
 // up in tests and older metas — accept both. Returns ms or null.
@@ -376,9 +411,24 @@ export function formatThreadsDetailed(threads, now = Date.now()) {
     return (parseTs(b.updatedAt) || 0) - (parseTs(a.updatedAt) || 0);
   });
 
-  const lines = sorted.map(t => {
+  // Partition: everything actionable (running / awaiting_input / error) and
+  // fresh idle (<24h) renders in full; stale idle (>=24h, or a broken/absent
+  // timestamp) collapses into a single aggregate line below.
+  const isStaleIdle = (t) => {
+    if (t.status !== "idle") return false;
+    const ts = parseTs(t.updatedAt);
+    return ts === null || now - ts >= IDLE_COLLAPSE_MS;
+  };
+  const staleIdle = sorted.filter(isStaleIdle);
+  const full = sorted.filter((t) => !isStaleIdle(t));
+
+  const lines = full.map(t => {
     const sid = (t.id || "").slice(0, 8);
-    const label = t.name ? `${t.name}:${sid}` : sid;
+    // Surface the agent def when it differs from the thread's own name, so a
+    // "janitor" thread running the "dev" agent reads as `janitor [dev]:<id>`.
+    const label = t.name
+      ? `${t.agent && t.agent !== t.name ? `${t.name} [${t.agent}]` : t.name}:${sid}`
+      : sid;
     const age = formatAge(t.updatedAt, now);
     const ageTag = age ? ` · ${age}` : "";
     const s = t.spend || { turns: 0, tokens: 0 };
@@ -391,6 +441,17 @@ export function formatThreadsDetailed(threads, now = Date.now()) {
     const sumLine = summary ? `\n      ${summary.slice(0, 100)}` : "";
     return `  ${label} — ${t.status}${ageTag}${spend}${sumLine}`;
   });
+
+  // Collapsed stale-idle bucket: names only (up to 6, then "+N more"), pointing
+  // at /agnz:threads for the detail. Dropping their per-thread summary/spend is
+  // the bulk of the per-prompt weight this context-diet sheds.
+  if (staleIdle.length > 0) {
+    const names = staleIdle.map((t) => t.name || (t.id || "").slice(0, 8));
+    const shown = names.slice(0, 6);
+    const overflow = names.length - shown.length;
+    const nameList = overflow > 0 ? `${shown.join(", ")} +${overflow} more` : shown.join(", ");
+    lines.push(`  ${staleIdle.length} idle >24h: ${nameList} — details: /agnz:threads`);
+  }
 
   const idle = sorted.filter(t => t.status === "idle").length;
   const header = idle > 0
