@@ -309,7 +309,14 @@ export function isListedThread(status) {
 /**
  * Read all listed (non-stopped) thread metas from the workspace.
  * Returns an array of objects with id, name, status, agent, updatedAt,
- * and a trace-derived spend ({ turns, tokens }).
+ * a spend ({ turns, tokens }), and (for card-bearing threads) the
+ * resume-relevant ctxTokens and mission task.
+ *
+ * The loop stamps a `card` onto meta at every pause/finish (resume-card). When
+ * present it carries turns/tokens/ctxTokens/task directly, so we read it as a
+ * plain field and SKIP the trace fold entirely — even with withSpend:true, the
+ * fold is what we are trying to avoid. Legacy threads (no card) fall back to
+ * folding trace.jsonl, with ctxTokens/task null.
  */
 export function readThreadMetas(wsDir, { withSpend = true } = {}) {
   const threadsDir = join(wsDir, "threads");
@@ -319,22 +326,33 @@ export function readThreadMetas(wsDir, { withSpend = true } = {}) {
       try {
         const meta = JSON.parse(readFileSync(join(threadsDir, f), "utf8"));
         if (!isListedThread(meta.status)) return [];
+        const card = meta.card || null;
+        // Card path: cheap meta read, no trace fold. Legacy path: fold
+        // trace.jsonl (the expensive part — a real workspace carries hundreds of
+        // KB of traces), and only when the caller actually needs spend.
+        const spend = card
+          ? { turns: card.turns || 0, tokens: card.tokens || 0 }
+          : (withSpend ? readThreadSpend(wsDir, meta.id) : null);
+        const ctxTokens = card ? (card.ctxTokens ?? null) : null;
+        const task = card ? (card.task ?? null) : null;
         return [{
           id: meta.id,
           name: meta.name || null,
           status: meta.status,
           agent: meta.agentDef?.name || null,
-          // Rolling summary (loop-maintained) → description → agent-def role.
-          // Lets the parent see reusable context per thread (ADR 0007).
+          // Rolling summary (state) → description → card.task (mission) →
+          // agent-def role. Lets the parent see reusable context per thread
+          // (ADR 0007); when no summary exists yet, the mission is the next-best
+          // reuse signal.
           summary:
             meta.summary ||
             meta.description ||
+            task ||
             (meta.agentDef?.description ? String(meta.agentDef.description).split("\n")[0] : null),
           updatedAt: meta.updatedAt || null,
-          // Folding trace.jsonl is the expensive part (a real workspace carries
-          // hundreds of KB of traces); skip it when the caller only needs
-          // id:status — e.g. computing the fingerprint before deciding to render.
-          spend: withSpend ? readThreadSpend(wsDir, meta.id) : null,
+          ctxTokens,
+          task,
+          spend,
         }];
       } catch { return []; }
     });
@@ -344,6 +362,18 @@ export function readThreadMetas(wsDir, { withSpend = true } = {}) {
 /** Compact token count with thousands separators (1234 -> "1,234"). */
 function formatTokens(n) {
   return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+/**
+ * Compact the resume context size: rounded to the nearest thousand with a `k`
+ * suffix (12345 -> "~12k"), but rendered exactly below 1000 (no misleading
+ * "~0k"). This is the number that tells the lead how heavy a `send` to this
+ * thread will be (a resume re-sends the whole transcript to the local model).
+ */
+function formatCtx(n) {
+  if (typeof n !== "number" || !Number.isFinite(n) || n < 0) return "0";
+  if (n < 1000) return String(n);
+  return `~${Math.round(n / 1000)}k`;
 }
 
 // Sort priority for the thread block: live work first, then paused-for-input,
@@ -396,8 +426,11 @@ function formatAge(updatedAt, now) {
  * per-thread age tag surfaces staleness without nagging. Example:
  *
  *   threads (2 open · 1 idle):
- *     dev:1a2b3c4d — running · now · 5 turns · 1,234 tok
- *     reviewer:9f8e7d6c — idle · 2h · 12 turns · 3,456 tok
+ *     dev:1a2b3c4d — running · now · 5 turns · ctx ~12k
+ *     reviewer:9f8e7d6c — idle · 2h · 12 turns · ctx ~8k
+ *
+ * (Card-bearing threads show the resume-relevant `ctx ~Xk`; legacy threads with
+ * only a trace fold keep the cumulative `N tok` form.)
  *
  * `now` is injectable so the age formatting is deterministic under test.
  */
@@ -432,7 +465,17 @@ export function formatThreadsDetailed(threads, now = Date.now()) {
     const age = formatAge(t.updatedAt, now);
     const ageTag = age ? ` · ${age}` : "";
     const s = t.spend || { turns: 0, tokens: 0 };
-    const spend = s.turns || s.tokens ? ` · ${s.turns} turns · ${formatTokens(s.tokens)} tok` : "";
+    // Card-bearing thread (ctxTokens known): show turns + the resume-relevant
+    // context size — what a `send` re-sends to the model — and DROP the
+    // cumulative token sum, which is misleading for reuse (inflated by re-sends)
+    // and stays available in `agnz list`/`show`. The block is on a context diet.
+    // Legacy thread (no card): fall back to cumulative turns · tokens.
+    let spend = "";
+    if (t.ctxTokens != null) {
+      spend = ` · ${s.turns} turns · ctx ${formatCtx(t.ctxTokens)}`;
+    } else if (s.turns || s.tokens) {
+      spend = ` · ${s.turns} turns · ${formatTokens(s.tokens)} tok`;
+    }
     // Second line: the rolling summary (→ description → role, fallback-chained
     // in readThreadMetas). This is what lets the parent see what a thread did
     // without opening its transcript — even weeks later. Collapse whitespace so

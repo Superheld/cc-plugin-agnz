@@ -307,6 +307,61 @@ test("formatThreadsDetailed caps the aggregate at 6 names with a +N more overflo
   assert.match(out, /8 idle >24h: n0, n1, n2, n3, n4, n5 \+2 more — details: \/agnz:threads/);
 });
 
+test("readThreadMetas reads a card and short-circuits the trace fold", () => {
+  // A card-bearing meta with NO trace file: if the fold ran it would read
+  // { turns: 0, tokens: 0 }; reading the card yields the stamped values instead.
+  writeThread(
+    "t1",
+    { status: "idle", name: "dev", card: { task: "do a thing", turns: 3, tokens: 900, ctxTokens: 12345 } },
+    null,
+  );
+  const metas = readThreadMetas(ws); // withSpend defaults true
+  assert.equal(metas.length, 1);
+  assert.deepEqual(metas[0].spend, { turns: 3, tokens: 900 });
+  assert.equal(metas[0].ctxTokens, 12345);
+  assert.equal(metas[0].task, "do a thing");
+});
+
+test("readThreadMetas falls back to the trace fold for a legacy (card-less) meta", () => {
+  writeThread("t1", { status: "idle", name: "dev" }, [
+    { ts: 1, type: "thread_start", turn: 0 },
+    { ts: 2, type: "llm_call", turn: 0, usage: { total: 70 } },
+  ]);
+  const metas = readThreadMetas(ws);
+  assert.deepEqual(metas[0].spend, { turns: 1, tokens: 70 });
+  assert.equal(metas[0].ctxTokens, null);
+  assert.equal(metas[0].task, null);
+});
+
+test("readThreadMetas uses card.task in the summary fallback chain", () => {
+  // No summary, no description, no agentDef → the mission is the reuse signal.
+  writeThread("t1", { status: "idle", card: { task: "my mission", turns: 1, tokens: 10, ctxTokens: 5 } }, null);
+  assert.equal(readThreadMetas(ws)[0].summary, "my mission");
+});
+
+test("formatThreadsDetailed renders ctx from a card and drops the token sum", () => {
+  const out = formatThreadsDetailed([
+    { id: "1a2b3c4d", name: "dev", status: "running", spend: { turns: 5, tokens: 999999 }, ctxTokens: 12345 },
+  ]);
+  // resume-relevant context, rounded, and NO misleading cumulative token count
+  assert.match(out, /dev:1a2b3c4d — running · 5 turns · ctx ~12k/);
+  assert.doesNotMatch(out, /tok/);
+});
+
+test("formatThreadsDetailed renders a sub-1000 ctx exactly, no k suffix", () => {
+  const out = formatThreadsDetailed([
+    { id: "1a2b3c4d", name: "dev", status: "running", spend: { turns: 2, tokens: 0 }, ctxTokens: 500 },
+  ]);
+  assert.match(out, /dev:1a2b3c4d — running · 2 turns · ctx 500/);
+});
+
+test("formatThreadsDetailed keeps the legacy 'tok' form when ctxTokens is absent", () => {
+  const out = formatThreadsDetailed([
+    { id: "1a2b3c4d", name: "dev", status: "running", spend: { turns: 5, tokens: 1234 } },
+  ]);
+  assert.match(out, /dev:1a2b3c4d — running · 5 turns · 1,234 tok/);
+});
+
 test("formatThreadsDetailed never collapses actionable threads regardless of age", () => {
   const now = 1782065400570;
   const dayMs = 24 * 60 * 60 * 1000;
