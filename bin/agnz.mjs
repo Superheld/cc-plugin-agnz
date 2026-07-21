@@ -8,7 +8,8 @@
 //   agnz approve <id> allow|deny      [--persist]
 //   agnz answer <id> "answer text"
 //   agnz wait   <id|name>             [--timeout <s>]
-//   agnz stop   <id>                  (archive: hide from list, keep transcript)
+//   agnz stop   <id|name>             (archive: hide from list, keep transcript)
+//   agnz remove <id|name> | --status stopped|error   (delete files permanently)
 //   agnz list   [--status <s>] [--all]
 //   agnz show   <id>
 //
@@ -359,12 +360,13 @@ async function main() {
     }
 
     case "approve": {
-      const id = positionals[0];
+      const target = positionals[0];
       const decision = positionals[1];
-      if (!id) fail("approve: <id> is required");
+      if (!target) fail("approve: <id|name> is required");
       if (decision !== "allow" && decision !== "deny") fail("approve: decision must be 'allow' or 'deny'");
-      const thread = await tm.getThread(id);
-      if (!thread) fail(`no thread '${id}'`);
+      const thread = await resolveTarget(tm, cwd, target);
+      if (!thread) fail(`no thread '${target}'`);
+      const id = thread.id;
       if (thread.status !== "awaiting_input" || thread.pending?.kind !== "approval") {
         fail(`thread '${id}' is not awaiting approval (status=${thread.status}, pending=${thread.pending?.kind ?? "none"})`);
       }
@@ -375,12 +377,13 @@ async function main() {
     }
 
     case "answer": {
-      const id = positionals[0];
+      const target = positionals[0];
       const answer = positionals[1] ?? (typeof flags.message === "string" ? flags.message : null);
-      if (!id) fail("answer: <id> is required");
+      if (!target) fail("answer: <id|name> is required");
       if (answer == null) fail("answer: an answer is required");
-      const thread = await tm.getThread(id);
-      if (!thread) fail(`no thread '${id}'`);
+      const thread = await resolveTarget(tm, cwd, target);
+      if (!thread) fail(`no thread '${target}'`);
+      const id = thread.id;
       if (thread.status !== "awaiting_input" || thread.pending?.kind !== "question") {
         fail(`thread '${id}' is not awaiting a question (status=${thread.status}, pending=${thread.pending?.kind ?? "none"})`);
       }
@@ -430,10 +433,11 @@ async function main() {
     }
 
     case "stop": {
-      const id = positionals[0];
-      if (!id) fail("stop: <id> is required");
-      const thread = await tm.getThread(id);
-      if (!thread) fail(`no thread '${id}'`);
+      const target = positionals[0];
+      if (!target) fail("stop: <id|name> is required");
+      const thread = await resolveTarget(tm, cwd, target, { includeError: true });
+      if (!thread) fail(`no thread '${target}'`);
+      const id = thread.id;
       if (thread.runnerPid) {
         try {
           process.kill(thread.runnerPid, "SIGTERM");
@@ -453,15 +457,46 @@ async function main() {
       return;
     }
 
+    case "remove": {
+      // The disposal path: permanently delete a thread's files (stop merely
+      // archives). Live threads must be stopped first — deleting state under
+      // a running runner would corrupt it.
+      const target = positionals[0];
+      const statusFilter = typeof flags.status === "string" ? flags.status : null;
+      if (!target && !statusFilter) fail("remove: <id|name> or --status stopped|error is required");
+      let victims;
+      if (statusFilter) {
+        if (statusFilter !== "stopped" && statusFilter !== "error") {
+          fail("remove: --status must be 'stopped' or 'error' (stop live threads first)");
+        }
+        victims = (await tm.reconcileWorkspace(cwd)).filter((t) => t.status === statusFilter);
+      } else {
+        const thread = await resolveTarget(tm, cwd, target, { includeError: true });
+        if (!thread) fail(`no thread '${target}'`);
+        if (thread.status === "running" || thread.status === "awaiting_input") {
+          fail(`thread '${target}' is ${thread.status} — 'agnz stop' it first`);
+        }
+        victims = [thread];
+      }
+      const removed = [];
+      for (const t of victims) {
+        const { files } = await tm.removeThread(t.id);
+        removed.push({ thread_id: t.id, name: t.name || null, files });
+      }
+      out({ removed: removed.length, threads: removed, note: "deleted permanently (meta, transcript, trace)" });
+      return;
+    }
+
     case "interrupt": {
       // Hard interrupt (amok brake / steer): optionally queue a directive,
       // then SIGUSR1 the runner so it aborts the current segment but stays
       // resumable. The directive drains on the next run.
-      const id = positionals[0];
+      const target = positionals[0];
       const directive = positionals[1] ?? (typeof flags.message === "string" ? flags.message : null);
-      if (!id) fail("interrupt: <id> is required");
-      const thread = await tm.getThread(id);
-      if (!thread) fail(`no thread '${id}'`);
+      if (!target) fail("interrupt: <id|name> is required");
+      const thread = await resolveTarget(tm, cwd, target, { includeError: true });
+      if (!thread) fail(`no thread '${target}'`);
+      const id = thread.id;
       if (directive) {
         const agentName = thread.agentDef?.name || thread.name || `agent-${thread.id.slice(0, 8)}`;
         await publish(thread.cwd, { from: "parent", to: agentName, kind: "directive", text: directive });
@@ -504,10 +539,11 @@ async function main() {
     }
 
     case "show": {
-      const id = positionals[0];
-      if (!id) fail("show: <id> is required");
-      let thread = await tm.getThread(id);
-      if (!thread) fail(`no thread '${id}'`);
+      const target = positionals[0];
+      if (!target) fail("show: <id|name> is required");
+      let thread = await resolveTarget(tm, cwd, target, { includeError: true });
+      if (!thread) fail(`no thread '${target}'`);
+      const id = thread.id;
       thread = await recoverIfStale(tm, thread);
       const msgs = await tm.readMessages(id);
       // Surface the trace fold when the thread has a trace file — makes `show`
@@ -520,7 +556,7 @@ async function main() {
     }
 
     default:
-      fail(`unknown verb '${verb ?? ""}'. Use: start | send | approve | answer | wait | stop | interrupt | list | show`);
+      fail(`unknown verb '${verb ?? ""}'. Use: start | send | approve | answer | wait | stop | remove | interrupt | list | show`);
   }
 }
 
