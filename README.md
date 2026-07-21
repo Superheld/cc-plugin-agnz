@@ -20,12 +20,15 @@ There is no MCP server. The parent calls the CLI via Bash; every verb prints a J
 | `start <name> ["task"] --agent <def>` | Create a thread (`--inline "<frontmatter>"` for an ad-hoc role). Without a task it starts idle. |
 | `send <name\|id> "msg"` | Send a task. **Reuses** the existing live thread of that name (resume), else needs an id. |
 | `wait <id\|name> [--timeout <s>]` | Watch a detached run until it settles and print the outcome (default 300 s). A poller, not a run mode — collects even a crashed thread by name. |
-| `approve <id> allow\|deny [--persist]` | Resolve an approval pause (no `tool_call_id` needed — the thread's pending call is used). |
-| `answer <id> "text"` | Resolve an `AskUser` question pause. |
-| `interrupt <id> ["directive"]` | Hard-interrupt a runaway/working agent: aborts the current step, leaves it resumable, optionally queues a directive. |
-| `stop <id>` | End a thread (kills its runner; transcript persists). |
-| `list [--status <s>] [--all]` | List threads in this workspace. |
-| `show <id>` | Lean structural view: status, pending approval/question, spend, and folded trace stats — no raw transcript. |
+| `approve <id\|name> allow\|deny [--persist]` | Resolve an approval pause (no `tool_call_id` needed — the thread's pending call is used). |
+| `answer <id\|name> "text"` | Resolve an `AskUser` question pause. |
+| `interrupt <id\|name> ["directive"]` | Hard-interrupt a runaway/working agent: aborts the current step, leaves it resumable, optionally queues a directive. |
+| `stop <id\|name>` | End + **archive** a thread: kills a live runner, hides it from the list, keeps the transcript. Resume later with `send`. |
+| `remove <id\|name>` / `remove --status stopped\|error` | **Delete** a thread permanently — sweeps every `threads/<id>.*` file. Live threads must be stopped first. |
+| `list [--status <s>]` | List threads in this workspace (`--cwd` for another project). |
+| `show <id\|name>` | Lean structural view: status, pending approval/question, spend, and folded trace stats — no raw transcript. |
+
+Every thread-addressing verb accepts a **name or an id**; a name resolves to its most recent live thread.
 
 Runs are **always detached**: the CLI returns at once and the runner works in its own process. The result reaches the parent via the message hook — the runner appends to `messages.jsonl`, and the `UserPromptSubmit` hook injects unread parent mail plus a live status block for each active thread into your next prompt automatically (an OS notification fires for urgent mail), so you stay informed without polling. To collect a specific run sooner, `agnz wait <id>`; to inspect one, `agnz show <id>` (or the `/agnz:threads` skill). agnz also protects *your own* Claude session's context: the sub-agents' raw transcripts stay out of it — `show` returns a compact structural view, and a hook keeps the lead from directly reading thread transcripts and traces.
 
@@ -35,7 +38,7 @@ Runs are **always detached**: the CLI returns at once and the runner works in it
 Claude Code (Parent)
     │  Bash
     ▼
-bin/agnz.mjs            ← CLI: start/send/approve/answer/stop/interrupt/list/show
+bin/agnz.mjs            ← CLI: start/send/wait/approve/answer/stop/remove/interrupt/list/show
     │  spawns a detached runner per active run
     ▼
 lib/runner.mjs → lib/loop.mjs   ← LLM ↔ tool loop, persists transcript, then exits
@@ -61,6 +64,8 @@ Each turn the agent receives a system prompt composed of:
 4. **Skills catalog** — names + descriptions of available skills; agent loads full content on demand via `Skill({action:"load", name:"..."})`
 5. **Agent body** — the role definition from the agent def frontmatter
 
+The loop also carries harness-level robustness for small local models: malformed JSON tool arguments are repaired, and a tool call that leaks out as plain text in the model's native wire syntax (e.g. Mistral's `Name[ARGS]{…}` when the server's parser misses it) is deterministically recovered and executed instead of silently ending the run. Both paths are visible as `repair` events in the trace. LLM requests have **no default timeout** — local cold-loads and big-context turns are legitimately slow; set `llmTimeoutMs` per profile if you want a deadline, and use `interrupt`/`stop` for a hung run.
+
 ## Install
 
 This repo is a plain Claude Code plugin. The canonical marketplace is [`Superheld/claude-bauchladen`](https://github.com/Superheld/claude-bauchladen):
@@ -79,18 +84,27 @@ agnz list
 
 After code changes, update in place: `/plugin marketplace update agnz && /plugin install agnz@agnz && /reload-plugins`.
 
-## Configure a profile (example)
+> **Upgrading to 0.18+ from an older install:** the config layout changed (breaking, [ADR 0017](./docs/adr/0017-config-and-state-consolidation.md)). There is no migration — re-run `/agnz:setup add` once; the old `~/.claude/agnz/profiles.json`, `thread-index.json`, and per-project `cursors/` directories are ignored and can be deleted. Threads and transcripts are untouched.
 
-Run `/agnz:setup add` for interactive setup, or pass all fields directly. For LM Studio (default endpoint `http://localhost:1234/v1`):
+## Configuration (ADR 0017)
+
+One schema, two layers, project wins per entry:
+
+```
+~/.claude/agnz/config.json        ← machine defaults: {profiles, mappings}
+<cwd>/.claude/agnz/config.json    ← optional project overrides — committable
+```
+
+Run `/agnz:setup add` for interactive setup, or pass the fields directly. LM Studio (default endpoint `http://localhost:1234/v1`) and Ollama examples:
 
 ```bash
 node ${CLAUDE_PLUGIN_ROOT}/skills/agnz-setup/scripts/companion.mjs setup add \
-  lmstudio-devstral \
-  http://localhost:1234/v1 \
-  mistralai/devstral-small-2-2512
+  lmstudio http://localhost:1234/v1 mistralai/devstral-small-2-2512
+node ${CLAUDE_PLUGIN_ROOT}/skills/agnz-setup/scripts/companion.mjs setup add \
+  ollama http://192.168.1.10:11434/v1 devstral-2:96k
 ```
 
-Profile resolution at thread start: `workspace.json → modelProfileMappings[model]` → fallback to `_default`. Configure with `/agnz:setup`.
+The first profile added becomes the `_default` mapping automatically. Write commands take `--project` to target the project override file. Profile resolution at thread start: merged `mappings[agentDef.model]` → `mappings._default` → the identifier as a profile name. `/agnz:setup info` prints the **effective merged config with each value's origin**.
 
 ## Agent definitions
 
@@ -104,7 +118,7 @@ The `tools:` frontmatter field lists tools that run without approval. Anything n
 
 Two independent roots:
 
-**User-wide** — profiles and cross-project index. Default: `~/.claude/agnz/`. Override with `$AGNZ_DATA_DIR`.
+**User-wide** — the config's default layer. Default root: `~/.claude/agnz/`. Override with `$AGNZ_DATA_DIR`.
 
 ```
 ~/.claude/agnz/
@@ -118,12 +132,14 @@ Two independent roots:
 ├── agents/
 │   └── <name>.md            ← agent definitions (shared with CC)
 ├── agnz/
-│   ├── workspace.json       ← shared metadata + modelProfileMappings
+│   ├── config.json          ← optional project config overrides (committable)
+│   ├── workspace.json       ← pure workspace state (parent delivery cursor etc.)
 │   ├── messages.jsonl       ← event bus for inter-agent communication
 │   └── threads/
-│       ├── <thread-id>.meta.json
-│       ├── <thread-id>.jsonl
-│       └── <thread-id>.trace.jsonl
+│       ├── <thread-id>.meta.json      ← status, pending, session state
+│       ├── <thread-id>.jsonl          ← append-only transcript
+│       ├── <thread-id>.trace.jsonl    ← runtime trace (observability)
+│       └── <thread-id>.system.txt     ← frozen system-prompt prefix (write-once)
 └── skills/
     └── <name>/
         └── SKILL.md         ← project-local skills
