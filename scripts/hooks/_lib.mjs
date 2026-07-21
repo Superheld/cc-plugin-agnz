@@ -11,7 +11,7 @@
 // `lib/` so that the plugin's hook scripts keep working even if the
 // surrounding module layout is refactored.
 
-import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, renameSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, renameSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 /**
@@ -64,16 +64,29 @@ export function resolveWorkspace(cwd) {
 }
 
 /**
- * Read the parent cursor file. Missing or malformed → null.
+ * Read the parent cursor file. Returns { cursor, offset }:
+ *   - cursor: the last-delivered message id (string) or null.
+ *   - offset: byte position in messages.jsonl past the last consumed line —
+ *     lets readUnreadForParent skip re-parsing the whole log every prompt.
+ *
+ * Missing / malformed file → { cursor: null, offset: 0 } (full scan next time).
+ * A legacy file carrying only `cursor` and no `offset` → offset 0, which means
+ * exactly one full scan then convergence (the byte offset gets recorded on the
+ * next write). Both fields degrade independently to their safe defaults.
  */
 export function readParentCursor(ws) {
   const path = resolve(ws, "cursors", "parent.json");
-  if (!existsSync(path)) return null;
+  if (!existsSync(path)) return { cursor: null, offset: 0 };
   try {
     const data = JSON.parse(readFileSync(path, "utf8"));
-    return typeof data?.cursor === "string" ? data.cursor : null;
+    const cursor = typeof data?.cursor === "string" ? data.cursor : null;
+    const offset =
+      typeof data?.offset === "number" && Number.isFinite(data.offset) && data.offset >= 0
+        ? data.offset
+        : 0;
+    return { cursor, offset };
   } catch {
-    return null;
+    return { cursor: null, offset: 0 };
   }
 }
 
@@ -134,11 +147,15 @@ export function computeThreadFingerprint(threads) {
  * stdout has been flushed to Claude — see flushStdoutThen() — otherwise
  * the cursor would advance past messages that never made it into the
  * parent's context (silent data loss).
+ *
+ * `offset` is the byte position past the last consumed line (see
+ * readUnreadForParent's nextOffset); persisted alongside the id so the next
+ * read starts where this one stopped instead of re-scanning from the top.
  */
-export function writeParentCursor(ws, cursor) {
+export function writeParentCursor(ws, cursor, offset = 0) {
   const dir = resolve(ws, "cursors");
   mkdirSync(dir, { recursive: true });
-  atomicWriteJson(resolve(dir, "parent.json"), { cursor });
+  atomicWriteJson(resolve(dir, "parent.json"), { cursor, offset });
 }
 
 /**
@@ -164,8 +181,20 @@ export function flushStdoutThen(text, then) {
 }
 
 /**
- * Read unread messages addressed to the parent. Returns an array
- * ordered by id ascending. Missing file → [].
+ * Read unread messages addressed to the parent. Returns
+ * { messages, nextOffset } where messages is ordered by id ascending and
+ * nextOffset is the byte position past the last FULLY-parsed line (feed it
+ * back as the offset on the next call). Missing file → { messages: [],
+ * nextOffset: offset }.
+ *
+ * messages.jsonl is append-only, so we only read the tail past `offset`
+ * instead of re-parsing the whole log every prompt. Guards:
+ *   - offset > file size (impossible for a pure append; the file must have
+ *     been replaced/truncated) → distrust it, rescan from 0.
+ *   - a trailing partial line (writer crashed or is mid-append — the tail
+ *     may not end in "\n") is NOT consumed and nextOffset does NOT advance
+ *     past it, so it gets re-read intact once it's complete.
+ * The `msg.id > cursor` filter stays as a safety net on top of the offset.
  *
  * Cursor comparison is lexicographic (`msg.id > cursor`). This is
  * correct ONLY because lib/messages-log.mjs allocates ids with a
@@ -174,17 +203,55 @@ export function flushStdoutThen(text, then) {
  * changes (wider counter, epoch-millis prefix, uuid), this
  * comparison must change too.
  */
-export function readUnreadForParent(ws, cursor) {
+export function readUnreadForParent(ws, cursor, offset = 0) {
   const path = resolve(ws, "messages.jsonl");
-  if (!existsSync(path)) return [];
+  if (!existsSync(path)) return { messages: [], nextOffset: offset };
+
+  let size;
+  try {
+    size = statSync(path).size;
+  } catch {
+    return { messages: [], nextOffset: offset };
+  }
+
+  // An offset past the current size can only mean the log was replaced or
+  // truncated (append-only files never shrink) — the recorded byte position is
+  // meaningless against the new bytes, so rescan from the top and lean on the
+  // id-cursor filter to suppress already-delivered messages.
+  const start = typeof offset === "number" && offset >= 0 && offset <= size ? offset : 0;
+
   let raw;
   try {
-    raw = readFileSync(path, "utf8");
+    if (start === 0) {
+      raw = readFileSync(path, "utf8");
+    } else {
+      const len = size - start;
+      const buf = Buffer.allocUnsafe(len);
+      const fd = openSync(path, "r");
+      try {
+        readSync(fd, buf, 0, len, start);
+      } finally {
+        closeSync(fd);
+      }
+      raw = buf.toString("utf8");
+    }
   } catch {
-    return [];
+    return { messages: [], nextOffset: start };
   }
+
+  // Consume only complete lines. raw.split("\n") always leaves the final
+  // element as either "" (raw ended in "\n" → every line complete) or a
+  // partial trailing line (no newline yet) — in both cases slice it off, so a
+  // half-written tail is neither parsed nor counted toward nextOffset.
+  const segments = raw.split("\n");
+  const completeLines = segments.slice(0, segments.length - 1);
+
   const out = [];
-  for (const line of raw.split("\n")) {
+  let consumedBytes = 0;
+  for (const line of completeLines) {
+    // Every complete line is consumed regardless of whether it survives the
+    // filters below, so advance the byte count first (+1 for the "\n").
+    consumedBytes += Buffer.byteLength(line, "utf8") + 1;
     if (!line) continue;
     let msg;
     try {
@@ -197,7 +264,7 @@ export function readUnreadForParent(ws, cursor) {
     if (cursor && !(msg.id > cursor)) continue;
     out.push(msg);
   }
-  return out;
+  return { messages: out, nextOffset: start + consumedBytes };
 }
 
 /**
@@ -286,6 +353,69 @@ export function isFencedTranscriptRead(toolName, filePath) {
   if (typeof filePath !== "string" || !filePath) return false;
   if (!filePath.includes("/.claude/agnz/threads/")) return false;
   return filePath.endsWith(".jsonl");
+}
+
+// The Read fence (above) leaves Grep unconditionally open on transcripts because
+// matches-only output is context-cheap. That reasoning collapses once Grep is
+// asked for a large surrounding-context window: `-A/-B/-C N` pulls N extra lines
+// around every hit, and with a big N that re-imports the transcript bulk the
+// Read fence exists to keep out. Windows up to this size stay allowed — small
+// context is still cheap and useful for a quick status check.
+const GREP_CONTEXT_FENCE_LINES = 10;
+
+/**
+ * Fence decision for a lead `Grep` against a thread transcript/trace (ADR 0015 §4,
+ * closing the "unbounded -A/-B/-C" open bullet). Blocks only when BOTH hold:
+ *   - the target path points into an agnz threads dir (the path STRING contains
+ *     `/.claude/agnz/threads` — CC's Grep `path` may be a single transcript file
+ *     OR a directory containing the threads dir, so a segment match, not a
+ *     `.jsonl` suffix, is the right guard; the segment is specific enough to keep
+ *     unrelated repos from tripping the fence), and
+ *   - a surrounding-context flag (`-A`, `-B`, or `-C`) exceeds
+ *     GREP_CONTEXT_FENCE_LINES.
+ * Matches-only Grep and small context windows stay allowed. CC's Grep tool_input
+ * carries the flags under the literal keys "-A"/"-B"/"-C" (numbers) and the path
+ * under `path`; `file_path` is accepted defensively in case a caller uses it.
+ */
+export function isFencedTranscriptGrep(toolName, toolInput) {
+  if (toolName !== "Grep") return false;
+  if (!toolInput || typeof toolInput !== "object") return false;
+  const path =
+    typeof toolInput.path === "string"
+      ? toolInput.path
+      : typeof toolInput.file_path === "string"
+        ? toolInput.file_path
+        : "";
+  if (!path.includes("/.claude/agnz/threads")) return false;
+  const ctx = Math.max(
+    numOrZero(toolInput["-A"]),
+    numOrZero(toolInput["-B"]),
+    numOrZero(toolInput["-C"]),
+  );
+  return ctx > GREP_CONTEXT_FENCE_LINES;
+}
+
+// Coerce a context-flag value to a non-negative finite number; anything else
+// (undefined, non-numeric string, NaN) counts as 0 so it never trips the fence.
+function numOrZero(v) {
+  const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/**
+ * Pure gating decision for the UserPromptSubmit hook. The hook pushes on real
+ * events like a colleague would — new parent mail OR a structural change to the
+ * thread set (a thread started/stopped between prompts). Returns which parts to
+ * inject and whether to skip entirely:
+ *   - showMessages: there is unread parent mail to deliver.
+ *   - showBlock: the thread fingerprint changed since it was last shown.
+ *   - exit: neither applies → the hook is a silent no-op this prompt.
+ * Extracted so the gate is unit-testable without spawning the hook script.
+ */
+export function decideInjection({ unreadCount, changed }) {
+  const showMessages = unreadCount > 0;
+  const showBlock = !!changed;
+  return { showBlock, showMessages, exit: !showMessages && !showBlock };
 }
 
 /**

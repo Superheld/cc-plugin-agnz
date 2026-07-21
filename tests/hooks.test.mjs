@@ -22,6 +22,11 @@ import {
   writeWsFingerprint,
   computeThreadFingerprint,
   isFencedTranscriptRead,
+  isFencedTranscriptGrep,
+  decideInjection,
+  readParentCursor,
+  writeParentCursor,
+  readUnreadForParent,
 } from "../scripts/hooks/_lib.mjs";
 
 let ws;
@@ -421,4 +426,164 @@ test("formatThreadsDetailed never collapses actionable threads regardless of age
   // an ancient error thread still gets its full-format line — never aggregated
   assert.match(out, /boom:err11111 — error · 10d/);
   assert.doesNotMatch(out, /idle >24h/);
+});
+
+// ── Push gating: block stands alone on a structural delta ─────────────────────
+
+test("decideInjection stays silent when there is no mail and nothing changed", () => {
+  assert.deepEqual(decideInjection({ unreadCount: 0, changed: false }), {
+    showBlock: false,
+    showMessages: false,
+    exit: true,
+  });
+});
+
+test("decideInjection injects the block alone on a structural change with no mail", () => {
+  assert.deepEqual(decideInjection({ unreadCount: 0, changed: true }), {
+    showBlock: true,
+    showMessages: false,
+    exit: false,
+  });
+});
+
+test("decideInjection injects messages alone when mail arrives but nothing changed", () => {
+  assert.deepEqual(decideInjection({ unreadCount: 3, changed: false }), {
+    showBlock: false,
+    showMessages: true,
+    exit: false,
+  });
+});
+
+test("decideInjection injects both when mail arrives and the set changed", () => {
+  assert.deepEqual(decideInjection({ unreadCount: 2, changed: true }), {
+    showBlock: true,
+    showMessages: true,
+    exit: false,
+  });
+});
+
+// ── Byte-offset parent cursor over messages.jsonl ─────────────────────────────
+
+// Serialise a message to one JSONL line (with trailing newline).
+function msgLine(id, extra = {}) {
+  return JSON.stringify({ id, to: "parent", from: "dev", kind: "say", text: id, ...extra }) + "\n";
+}
+
+test("readParentCursor / writeParentCursor roundtrip cursor and offset", () => {
+  writeParentCursor(ws, "m000005", 250);
+  assert.deepEqual(readParentCursor(ws), { cursor: "m000005", offset: 250 });
+});
+
+test("readParentCursor defaults to a full-scan cursor when the file is missing", () => {
+  assert.deepEqual(readParentCursor(ws), { cursor: null, offset: 0 });
+});
+
+test("readParentCursor treats a legacy (offset-less) cursor file as offset 0", () => {
+  mkdirSync(join(ws, "cursors"), { recursive: true });
+  writeFileSync(join(ws, "cursors", "parent.json"), JSON.stringify({ cursor: "m000003" }));
+  // one full scan (offset 0) then convergence once the byte offset is recorded
+  assert.deepEqual(readParentCursor(ws), { cursor: "m000003", offset: 0 });
+});
+
+test("readUnreadForParent reads only the tail past the offset", () => {
+  const l1 = msgLine("m000001");
+  const l2 = msgLine("m000002");
+  writeFileSync(join(ws, "messages.jsonl"), l1 + l2);
+
+  const first = readUnreadForParent(ws, null, 0);
+  assert.deepEqual(first.messages.map((m) => m.id), ["m000001", "m000002"]);
+  assert.equal(first.nextOffset, Buffer.byteLength(l1 + l2));
+
+  // append a third message, read from the recorded offset → only the new one
+  const l3 = msgLine("m000003");
+  writeFileSync(join(ws, "messages.jsonl"), l1 + l2 + l3);
+  const second = readUnreadForParent(ws, "m000002", first.nextOffset);
+  assert.deepEqual(second.messages.map((m) => m.id), ["m000003"]);
+  assert.equal(second.nextOffset, Buffer.byteLength(l1 + l2 + l3));
+});
+
+test("readUnreadForParent does not consume a trailing partial line", () => {
+  const l1 = msgLine("m000001");
+  const l2 = msgLine("m000002");
+  const partial = '{"id":"m000003","to":"parent"'; // writer mid-append, no newline yet
+  writeFileSync(join(ws, "messages.jsonl"), l1 + l2 + partial);
+
+  const r = readUnreadForParent(ws, null, 0);
+  // only the two complete lines are parsed; the partial is left for next time
+  assert.deepEqual(r.messages.map((m) => m.id), ["m000001", "m000002"]);
+  // nextOffset stops at the last complete line, NOT inside the partial tail
+  assert.equal(r.nextOffset, Buffer.byteLength(l1 + l2));
+
+  // once the partial line is completed, a read from nextOffset picks it up
+  const l3 = msgLine("m000003");
+  writeFileSync(join(ws, "messages.jsonl"), l1 + l2 + l3);
+  const r2 = readUnreadForParent(ws, "m000002", r.nextOffset);
+  assert.deepEqual(r2.messages.map((m) => m.id), ["m000003"]);
+});
+
+test("readUnreadForParent resets to a full scan when the offset is beyond the file size", () => {
+  const l1 = msgLine("m000001");
+  const l2 = msgLine("m000002");
+  writeFileSync(join(ws, "messages.jsonl"), l1 + l2);
+
+  // an offset past EOF can only mean the log was replaced/truncated → rescan
+  const r = readUnreadForParent(ws, null, 999_999);
+  assert.deepEqual(r.messages.map((m) => m.id), ["m000001", "m000002"]);
+  assert.equal(r.nextOffset, Buffer.byteLength(l1 + l2));
+});
+
+test("readUnreadForParent returns nothing for a missing log and preserves the offset", () => {
+  assert.deepEqual(readUnreadForParent(ws, "m000009", 42), { messages: [], nextOffset: 42 });
+});
+
+// ── ADR 0015 §4: the Grep context-flag fence ─────────────────────────────────
+
+test("isFencedTranscriptGrep blocks a large -A context window on a transcript", () => {
+  assert.equal(
+    isFencedTranscriptGrep("Grep", { path: "/home/u/proj/.claude/agnz/threads/abc.jsonl", "-A": 50 }),
+    true,
+  );
+});
+
+test("isFencedTranscriptGrep allows a small -A context window on a transcript", () => {
+  assert.equal(
+    isFencedTranscriptGrep("Grep", { path: "/home/u/proj/.claude/agnz/threads/abc.jsonl", "-A": 5 }),
+    false,
+  );
+});
+
+test("isFencedTranscriptGrep treats 10 lines as the inclusive allowed boundary", () => {
+  const path = "/home/u/proj/.claude/agnz/threads/abc.jsonl";
+  assert.equal(isFencedTranscriptGrep("Grep", { path, "-C": 10 }), false); // allowed
+  assert.equal(isFencedTranscriptGrep("Grep", { path, "-B": 11 }), true); // blocked
+});
+
+test("isFencedTranscriptGrep blocks when the path is the threads DIR, not a file", () => {
+  assert.equal(
+    isFencedTranscriptGrep("Grep", { path: "/home/u/proj/.claude/agnz/threads", "-A": 50 }),
+    true,
+  );
+});
+
+test("isFencedTranscriptGrep allows a large context window on an unrelated path", () => {
+  assert.equal(isFencedTranscriptGrep("Grep", { path: "/home/u/proj/src", "-C": 50 }), false);
+  assert.equal(isFencedTranscriptGrep("Grep", { path: "/home/u/proj/data/events.jsonl", "-C": 50 }), false);
+});
+
+test("isFencedTranscriptGrep ignores non-Grep tools and matches-only Grep", () => {
+  const path = "/home/u/proj/.claude/agnz/threads/abc.jsonl";
+  assert.equal(isFencedTranscriptGrep("Read", { path, "-A": 50 }), false);
+  // no context flag at all → matches-only, stays allowed
+  assert.equal(isFencedTranscriptGrep("Grep", { path }), false);
+});
+
+test("isFencedTranscriptGrep tolerates a missing / non-object tool_input", () => {
+  assert.equal(isFencedTranscriptGrep("Grep", undefined), false);
+  assert.equal(isFencedTranscriptGrep("Grep", null), false);
+});
+
+test("the Read fence is unaffected by the Grep fence addition", () => {
+  // regression guard: Read behaviour is unchanged
+  assert.equal(isFencedTranscriptRead("Read", "/home/u/proj/.claude/agnz/threads/abc.jsonl"), true);
+  assert.equal(isFencedTranscriptRead("Grep", "/home/u/proj/.claude/agnz/threads/abc.jsonl"), false);
 });
