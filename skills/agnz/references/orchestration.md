@@ -53,9 +53,9 @@ Write the task you pass to `agnz start`/`send` as if briefing a capable colleagu
 
 ## Handling outcomes
 
-With `--wait`, the call returns a `content` field when `status: "final"` — use that directly, don't re-read the transcript unless you need detail the summary omitted. Detached (default): the final answer arrives via the message hook at your next prompt; `agnz show <id>` peeks any time.
+Every run is detached: the final answer arrives via the message hook at your next prompt, or collect it directly with `agnz wait <id>` — it blocks on the thread until it leaves `running` and returns `content` when `status: "final"`. `agnz show <id>` peeks any time without blocking.
 
-If `status: "max_turns"`, the work so far is persisted — `agnz send <id> "continue"` to resume, or read the transcript tail (`<cwd>/.claude/agnz/threads/<id>.jsonl`) for what was done.
+If `status: "max_turns"`, the work so far is persisted — `agnz send <id> "continue"` to resume. To see what was done before resuming, `agnz show <id>` (capped recent-message excerpts) or ask the thread (`agnz send <id> "summarize progress so far before continuing"`) — the raw transcript file is fenced against direct `Read`.
 
 ## Handling pauses
 
@@ -74,8 +74,11 @@ If `status: "max_turns"`, the work so far is persisted — `agnz send <id> "cont
 ```bash
 agnz start auth    "Investigate how auth works"    --agent researcher
 agnz start billing "Investigate how billing works" --agent researcher
-# Both run as separate detached processes; results arrive via the hook at the next prompt.
+# Both run as separate detached processes; results arrive via the hook at the next prompt,
+# or collect them explicitly once your own work is done:
+agnz wait auth
+agnz wait billing
 agnz list          # see status/spend of both; a pause on one doesn't block the other
 ```
 
-Each run is its own OS process — genuine parallelism, nothing resident between runs.
+Each run is its own OS process — genuine parallelism, nothing resident between runs. `wait` is a watcher, not a worker: if you don't call it (or the timeout hits), the runner keeps working underneath and the hook still delivers the result when you next prompt.

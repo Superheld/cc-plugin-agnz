@@ -262,6 +262,33 @@ function addressesParent(to) {
 }
 
 /**
+ * Fence decision for the PreToolUse hook (ADR 0015 §4): should the lead's Read
+ * of this path be blocked? True only for a `Read` of an agnz thread transcript
+ * or trace — a path under `.claude/agnz/threads/` ending in `.jsonl`. This
+ * covers both `<id>.jsonl` (transcript) and `<id>.trace.jsonl` (trace); a
+ * single read of either can carry verbatim tool results up to 512 KiB and blow
+ * the very context budget agnz exists to protect.
+ *
+ * Deliberately porous, per the ADR:
+ *   - only `Read` is fenced — `Grep` returns matches only (context-cheap) and
+ *     `Bash`/inspect.sh tails with its own caps, so both stay allowed;
+ *   - `meta.json` is NOT matched (ends `.json`, not `.jsonl`) — whether to also
+ *     fence raw meta reads is an open question in the ADR, not settled here;
+ *   - `.jsonl` files outside the threads dir (e.g. messages.jsonl at the
+ *     workspace root, or an unrelated project file) are not matched.
+ *
+ * CC's Read tool always passes an absolute file_path, so matching the absolute
+ * `/.claude/agnz/threads/` segment is sufficient and avoids false positives on
+ * a stray relative path.
+ */
+export function isFencedTranscriptRead(toolName, filePath) {
+  if (toolName !== "Read") return false;
+  if (typeof filePath !== "string" || !filePath) return false;
+  if (!filePath.includes("/.claude/agnz/threads/")) return false;
+  return filePath.endsWith(".jsonl");
+}
+
+/**
  * Fold a thread's trace.jsonl into a tiny spend summary: turns and total
  * tokens (ADR 0011 §3). Inlined here rather than importing
  * lib/trace-stats.mjs to keep the hooks self-contained per the convention

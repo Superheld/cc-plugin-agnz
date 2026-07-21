@@ -1,6 +1,18 @@
 {
-  "description": "agnz mailbox delivery: injects unread messages addressed to `parent` from <cwd>/.claude/agnz/messages.jsonl into Claude's context on prompt submit and session start. Fast no-op when the current project has no agnz workspace.",
+  "description": "agnz mailbox delivery + lead-context discipline: injects unread messages addressed to `parent` from <cwd>/.claude/agnz/messages.jsonl into Claude's context on prompt submit and session start, and fences the lead's Read tool off agnz thread transcripts/traces (ADR 0015). Fast no-op when the current project has no agnz workspace.",
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/hooks/pre-tool-use.mjs",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "matcher": "*",

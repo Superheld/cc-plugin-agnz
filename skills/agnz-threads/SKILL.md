@@ -1,12 +1,12 @@
 ---
 name: agnz-threads
-description: Inspect agnz threads in the current project — list all threads or show the full state and transcript of a specific thread. This skill should be used when the user asks to "list threads", "show thread status", "what is the agent doing", "inspect thread X", "show what happened in thread X", "show thread history", "debug agent output", or when a thread is paused and needs resolution.
+description: Inspect agnz threads in the current project — list all threads or get a lean structural view (status, pending, spend, trace stats) of a specific thread. This skill should be used when the user asks to "list threads", "show thread status", "what is the agent doing", "inspect thread X", "show what happened in thread X", "show thread history", "debug agent output", or when a thread is paused and needs resolution.
 argument-hint: "list | <thread-id-prefix>"
 allowed-tools: Bash(node *) Read Glob
 model: haiku
 ---
 
-Read thread state directly from `.claude/agnz/threads/` — no MCP call needed.
+Prefer `agnz show <id>` and `agnz list` (ADR 0015) over reading files directly — `.meta.json` stays readable directly for a fast peek, but the transcript/trace `.jsonl` files are fenced against direct `Read`. See "Inspect one thread" below.
 
 ## List all threads
 
@@ -33,14 +33,19 @@ Key fields per thread:
 
 ## Inspect one thread
 
-Read meta + tail the transcript:
+Reach for `agnz show <id>` first — it returns a lean structural view (status, pending, spend, trace stats, capped recent-message excerpts) without the heavy fields (`systemPromptSnapshot`, full `agentDef` body) or a raw transcript dump:
 
-```
-Read: .claude/agnz/threads/<id>.meta.json   → full state including pending/error detail
-Read: .claude/agnz/threads/<id>.jsonl       → transcript (last N lines)
+```bash
+node ${CLAUDE_PLUGIN_ROOT}/bin/agnz.mjs show <id-prefix>
 ```
 
-Transcript line shapes (OpenAI format):
+If that isn't enough — you need to know *why* the agent did something, not just what state it's in — ask the thread directly rather than reading its history: `agnz send <name> "why did you choose X?"`. The thread already has the context; asking costs its (local) tokens, reading its transcript costs yours.
+
+For raw debugging, `inspect.sh` (below) tails the transcript/trace with its own caps — the last-resort escape hatch, not a first-reach tool.
+
+**Direct `Read` of `<id>.jsonl` and `<id>.trace.jsonl` is blocked** by a `PreToolUse` hook — a single transcript line can carry up to 512 KiB of verbatim tool output, exactly the context this plugin exists to keep out of the lead's window. `Grep` against those files still works (matches only, so it stays cheap), and `<id>.meta.json` is still directly readable for a fast peek at `pending`/`status`.
+
+Transcript line shapes (OpenAI format) — useful context if you do reach `inspect.sh` or `Grep`:
 - `{"role":"user","content":"..."}` — message sent to agent
 - `{"role":"assistant","content":"...","tool_calls":[...]}` — assistant reply; tool_calls has `function.name` + `function.arguments`
 - `{"role":"tool","tool_call_id":"...","content":"..."}` — tool result
@@ -89,9 +94,10 @@ rules:
 - **Resume vs. start fresh** — prefer `agnz send <name>` over a fresh `agnz
   start` when all three hold: the agent role fits the new task, the task sits
   in the topic area of the thread's rolling summary, and the thread isn't
-  already heavy (high turns/tokens in the workspace block means you'd be
-  paying to drag a full context along for an unrelated ask). Otherwise, start
-  fresh — a heavy or off-topic thread costs more to resume than to replace.
+  already heavy (a high `ctx ~Xk` in the workspace block — the resume weight
+  a `send` would re-send — means you'd be paying to drag a full context along
+  for an unrelated ask). Otherwise, start fresh — a heavy or off-topic thread
+  costs more to resume than to replace.
 
 ## Terminal shortcut
 

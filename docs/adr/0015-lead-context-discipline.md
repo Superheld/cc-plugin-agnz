@@ -1,6 +1,6 @@
 # ADR 0015: Lead-side context discipline
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Date:** 2026-07-20
 - **Depends on:** [ADR 0002](./0002-communication-mailbox-and-events.md), [ADR 0007](./0007-parent-context.md), [ADR 0013](./0013-tool-workflow-discipline.md), [ADR 0014](./0014-cli-replaces-mcp.md)
 
@@ -150,13 +150,43 @@ the work; the fence only catches what's left over.
   wait, what "leave running" means for a thread that immediately re-enters
   `running` via reuse-by-name) — left to the implementation branch.
 
+## Implementation notes
+
+Shipped in one branch, per the ordering in Consequences above:
+
+- **Point 1 (watcher verb).** `--wait` removed from `start`/`send`/`approve`/
+  `answer` — passing it now errors with a pointer to `agnz wait`. New
+  `agnz wait <id|name> [--timeout <s>]` verb, default timeout 300 s; on
+  timeout prints `{..., timeout:true}` and exits 0 without touching the
+  underlying run; on a thread already out of `running` it collects the
+  outcome immediately. The inline path in `lib/orchestrate.mjs` stays —
+  the eval harness (ADR 0011 §5) still calls it directly.
+- **Point 2 (lean `show`).** Resolved as a change to `show` itself, not a
+  separate verb: `meta.json`'s content minus `systemPromptSnapshot` and the
+  full `agentDef` body, each recent-message excerpt capped at ~500 chars with
+  an elision marker reporting the original size, plus the `lib/trace-stats.mjs`
+  fold (turns/tokens/latency/tool outcomes/repair rate) surfaced inline. The
+  `messages.jsonl` schema-sample mode floated as a third candidate under this
+  point did **not** ship — see Open below.
+- **Point 3 (ladder).** Documented in `skills/agnz/references/lifecycle.md`,
+  `skills/agnz/references/orchestration.md`, and
+  `skills/agnz-threads/SKILL.md`.
+- **Point 4 (fence).** `scripts/hooks/pre-tool-use.mjs`, wired via
+  `hooks/hooks.json`, blocks the lead's direct `Read` of
+  `.claude/agnz/threads/*.jsonl` and `*.trace.jsonl` with a message pointing
+  at `agnz show` / `agnz send`. `Grep` and `inspect.sh` remain open per the
+  porosity design above.
+
 ## Open
 
-- Exact shape of the trimmed `show` output and its verb surface (a flag on
-  `show`, vs. a separate structural-view verb) — left to the implementation
-  branch.
-- Exact per-message cap for `show`'s `recent` field (500 chars is a starting
-  guess, not measured).
+- ~~Exact shape of the trimmed `show` output and its verb surface~~ —
+  resolved: it's `show` itself, no separate verb (see Implementation notes).
+- ~~Exact per-message cap for `show`'s `recent` field~~ — resolved: 500
+  chars, shipped as the starting guess rather than separately measured
+  against real transcripts.
+- **A schema-sample mode for `messages.jsonl`** (one representative record,
+  not content) — the third candidate shape under point 2, did not ship.
+  Still open if the "reason about message shape" need actually comes up.
 - **Whether the `Read` fence should also cover raw `meta.json` reads.** Given
   `meta.json` embeds the heavy `systemPromptSnapshot` and `agentDef` fields,
   it is not the small/safe case it might look like at first glance — but

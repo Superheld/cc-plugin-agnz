@@ -38,10 +38,10 @@ lib/runner.mjs → lib/loop.mjs   ← LLM ↔ tool loop, persists transcript, th
 
 | Path | Role |
 |---|---|
-| `bin/agnz.mjs` | The CLI entrypoint (replaces the old MCP server — ADR 0014). Parses argv into the verbs, resolves agent defs + reuse-by-name, spawns a detached runner (or runs inline with `--wait`), prints JSON to stdout. |
+| `bin/agnz.mjs` | The CLI entrypoint (replaces the old MCP server — ADR 0014). Parses argv into the verbs, resolves agent defs + reuse-by-name, spawns a detached runner, prints JSON to stdout. |
 | `bin/agnz` | Thin `sh` wrapper (`exec node …/agnz.mjs "$@"`) giving a clean `agnz` command. CC puts an enabled plugin's `bin/` on the parent's `PATH`, so the parent invokes `agnz <verb>` by bare name from any cwd — no `$CLAUDE_PLUGIN_ROOT`. A wrapper (not a symlink or extensionless rename) because the repo has no `package.json "type":"module"`, so the ESM CLI must keep its `.mjs` extension. |
 | `lib/runner.mjs` | Detached run process — one per active run: reads a payload, runs `runThread` one segment, records its pid for stop/interrupt, exits. State in files, results via the hook. |
-| `lib/orchestrate.mjs` | Shared run helpers (`resolveProfile`, `makeSandbox`, `PLUGIN_ROOT`) used by the runner and the `--wait` path. |
+| `lib/orchestrate.mjs` | Shared run helpers (`resolveProfile`, `makeSandbox`, `PLUGIN_ROOT`) used by the runner and the eval harness's inline run path (ADR 0011 §5) — the CLI-level `--wait` flag that used to share this path is gone (ADR 0015). |
 | `lib/loop.mjs` | The agent loop. `runThread(ctx)` is the main entry. Handles new messages, resume from pause, drain leftover tool calls. The system prompt is a **frozen prefix** (ADR 0012 phase 1): `renderSystemPrompt` runs once on the first run and the result is snapshotted onto `thread.systemPromptSnapshot`, reused byte-identically every turn so the prefix never grows and the server can cache it. `drainTopOfTurnContext` runs at the top of every turn and injects, as a single synthetic user message, (a) one-time CLAUDE.md for newly-visited subdirs (`pendingDirMds`) and (b) new mailbox mail (ADR 0002) for `agentName`, advancing `inboxCursor`. Combined into one message so two consecutive user turns never occur. |
 | `lib/sandbox.mjs` | Path resolution, symlink-escape protection, tiered permission policy. `checkPermission(toolName)` returns `ask` for any tool not in the thread's policy map (built from the agent def's `tools`/`disallowedTools` fields by `buildToolPolicy` in `agent-defs.mjs`). |
 | `lib/threads.mjs` | Thread lifecycle routed through a per-project workspace store. Status enum: `idle`, `running`, `awaiting_input`, `stopped`, `error`. Creates a workspace store for the thread's cwd and registers the id in the thread index. **The on-disk `threads/` dir is the source of truth; the user-wide index is a resolver cache that can desync from it.** `reconcileWorkspace(cwd)` dir-scans and re-registers any "ghost" (meta on disk, no index entry); `listThreads()` and the CLI's `resolveTarget`/`list` self-heal through it, so a lost index entry never hides a thread from `list`/`send`. |
@@ -67,7 +67,8 @@ lib/runner.mjs → lib/loop.mjs   ← LLM ↔ tool loop, persists transcript, th
 | `lib/agent-defs.mjs` | ADR 0003 loader. Loads agent files from CC standard paths: `~/.claude/agents/*.md` (user), `<cwd>/.claude/agents/*.md` (project), `<pluginRoot>/agents/*.md` (plugin-bundled, lowest priority). Zero-dep parser supporting both **CC native format** (preferred) and legacy YAML block forms. Exports `parseAgentDefSource`, `validateAgentDef`, `buildToolPolicy`, `loadAgentDef`, `listAgentDefs`. Consumed by the CLI/runner at start time and snapshotted onto the thread meta. |
 | `skills/agnz-setup/scripts/companion.mjs` | Slash-command dispatcher for `/agnz:setup`. Handles profile CRUD, mapping, and info sub-commands. |
 | `scripts/hooks/{user-prompt-submit,session-start}.mjs` + `_lib.mjs` | Claude Code hook scripts for ADR 0002 §6a/6b + ADR 0011 §3. Inject unread `to:parent` messages plus a spend-aware workspace summary (per active thread: `<name>:<short-id> — <status> · <turns> turns · <tokens> tok`, where the turn/token fold is `readThreadSpend` inlined in `_lib.mjs`) into Claude's context at prompt/session time, and advance the parent cursor (via atomic tmp+rename after stdout drain, so the cursor never advances past messages that didn't reach Claude). Self-contained — no imports from `lib/`. Fast no-op when the current project has no agnz workspace. Wired into Claude Code via `hooks/hooks.json` — auto-enabled when the plugin is installed; scoped to the plugin's lifetime. |
-| `hooks/hooks.json` | Plugin-level hook manifest. Merges into the user's Claude Code hooks when the plugin is enabled, binding `UserPromptSubmit` and `SessionStart` to the `scripts/hooks/*.mjs` scripts with a 5 s timeout. Uses the `{description, hooks: {...}}` wrapper format per plugin-dev guidance. |
+| `scripts/hooks/pre-tool-use.mjs` | ADR 0015 §4 fence. `PreToolUse` hook blocking the lead's direct `Read` of `.claude/agnz/threads/*.jsonl` and `*.trace.jsonl` (transcripts and traces) — exits non-zero with a message pointing at `agnz show` / `agnz send`. `meta.json` stays readable directly; `Grep` against transcripts/traces stays allowed (matches only); `inspect.sh` (Bash) stays as the capped debugging escape hatch. A backstop for the reflex, not the primary fix — see ADR 0015. |
+| `hooks/hooks.json` | Plugin-level hook manifest. Merges into the user's Claude Code hooks when the plugin is enabled, binding `UserPromptSubmit`, `SessionStart`, and `PreToolUse` to the `scripts/hooks/*.mjs` scripts with a 5 s timeout. Uses the `{description, hooks: {...}}` wrapper format per plugin-dev guidance. |
 | `agents/` | Plugin-bundled agent definitions (dev, researcher, reviewer, general). Loaded at lowest priority — project and user agents shadow them. |
 | `skills/agnz-setup/` | Skill for `/agnz:setup` — profiles, model→profile mappings, and `info` sub-command (version, data paths, current state). |
 | `skills/agnz-threads/` | Skill for listing and inspecting threads. Reads `.claude/agnz/threads/*.meta.json` and `.jsonl` directly. Includes `scripts/inspect.sh` as a terminal shortcut. |
@@ -90,15 +91,16 @@ The parent calls `bin/agnz.mjs` via Bash; every verb prints JSON to stdout.
 
 | Verb | Purpose |
 |---|---|
-| `start <name> ["task"]` | Create a thread (`--agent <def>` or `--inline`). Reuse-aware; `--wait` runs inline. |
+| `start <name> ["task"]` | Create a thread (`--agent <def>` or `--inline`). Reuse-aware. |
 | `send <name\|id> "msg"` | Send a task; reuses the live thread of that name, else needs an id. |
+| `wait <id\|name> [--timeout <s>]` | Poll a detached run until it leaves `running`; prints the outcome (default 300 s timeout; `timeout:true` after, the runner keeps going). |
 | `approve <id> allow\|deny [--persist]` | Resolve an approval pause (the pending toolCallId is implicit). |
 | `answer <id> "text"` | Resolve an `AskUser` question pause. |
 | `interrupt <id> ["directive"]` | Hard-interrupt: abort the current step (incl. a runaway Bash/Grep), stay resumable. |
 | `stop <id>` | Kill a live thread (SIGTERM to the runner); transcript remains. |
-| `list` / `show <id>` | Inspect threads (status, rolling summary, spend); `list` recovers dead-runner threads. |
+| `list` / `show <id>` | Inspect threads; `show` is the lean structural view (status, pending, spend, trace stats — no raw transcript); `list` recovers dead-runner threads. |
 
-Detached by default — results reach the parent via `messages.jsonl` + the `UserPromptSubmit` hook. `--wait` blocks for the segment and returns the outcome inline. There is no `outputSchema`/`structuredContent` any more (that was MCP) — stdout JSON is the contract. Profile management is a slash command (`/agnz:setup`).
+Always detached — results reach the parent via `messages.jsonl` + the `UserPromptSubmit` hook, or collect sooner with `agnz wait`. There is no `outputSchema`/`structuredContent` any more (that was MCP) — stdout JSON is the contract. Profile management is a slash command (`/agnz:setup`).
 
 ## The agent loop in one paragraph
 
@@ -108,7 +110,7 @@ Note: there is no memory preamble. The thread's context is exactly `system promp
 
 ## Detached-runner model (ADR 0014)
 
-By default `start`/`send`/`approve`/`answer` spawn a detached `lib/runner.mjs` process, return `{status:"started"}`, and exit. The runner advances the loop one segment, writes its result to `messages.jsonl`, and exits. The parent picks it up via the `UserPromptSubmit` hook at the next prompt. `--wait` instead runs the segment inline and returns the outcome directly (for short tasks).
+`start`/`send`/`approve`/`answer` always spawn a detached `lib/runner.mjs` process, return `{status:"started"}`, and exit. The runner advances the loop one segment, writes its result to `messages.jsonl`, and exits. The parent picks it up via the `UserPromptSubmit` hook at the next prompt, or collects sooner with `agnz wait <id>` — a watcher that polls the thread, not a second run mode (ADR 0015).
 
 - Non-blocking status peek: read `<cwd>/.claude/agnz/threads/<thread_id>.meta.json`, or `agnz show <id>`.
 - No standing process: nothing runs between runs (state is files). There is no `run-tracker`; the runner records its pid on the thread meta for `stop`/`interrupt`.
@@ -212,9 +214,10 @@ Profile resolution at thread start: `workspace.json → modelProfileMappings[age
 ## Useful commands during development
 
 ```bash
-# Run an agent synchronously against the configured profile (needs a live model)
+# Run an agent against the configured profile (needs a live model), then collect its outcome
 node bin/agnz.mjs start probe "List the .mjs files under lib/ and count them." \
-  --agent researcher --cwd "$PWD" --wait
+  --agent researcher --cwd "$PWD"
+node bin/agnz.mjs wait probe --cwd "$PWD"
 
 # Drive / inspect threads
 node bin/agnz.mjs list
@@ -255,7 +258,7 @@ The ADRs under [`docs/adr/`](./docs/adr/) document the architecture. Read them b
 - **[ADR 0013 — Tool workflow discipline.](./docs/adr/0013-tool-workflow-discipline.md)** The behavioural counterpart to ADR 0012: keep context lean by guiding *how* the agent uses tools. **Grep before Read** (efficiency — locate then read a slice, soft guidance) and **Read before Write/Edit of an existing file** (correctness — never clobber unread content, near-absolute, candidate for hard enforcement). **Implemented** as harness logic, not just prompt text: a reactive interceptor (`checkWorkflowDiscipline` in `lib/loop.mjs`, called early in `dispatchToolCall`) backed by a per-thread knowledge state (`knownFiles` on thread meta, updated after every successful Read/Write/Edit). On a violation it blocks the tool and injects a `Workflow:` corrective prompt; the block is traced as `tool_call outcome:"blocked"`. Read→Write is a hard block on existing unread files; Grep→Read is a size-gated redirect (`LARGE_READ_BYTES`). Cache-safe (only smaller appends, never mutates earlier messages). Covered by `tests/workflow-discipline.test.mjs`. (Complemented by the anchor-based `Edit` tool, which independently requires having read the bytes to be changed.)
 
 - **[ADR 0014 — CLI replaces the MCP server.](./docs/adr/0014-cli-replaces-mcp.md)** The parent drives agnz through the `bin/agnz.mjs` CLI (verbs, Bash, JSON on stdout) instead of an MCP stdio server. Each run is a detached `lib/runner.mjs` process; results still reach the parent via `messages.jsonl` + the hook. **Implemented (0.13.0):** removed `mcp/server.mjs`/`mcp/jsonrpc.mjs`/`run-tracker.mjs`/`.mcp.json`; added `bin/agnz.mjs`, `lib/runner.mjs`, `lib/orchestrate.mjs`; foundation hardened for the multi-process model (`lib/proc-lock.mjs` cross-process mkdir locks + atomic tmp+rename on `messages.jsonl`/meta/index); plus reuse-by-name, rolling thread summaries (ADR 0007), and opportunistic stale-run recovery. **Parent invocation:** CC adds an enabled plugin's `bin/` to the parent shell's `PATH`, so the parent runs `agnz <verb>` by bare name from any cwd (no `$CLAUDE_PLUGIN_ROOT` needed); `bin/agnz` is a thin sh wrapper over `bin/agnz.mjs`.
-- **[ADR 0015 — Lead-side context discipline.](./docs/adr/0015-lead-context-discipline.md)** The lead-side counterpart to ADR 0013: `--wait` and direct transcript reads both undermine the small-context goal agnz exists for. **Proposed** — remove `--wait` in favour of a new `agnz wait` watcher verb, cap `agnz show`'s transcript excerpt, document an "ask, don't read" escalation ladder, and back it with a `PreToolUse` hook blocking direct `Read` of thread transcripts/traces (Grep and `inspect.sh` stay open as escape hatches).
+- **[ADR 0015 — Lead-side context discipline.](./docs/adr/0015-lead-context-discipline.md)** The lead-side counterpart to ADR 0013: `--wait` and direct transcript reads both undermine the small-context goal agnz exists for. **Implemented.** `--wait` removed from `start`/`send`/`approve`/`answer` in favour of the `agnz wait` watcher verb; `agnz show` is now the lean structural view (meta minus `systemPromptSnapshot`/`agentDef` body, capped message excerpts, folded-in trace stats); the "ask, don't read" escalation ladder is documented across the skills; a `PreToolUse` hook (`scripts/hooks/pre-tool-use.mjs`) blocks direct `Read` of thread transcripts/traces (`Grep` and `inspect.sh` stay open). The `messages.jsonl` schema-sample mode floated in the ADR did not ship.
 - **[ADR 0016 — Harness calls: the local model as infrastructure service.](./docs/adr/0016-harness-calls.md)** Use the local LLM for small tool-less calls that improve agnz's own infrastructure (e.g. a real rolling-summary call instead of the current heuristic), not just for agent work. **Proposed — deferred pending dogfooding** of the cheaper mechanical resume-card alternative, and pending validation of queueing latency against a serialized local inference server.
 
 When implementing any ADR, follow it as the spec and keep deviations visible (either an amendment in the ADR or a note in the commit message).
