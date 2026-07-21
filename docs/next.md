@@ -57,10 +57,17 @@ Findings the three-lens review raised and we consciously accepted rather than fi
 
 ## Watch
 
-- **Test-suite flake.** Two occurrences (2026-07-20: 2 tests; 2026-07-21: 1 test), both
-  in the run chained directly after a `git merge`, both green on immediate retry, names
-  not captured either time. Does NOT reproduce via bare branch-switch cycles (5 tried)
-  or back-to-back runs (15+ clean). Working hypothesis: I/O-load-sensitive timing
-  (proc-lock acquisition or a child-process timeout) in the post-git moment. If it
-  recurs, **run with full output and capture the failing test names first** — counts
-  alone (the mistake made twice now) leave nothing to chase.
+- **Test-suite flake.** Three occurrences (2026-07-20: 2 tests; 2026-07-21: 1 test;
+  2026-07-21 late: 2 tests, then 1 test on the *immediately following* run — first time
+  it failed twice in a row), all in or right after the run chained directly behind a
+  `git merge`, all green within 1-2 retries, names not captured any time (the
+  names-first mistake is now three for three: even a deliberate capture attempt piped
+  through `grep '^ℹ'` and lost them). Does NOT reproduce via bare branch-switch cycles
+  (5 tried) or back-to-back runs (15+ clean). Working hypothesis unchanged:
+  I/O-load-sensitive timing (proc-lock acquisition or a child-process timeout) in the
+  post-git moment; occurrence 3 followed the largest merge yet (20+ files), which fits.
+  If it recurs: `node --test tests/*.test.mjs 2>&1 | tee /tmp/flake.log` FIRST, grep
+  afterwards. Process lesson from occurrence 3: the release chain gated on
+  `grep '^ℹ (pass|fail)'` — which exits 0 on a *match*, including "fail 2" — so a red
+  suite did not stop the pipeline. Gate release chains on the test runner's exit code
+  (`node --test ... && git merge ...`), never on a grep of its summary.
