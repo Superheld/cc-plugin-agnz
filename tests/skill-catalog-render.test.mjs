@@ -76,8 +76,7 @@ test("a multi-paragraph skill description renders as one catalog line", async ()
     userMessage: "hi",
   });
 
-  const meta = await threadMgr.getThread(thread.id);
-  const prompt = meta.systemPromptSnapshot;
+  const prompt = await threadMgr.readSystemPrompt(thread.id);
   assert.equal(typeof prompt, "string");
 
   // The whole description sits on one collapsed line...

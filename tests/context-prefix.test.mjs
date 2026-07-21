@@ -103,7 +103,7 @@ test("a subdir CLAUDE.md is injected only once even across repeated visits", asy
   assert.equal(ctxMsgs.length, 1);
 });
 
-test("the snapshot is persisted on thread meta after the first run", async () => {
+test("the snapshot is persisted as the thread's system-prompt file after the first run", async () => {
   const threadMgr = createThreadManager();
   const thread = await threadMgr.createThread({ cwd: projectCwd, name: "dev", agentDef: { name: "dev", tools: ["Read"] } });
   const sandbox = createSandbox({ root: projectCwd, policy: { Read: "allow" } });
@@ -112,7 +112,11 @@ test("the snapshot is persisted on thread meta after the first run", async () =>
 
   await runThread({ thread, threadMgr, sandbox, registry, profile, chat: fakeChat([finalMessage("ok")]), userMessage: "hi" });
 
+  // ADR 0017: the frozen prefix lives in its own write-once file, no longer
+  // inside the meta (where it dominated every meta rewrite).
+  const snapshot = await threadMgr.readSystemPrompt(thread.id);
+  assert.equal(typeof snapshot, "string");
+  assert.ok(snapshot.length > 0);
   const meta = await threadMgr.getThread(thread.id);
-  assert.equal(typeof meta.systemPromptSnapshot, "string");
-  assert.ok(meta.systemPromptSnapshot.length > 0);
+  assert.equal(meta.systemPromptSnapshot, undefined);
 });

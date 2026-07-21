@@ -1,6 +1,15 @@
 # ADR 0017 — Config and state consolidation
 
-**Status:** Proposed (approved in direction by Bruce, 2026-07-21 — breaking change, fresh setup, no migration)
+**Status:** Implemented (0.18.0, 2026-07-21 — breaking change, fresh setup, no migration)
+
+*Implementation notes / deviations:* the hooks read the legacy `cursors/`
+files as a one-time fallback so already-delivered parent mail is not
+re-injected after the upgrade (cheap, lossless — not a migration of
+substance); `workspace.json` v1 files are silently rewritten to the v2
+state shape on first touch (state is losslessly reducible; config is not,
+hence the loud error for config). The parent state gained an `offset`
+field (byte position into messages.jsonl) that the 0.16 hooks had already
+introduced. Cross-workspace `agnz list --all` was removed with the index.
 
 ## Context
 

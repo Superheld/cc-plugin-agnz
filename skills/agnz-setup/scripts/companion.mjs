@@ -3,17 +3,19 @@
 // they shell out here with `node companion.mjs <group> <subcommand> ...`
 // and print whatever we write to stdout.
 //
-// Currently only `setup` is implemented. Future /agnz:* sub-commands
-// (threads, board, etc.) will hook in here.
+// Config commands operate on the unified two-layer config (ADR 0017):
+// ~/.claude/agnz/config.json (user defaults) and
+// <cwd>/.claude/agnz/config.json (project overrides). All write commands
+// target the user layer by default; pass --project to write the project
+// override file instead.
 
-import { createProfileStore } from "../../../lib/profiles.mjs";
+import { loadConfig, updateConfigLayer, normaliseProfile } from "../../../lib/config.mjs";
 import { resolveUserDir, resolveProjectDir } from "../../../lib/data-dir.mjs";
 import { createWorkspaceStore } from "../../../lib/workspace-store.mjs";
-import { readFile, readdir, stat } from "node:fs/promises";
-import { dirname, join, resolve as resolvePath } from "node:path";
+import { listModels } from "../../../lib/llm/openai-compatible.mjs";
+import { readFile, readdir } from "node:fs/promises";
+import { dirname, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
-
-const DATA_DIR = resolveUserDir();
 
 const argv = process.argv.slice(2);
 
@@ -29,14 +31,18 @@ function print(obj) {
 //   0 — success
 //   1 — unexpected error (thrown from somewhere inside the dispatcher)
 //   2 — usage error (wrong args, unknown sub-command, bad input)
-// Callers that care about the distinction can branch on the code;
-// Claude reading the output just sees "Error: ..." either way.
 function fail(message, code = 1) {
   process.stderr.write(`Error: ${message}\n`);
   process.exit(code);
 }
 function usage(message) {
   return fail(message, 2);
+}
+
+/** Strip a --project flag out of the args; returns [scope, remainingArgs]. */
+function scopeOf(args) {
+  const rest = args.filter((a) => a !== "--project");
+  return [rest.length === args.length ? "user" : "project", rest];
 }
 
 async function main() {
@@ -50,96 +56,121 @@ async function main() {
   return usage(`unknown command group: ${group}`);
 }
 
-async function runSetup(args) {
-  const profiles = createProfileStore({ dataDir: DATA_DIR });
+async function runSetup(rawArgs) {
+  const [scope, args] = scopeOf(rawArgs);
+  const cwd = process.cwd();
   const sub = args[0] || "list";
 
   if (sub === "list") {
-    const summary = await profiles.list();
-    return print(summary);
+    const { profiles, mappings } = await loadConfig(cwd);
+    return print({
+      profiles: Object.values(profiles),
+      mappings: Object.fromEntries(
+        Object.entries(mappings).map(([m, v]) => [m, `${v.profile} (${v.origin})`]),
+      ),
+    });
   }
 
   if (sub === "add") {
-    // add <name> <baseUrl> <model> [apiKey]
+    // add <name> <baseUrl> <model> [apiKey] [--project]
     const [, name, baseUrl, model, apiKey] = args;
     if (!name || !baseUrl || !model) {
-      return usage("setup add <name> <baseUrl> <model> [apiKey]");
+      return usage("setup add <name> <baseUrl> <model> [apiKey] [--project]");
     }
-    const p = await profiles.add(name, {
-      baseUrl,
-      model,
-      apiKey: apiKey || null,
+    const profile = normaliseProfile(name, { baseUrl, model, apiKey: apiKey || null });
+    const { file } = await updateConfigLayer(scope, cwd, (layer) => {
+      const next = { ...layer, profiles: { ...layer.profiles, [name]: profile } };
+      // The first profile of a fresh layer becomes the fallback mapping, so
+      // a new setup works without a separate `mapping set _default` step.
+      const isFirstProfile = Object.keys(layer.profiles).length === 0;
+      if (isFirstProfile && !layer.mappings._default) {
+        next.mappings = { ...layer.mappings, _default: name };
+      }
+      return next;
     });
-    return print({ added: name, ...p });
+    return print({ added: name, scope, file, ...profile });
   }
 
   if (sub === "remove") {
     const [, name] = args;
-    if (!name) return usage("setup remove <name>");
-    await profiles.remove(name);
-    return print(`removed ${name}`);
+    if (!name) return usage("setup remove <name> [--project]");
+    const { file } = await updateConfigLayer(scope, cwd, (layer) => {
+      if (!layer.profiles[name]) throw new Error(`no profile '${name}' in the ${scope} layer`);
+      const profiles = { ...layer.profiles };
+      delete profiles[name];
+      return { ...layer, profiles };
+    });
+    return print({ removed: name, scope, file });
   }
 
   if (sub === "use") {
+    // use <name>: point the fallback mapping (_default) at a profile.
     const [, name] = args;
-    if (!name) return usage("setup use <name>");
-    await profiles.use(name);
-    return print(`active profile: ${name}`);
+    if (!name) return usage("setup use <name> [--project]");
+    const { profiles } = await loadConfig(cwd);
+    if (!profiles[name]) return fail(`no such profile '${name}' in the effective config`);
+    await updateConfigLayer(scope, cwd, (layer) => ({
+      ...layer,
+      mappings: { ...layer.mappings, _default: name },
+    }));
+    return print({ _default: name, scope });
   }
 
   if (sub === "test") {
     const [, name] = args;
     try {
-      const result = await profiles.test(name);
-      return print({ ok: true, ...result });
+      const { profiles, mappings } = await loadConfig(cwd);
+      const target = name || mappings._default?.profile;
+      const p = target ? profiles[target] : null;
+      if (!p) throw new Error(`no such profile '${target || "(default)"}'`);
+      const models = await listModels({ baseUrl: p.baseUrl, apiKey: p.apiKey });
+      return print({
+        ok: true,
+        name: p.name,
+        baseUrl: p.baseUrl,
+        models,
+        seesConfiguredModel: Boolean(p.model && models.includes(p.model)),
+      });
     } catch (err) {
-      // Reachability / profile errors are runtime failures, not usage
-      // mistakes — distinct exit code so scripts can tell them apart.
       return fail(err.message, 1);
     }
   }
 
   if (sub === "mapping") {
-    // mapping list|set|remove — manage workspace model→profile mappings.
-    // These live in <cwd>/.claude/agnz/workspace.json, not in profiles.json.
-    const store = createWorkspaceStore(process.cwd());
     const msub = args[1] || "list";
 
     if (msub === "list") {
-      const mappings = await store.getModelProfileMappings();
+      const { mappings } = await loadConfig(cwd);
       const entries = Object.entries(mappings);
       if (entries.length === 0) {
         return print("(no mappings — model identifiers fall through to profile name lookup)");
       }
-      for (const [model, profile] of entries) {
+      for (const [model, v] of entries) {
         const label = model === "_default" ? "_default (fallback)" : model;
-        print(`  ${label} → ${profile}`);
+        print(`  ${label} → ${v.profile}  [${v.origin}]`);
       }
       return;
     }
 
     if (msub === "set") {
-      const [,, model, profile] = args;
-      if (!model || !profile) return usage("setup mapping set <model> <profile>");
-      const ws = await store.readWorkspace();
-      const mappings = (ws?.modelProfileMappings && typeof ws.modelProfileMappings === "object")
-        ? ws.modelProfileMappings : {};
-      mappings[model] = profile;
-      await store.updateWorkspace({ modelProfileMappings: mappings });
-      return print(`mapped ${model} → ${profile}`);
+      const [, , model, profile] = args;
+      if (!model || !profile) return usage("setup mapping set <model> <profile> [--project]");
+      await updateConfigLayer(scope, cwd, (layer) => ({
+        ...layer,
+        mappings: { ...layer.mappings, [model]: profile },
+      }));
+      return print(`mapped ${model} → ${profile} (${scope})`);
     }
 
     if (msub === "remove") {
-      const [,, model] = args;
-      if (!model) return usage("setup mapping remove <model>");
-      const ws = await store.readWorkspace();
-      const mappings = { ...(ws?.modelProfileMappings || {}) };
-      if (!Object.prototype.hasOwnProperty.call(mappings, model)) {
-        return print(`(no mapping for '${model}')`);
-      }
-      delete mappings[model];
-      await store.updateWorkspace({ modelProfileMappings: mappings });
-      return print(`removed mapping for ${model}`);
+      const [, , model] = args;
+      if (!model) return usage("setup mapping remove <model> [--project]");
+      await updateConfigLayer(scope, cwd, (layer) => {
+        const mappings = { ...layer.mappings };
+        delete mappings[model];
+        return { ...layer, mappings };
+      });
+      return print(`removed mapping for ${model} (${scope})`);
     }
 
     return usage(`unknown mapping sub-command: ${msub}. Use list, set, or remove.`);
@@ -151,10 +182,8 @@ async function runSetup(args) {
 // ---- threads ---------------------------------------------------------------
 //
 // Per-project thread inspection. Reads <cwd>/.claude/agnz/threads/ via
-// workspace-store. No MCP calls — the slash command is a plain file
-// read so the parent context isn't consumed by a thread-list pull.
-// `cwd` defaults to process.cwd() because the Bash tool that invokes
-// this script runs in the project root.
+// workspace-store — a plain file read so the parent context isn't consumed
+// by a thread-list pull.
 async function runThreads(args) {
   const sub = args[0] || "list";
 
@@ -166,7 +195,6 @@ async function runThreads(args) {
       name: t.name || null,
       description: t.description || null,
       status: t.status,
-      profile: t.profile,
       agent: t.agentDef?.name || null,
       pending: t.pending?.kind || null,
       createdAt: t.createdAt,
@@ -180,98 +208,63 @@ async function runThreads(args) {
 
 // ---- info ------------------------------------------------------------------
 //
-// Prints a structured summary of the current agnz setup so Claude (or the
-// user) can understand where everything lives without directory searching.
-// Covers: plugin version, user-wide data root + active profile, and the
-// per-project layout (agents, threads, skills) for the current cwd.
+// The effective-config view (ADR 0017): the merged two-layer config with
+// per-value origin, plus the per-project layout. This is the one place
+// that renders the whole model-resolution picture — no more chasing the
+// chain across files by hand.
 
 async function runInfo(args) {
   const cwd = args[0] || process.cwd();
 
-  // Plugin version + root derived from this script's location.
   const scriptDir = dirname(fileURLToPath(import.meta.url));
-  const pluginJsonPath = resolvePath(scriptDir, "..", ".claude-plugin", "plugin.json");
+  const pluginJsonPath = resolvePath(scriptDir, "..", "..", "..", ".claude-plugin", "plugin.json");
   let version = "unknown";
   try {
-    const pluginJson = JSON.parse(await readFile(pluginJsonPath, "utf8"));
-    version = pluginJson.version || "unknown";
-  } catch {
-    // Not fatal — version is cosmetic here.
+    version = JSON.parse(await readFile(pluginJsonPath, "utf8")).version || "unknown";
+  } catch {}
+
+  let configBlock;
+  try {
+    const { profiles, mappings } = await loadConfig(cwd);
+    const profileLines = Object.values(profiles).map(
+      (p) => `  ${p.name} → ${p.baseUrl} · ${p.model}  [${p.origin}]`,
+    );
+    const mappingLines = Object.entries(mappings).map(
+      ([m, v]) => `  ${m === "_default" ? "_default (fallback)" : m} → ${v.profile}  [${v.origin}]`,
+    );
+    configBlock = [
+      "Profiles (effective, project overrides user):",
+      ...(profileLines.length ? profileLines : ["  (none — run /agnz:setup add)"]),
+      "Model → profile mappings:",
+      ...(mappingLines.length ? mappingLines : ["  (none — model ids fall through to profile names)"]),
+    ];
+  } catch (err) {
+    configBlock = [`Config error: ${err.message}`];
   }
 
-  const userDir = resolveUserDir();
-  const profileStore = createProfileStore({ dataDir: userDir });
-  const allProfiles = await profileStore.list();
-
-  // Format active profile details.
-  let profileLines = "  (no active profile — run /agnz:setup add)";
-  if (allProfiles.active) {
-    const p = allProfiles.profiles.find((x) => x.name === allProfiles.active);
-    if (p) {
-      profileLines = [
-        `  active: ${p.name}`,
-        `    endpoint: ${p.baseUrl}`,
-        `    model:    ${p.model}`,
-        ...(p.llmTimeoutMs != null ? [`    timeout:  ${p.llmTimeoutMs}ms`] : []),
-      ].join("\n");
-    }
-  }
-
-  const otherProfiles = (allProfiles.profiles || [])
-    .filter((p) => p.name !== allProfiles.active)
-    .map((p) => `    - ${p.name} (${p.baseUrl})`)
-    .join("\n");
-
-  // Per-project paths. Plugin agents live in <pluginRoot>/agents/.
-  const pluginRoot = resolvePath(scriptDir, "..");
+  const pluginRoot = resolvePath(scriptDir, "..", "..", "..");
   const projectDir = resolveProjectDir(cwd);
-  const agentsDir = resolvePath(pluginRoot, "agents");
   const threadsDir = resolvePath(projectDir, "threads");
-  const skillsDir = resolvePath(cwd, ".claude", "skills");
 
-  async function countDir(dir, ext = "") {
+  async function count(dir, suffix) {
     try {
-      const entries = await readdir(dir);
-      const matches = ext ? entries.filter((e) => e.endsWith(ext)) : entries;
-      return matches;
+      return (await readdir(dir)).filter((e) => e.endsWith(suffix)).length;
     } catch {
-      return null; // directory doesn't exist
+      return 0;
     }
   }
-
-  const agentFiles = await countDir(agentsDir, ".md");
-  const threadFiles = await countDir(threadsDir, ".meta.json");
-  const skillDirs = await countDir(skillsDir);
-
-  function fmt(dir, items, label) {
-    if (items === null) return `  ${dir}\n    (not created yet)`;
-    const names = items.map((f) => f.replace(/\.(md|meta\.json)$/, "")).join(", ");
-    const summary = items.length === 0 ? "(empty)" : `${items.length} ${label}: ${names}`;
-    return `  ${dir}\n    ${summary}`;
-  }
-
-  // Model→profile mappings from workspace.json
-  const wsStore = createWorkspaceStore(cwd);
-  const mappings = await wsStore.getModelProfileMappings();
-  const mappingEntries = Object.entries(mappings);
-  const mappingLines = mappingEntries.length === 0
-    ? ["  (none — model identifiers fall through to profile name lookup)"]
-    : mappingEntries.map(([m, p]) => `  ${m === "_default" ? "_default (fallback)" : m} → ${p}`);
 
   const lines = [
     `agnz v${version}`,
     "",
-    "User-wide data:",
-    `  ${userDir}`,
-    profileLines,
-    ...(otherProfiles ? ["  other profiles:", otherProfiles] : []),
+    `User config:    ${resolvePath(resolveUserDir(), "config.json")}`,
+    `Project config: ${resolvePath(projectDir, "config.json")} (optional override)`,
+    "",
+    ...configBlock,
     "",
     `Per-project (cwd: ${cwd}):`,
-    "  model→profile mappings:",
-    ...mappingLines,
-    fmt(agentsDir, agentFiles, "agent" + (agentFiles?.length === 1 ? "" : "s")),
-    fmt(threadsDir, threadFiles, "thread" + (threadFiles?.length === 1 ? "" : "s")),
-    fmt(skillsDir, skillDirs, "skill" + (skillDirs?.length === 1 ? "" : "s")),
+    `  threads: ${await count(threadsDir, ".meta.json")} (${threadsDir})`,
+    `  plugin agents: ${await count(resolvePath(pluginRoot, "agents"), ".md")}`,
   ];
 
   print(lines.join("\n"));

@@ -50,8 +50,11 @@ describe("workspace.json lifecycle", () => {
     const store = createWorkspaceStore(cwd);
     const ws = await store.ensureWorkspace();
     assert.equal(ws.schemaVersion, WORKSPACE_SCHEMA_VERSION);
-    assert.equal(ws.name, basename(cwd));
-    assert.equal(ws.cwd, cwd);
+    // ADR 0017: pure state — no name/cwd (derivable from the file location,
+    // and a stored cwd was observed lying after a project move).
+    assert.equal(ws.name, undefined);
+    assert.equal(ws.cwd, undefined);
+    assert.deepEqual(ws.parent, { cursor: null, offset: 0, threadFingerprint: null });
     assert.ok(typeof ws.createdAt === "number");
     assert.ok(existsSync(join(cwd, ".claude", "agnz", "workspace.json")));
   });

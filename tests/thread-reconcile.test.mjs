@@ -18,7 +18,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createThreadManager } from "../lib/threads.mjs";
-import { forgetThread, lookupThreadCwd } from "../lib/thread-index.mjs";
 
 let userDir;
 let cwd;
@@ -35,36 +34,39 @@ afterEach(() => {
   rmSync(cwd, { recursive: true, force: true });
 });
 
-test("reconcileWorkspace recovers a ghost and re-registers it", async () => {
-  const tm = createThreadManager();
-  const t = await tm.createThread({ cwd, name: "ghost" });
+test("a fresh manager resolves by id after reconcileWorkspace seeds it", async () => {
+  // ADR 0017: id → cwd resolution is in-process only. A manager in a fresh
+  // process (CLI, runner) knows nothing until it scans the workspace.
+  const creator = createThreadManager();
+  const t = await creator.createThread({ cwd, name: "ghost" });
 
-  // Simulate the index losing the entry while the meta stays on disk.
-  await forgetThread(t.id);
-  assert.equal(await lookupThreadCwd(t.id), null, "precondition: thread is a ghost");
+  const fresh = createThreadManager();
+  assert.equal(await fresh.getThread(t.id), null, "precondition: unseeded manager cannot resolve");
 
-  const threads = await tm.reconcileWorkspace(cwd);
-  assert.ok(threads.some((x) => x.id === t.id), "ghost is returned from the dir scan");
-  assert.equal(await lookupThreadCwd(t.id), cwd, "ghost was re-registered in the index");
+  const threads = await fresh.reconcileWorkspace(cwd);
+  assert.ok(threads.some((x) => x.id === t.id), "thread is returned from the dir scan");
 
-  // By-id resolution (send/show by id) works again after re-registration.
-  const got = await tm.getThread(t.id);
-  assert.ok(got && got.id === t.id, "getThread resolves the recovered thread by id");
+  const got = await fresh.getThread(t.id);
+  assert.ok(got && got.id === t.id, "getThread resolves after the scan seeded the map");
 });
 
-test("listThreads self-heals a ghost in an index-known workspace", async () => {
+test("getThread resolves with an explicit cwd hint (the runner's path)", async () => {
+  const creator = createThreadManager();
+  const t = await creator.createThread({ cwd, name: "runner-target" });
+
+  const fresh = createThreadManager();
+  const got = await fresh.getThread(t.id, cwd);
+  assert.ok(got && got.id === t.id, "cwd hint seeds resolution without a full scan");
+  assert.equal(got.cwd, cwd);
+});
+
+test("listThreads(cwd) lists every on-disk thread of the workspace", async () => {
   const tm = createThreadManager();
-  const keep = await tm.createThread({ cwd, name: "keep" });
-  const ghost = await tm.createThread({ cwd, name: "ghost" });
+  const a = await tm.createThread({ cwd, name: "keep" });
+  const b = await tm.createThread({ cwd, name: "ghost" });
 
-  // Drop only the ghost from the index. The workspace stays discoverable via
-  // `keep`, so the cross-workspace listThreads can still reach the cwd.
-  await forgetThread(ghost.id);
-
-  const ids = (await tm.listThreads()).map((t) => t.id);
-  assert.ok(ids.includes(keep.id), "indexed thread is listed");
-  assert.ok(ids.includes(ghost.id), "ghost is listed via self-heal");
-  assert.equal(await lookupThreadCwd(ghost.id), cwd, "ghost was re-registered");
+  const ids = (await createThreadManager().listThreads(cwd)).map((t) => t.id);
+  assert.ok(ids.includes(a.id) && ids.includes(b.id));
 });
 
 test("reconcileWorkspace is a no-op (no duplicates) when nothing is missing", async () => {
