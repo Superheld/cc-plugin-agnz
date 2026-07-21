@@ -37,7 +37,7 @@ Watch a detached run and collect its outcome — a *watcher*, not a worker: it p
 
 ```bash
 agnz wait researcher-1 --timeout 120
-→ {"thread_id":"abc…","status":"final","content":"…"}
+→ {"thread_id":"abc…","status":"idle","content":"…"}
 ```
 
 Default timeout is 300s. On timeout it prints `{..., timeout:true}` and exits 0 — the underlying detached runner is untouched and keeps working; call `wait` again, or just let the `UserPromptSubmit` hook deliver the result at your next prompt. Calling `wait` on a thread that's already left `running` (idle, awaiting_input, stopped, error) returns its outcome immediately — a **collect** call, useful right after you already know the run finished.
@@ -112,7 +112,7 @@ For a status peek any time: `agnz show <id>`. To actually block for an outcome i
 
 `agnz show <id>` (or the meta file) reflects one of:
 
-**1. `final`** — free text; the agent finished its turn and is idle. Send again to follow up.
+**1. `idle`** — the agent finished its turn; the distilled answer is in `content`. Send again to follow up.
 
 **2. `awaiting_input` / approval** — the agent wants to run a gated tool (usually `Edit`/`Write`/`Bash`). Long string args are truncated to a length-annotated preview to protect your context; the full args stay in the meta under `pending.args`. Resolve with `agnz approve <id> allow|deny`. A deny is injected as the tool result and the agent continues — it may try another approach.
 

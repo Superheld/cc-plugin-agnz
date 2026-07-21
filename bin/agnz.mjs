@@ -79,9 +79,12 @@ function parseArgs(argv) {
 }
 
 // Resolve a target token to a thread: exact id first, else reuse the most
-// recent live thread that goes by that name in this workspace (idle/stopped/
-// running/awaiting — never an errored one). This is the reuse-by-name default.
-async function resolveTarget(tm, cwd, token) {
+// recent thread that goes by that name in this workspace. By default an
+// errored thread is NOT a reuse candidate (send's semantics: a crash means
+// "start fresh"). `wait` passes { includeError: true } — collecting a crashed
+// agent by name is the whole point of waiting on it. This is the reuse-by-name
+// default; the most-recently-updated match wins when a name is shared.
+async function resolveTarget(tm, cwd, token, { includeError = false } = {}) {
   // Self-heal the workspace first: re-register any on-disk thread missing from
   // the index, so a ghost is resolvable by id or name (otherwise send <name>
   // would spawn a duplicate instead of resuming the existing thread).
@@ -89,10 +92,11 @@ async function resolveTarget(tm, cwd, token) {
   const byId = threads.find((t) => t.id === token) || (await tm.getThread(token));
   if (byId) return byId;
   const candidates = threads
-    .filter((t) => t.name === token && t.status !== "error")
+    .filter((t) => t.name === token && (includeError || t.status !== "error"))
     .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
   return candidates[0] || null;
 }
+export { resolveTarget };
 
 function spawnRunner(payload) {
   const dir = mkdtempSync(join(tmpdir(), "agnz-run-"));
@@ -141,7 +145,7 @@ export function decideWaitOutcome(thread, messages) {
     thread_id: thread.id,
     status: thread.status,
     summary: thread.summary || null,
-    pending: thread.pending || null,
+    pending: capPending(thread.pending) || null,
   };
   // Surface the crash reason on an error thread — a waiter on a dead run wants
   // to know why (a small, structured field; the transcript stays unread).
@@ -175,7 +179,44 @@ function capContent(content) {
 // tool_calls (null content) pass through untouched.
 function capMessageContent(m) {
   if (!m || typeof m !== "object") return m;
-  return typeof m.content === "string" ? { ...m, content: capContent(m.content) } : m;
+  if (typeof m.content === "string") return { ...m, content: capContent(m.content) };
+  // OpenAI content-parts array (e.g. [{type:"text", text:"…"}]): cap each
+  // part's `text` — the only unbounded string a part carries — so a big tool
+  // result delivered as parts can't slip past the cap. Non-text parts and
+  // unknown shapes pass through untouched.
+  if (Array.isArray(m.content)) {
+    return {
+      ...m,
+      content: m.content.map((part) =>
+        part && typeof part === "object" && typeof part.text === "string"
+          ? { ...part, text: capContent(part.text) }
+          : part,
+      ),
+    };
+  }
+  return m;
+}
+
+// Cap an approval/question pause before it is promoted into a lean surface
+// (`show` and `wait`). `pending.args` carries the FULL tool arguments — a
+// Write's whole `content`, an Edit's old/new strings (100 KB is realistic) —
+// which must never flow verbatim into the lead's context. Elide every long
+// STRING value in args (non-strings pass through untouched) plus, defensively,
+// the free-text `question`/`context` fields. Every structural field
+// (toolCallId, kind, name, options) survives intact so the lead can still act.
+function capPending(pending) {
+  if (!pending || typeof pending !== "object") return pending;
+  const out = { ...pending };
+  if (pending.args && typeof pending.args === "object") {
+    const args = Array.isArray(pending.args) ? [...pending.args] : { ...pending.args };
+    for (const k of Object.keys(args)) {
+      if (typeof args[k] === "string") args[k] = capContent(args[k]);
+    }
+    out.args = args;
+  }
+  if (typeof pending.question === "string") out.question = capContent(pending.question);
+  if (typeof pending.context === "string") out.context = capContent(pending.context);
+  return out;
 }
 
 // Reduce an agentDef to its policy-relevant identity — name, the first line of
@@ -220,7 +261,7 @@ export function buildShowView(thread, messages, stats) {
       summary: thread.summary || null,
       description: thread.description,
       cwd: thread.cwd,
-      pending: thread.pending,
+      pending: capPending(thread.pending),
       error: thread.error,
     },
     recent: (messages || []).slice(-6).map(capMessageContent),
@@ -359,7 +400,9 @@ async function main() {
       if (!target) fail("wait: <id|name> is required");
       const timeoutS = flags.timeout != null ? Number(flags.timeout) : 300;
       if (!Number.isFinite(timeoutS) || timeoutS < 0) fail("wait: --timeout must be a non-negative number of seconds");
-      let thread = await resolveTarget(tm, cwd, target);
+      // includeError: collecting a crashed thread by name is exactly what a
+      // waiter wants — decideWaitOutcome surfaces the crash reason.
+      let thread = await resolveTarget(tm, cwd, target, { includeError: true });
       if (!thread) fail(`no thread '${target}' (and no reusable agent by that name)`);
 
       const deadline = Date.now() + timeoutS * 1000;

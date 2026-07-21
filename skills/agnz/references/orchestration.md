@@ -53,7 +53,7 @@ Write the task you pass to `agnz start`/`send` as if briefing a capable colleagu
 
 ## Handling outcomes
 
-Every run is detached: the final answer arrives via the message hook at your next prompt, or collect it directly with `agnz wait <id>` — it blocks on the thread until it leaves `running` and returns `content` when `status: "final"`. `agnz show <id>` peeks any time without blocking.
+Every run is detached: the final answer arrives via the message hook at your next prompt, or collect it directly with `agnz wait <id>` — it blocks on the thread until it leaves `running` and returns `content` when `status: "idle"` (a finished run is `idle`, not a distinct "final" status). `agnz show <id>` peeks any time without blocking.
 
 If `status: "max_turns"`, the work so far is persisted — `agnz send <id> "continue"` to resume. To see what was done before resuming, `agnz show <id>` (capped recent-message excerpts) or ask the thread (`agnz send <id> "summarize progress so far before continuing"`) — the raw transcript file is fenced against direct `Read`.
 

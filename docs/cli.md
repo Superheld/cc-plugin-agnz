@@ -54,8 +54,14 @@ Poll a detached run until it leaves `running`, then print the outcome — a
 
 ```bash
 agnz wait researcher-1 --timeout 120
-→ {"thread_id":"abc…","status":"final","content":"…"}
+→ {"thread_id":"abc…","status":"idle","content":"…"}
 ```
+
+`wait` prints the thread's persisted status. The terminal statuses you can
+collect are: `idle` (the run finished — carries `content`, the distilled final
+answer), `awaiting_input` (paused — carries `pending`), `error` (crashed —
+carries `error`), and `stopped` (archived). A finished run is `idle`, not a
+distinct "final" status.
 
 Default timeout is 300 s. On timeout, prints the current state with
 `timeout:true` and exits `0` — the watching call gave up, the detached runner
