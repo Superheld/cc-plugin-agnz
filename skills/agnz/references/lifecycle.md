@@ -20,7 +20,7 @@ agnz start researcher-1 "Find all call sites of parseConfig and summarize." \
 → {"thread_id":"abc…","name":"researcher-1","agent":"researcher","status":"started"}
 ```
 
-`--inline "<frontmatter>"` defines an ad-hoc role instead of `--agent`. Without a task, the thread starts `idle`. `--wait` runs it inline and returns the outcome (see below). The thread is persisted at `<cwd>/.claude/agnz/threads/<id>.meta.json`, recoverable across runs.
+`--inline "<frontmatter>"` defines an ad-hoc role instead of `--agent`. Without a task, the thread starts `idle`. The thread is persisted at `<cwd>/.claude/agnz/threads/<id>.meta.json`, recoverable across runs.
 
 ### `send`
 
@@ -29,6 +29,27 @@ Send a task or follow-up. **Reuses** the most recent live thread of that name (r
 ```bash
 agnz send researcher-1 "Now also check the test files."
 → {"thread_id":"abc…","status":"started"}   # or "queued" if the thread is mid-run
+```
+
+### `wait`
+
+Watch a detached run and collect its outcome — a *watcher*, not a worker: it polls the thread's meta with backoff and returns once the thread leaves `running`.
+
+```bash
+agnz wait researcher-1 --timeout 120
+→ {"thread_id":"abc…","status":"final","content":"…"}
+```
+
+Default timeout is 300s. On timeout it prints `{..., timeout:true}` and exits 0 — the underlying detached runner is untouched and keeps working; call `wait` again, or just let the `UserPromptSubmit` hook deliver the result at your next prompt. Calling `wait` on a thread that's already left `running` (idle, awaiting_input, stopped, error) returns its outcome immediately — a **collect** call, useful right after you already know the run finished.
+
+This is what replaces `--wait`: start several agents detached, do your own work, then collect each with `wait` — parallel instead of serial.
+
+```bash
+agnz start auth    "…" --agent researcher
+agnz start billing "…" --agent researcher
+# … do other work …
+agnz wait auth
+agnz wait billing
 ```
 
 ### `approve`
@@ -66,7 +87,7 @@ agnz stop abc
 → {"thread_id":"abc","status":"stopped","note":"archived — transcript kept; resume with 'agnz send'"}
 ```
 
-`stop` **archives, it does not delete.** The `.meta.json` + `.jsonl` stay for later inspection (read them directly). Use it when an `idle` thread's work is done and you won't resume it.
+`stop` **archives, it does not delete.** The `.meta.json` + `.jsonl` stay on disk for later inspection — reach for `agnz show <id>` first; the transcript file itself is fenced against direct `Read` (see "Inspecting a thread" below). Use it when an `idle` thread's work is done and you won't resume it.
 
 **Keeping the workspace legible.** Threads stay listed as long as they are *open* — and `idle` counts as open, like a paused conversation you can resume with `send`. Nothing decays them automatically; that is deliberate, so you never lose a thread you meant to continue. The flip side: finished threads you leave `idle` pile up in the parent's per-prompt summary and slowly cost context. The workspace block shows each thread's age (e.g. `idle · 3d`) and, once idle threads accumulate, a one-line reminder. The habit: when a sub-agent's job is truly done, `stop` it. Resuming later still works — the transcript is kept.
 
@@ -74,16 +95,18 @@ agnz stop abc
 
 ```bash
 agnz list                 # threads in this workspace: name, status, summary, spend
-agnz show abc             # full state + pending + last transcript messages
+agnz show abc             # lean structural view: status, pending, spend, trace stats
 ```
+
+`show` strips the two heavy embedded fields (`systemPromptSnapshot`, the agent def's full body) that live in `meta.json`, and caps each recent-message excerpt at ~500 chars with an elision marker reporting the original size — a routine status check can never forward a full tool result. It also folds in the thread's trace stats (turns/tokens/latency/tool outcomes — the same aggregation `lib/trace-stats.mjs` computes) so one call answers "what is this thread, what did it do, how heavy is it" without a second lookup.
 
 `list` opportunistically recovers threads whose runner died (a crash leaves no daemon to clean up) by marking them `error`.
 
 ## How results arrive
 
-By default a run is **detached**: `start`/`send`/`approve`/`answer` spawn a short-lived runner that works in the background and exits. The result reaches the parent via `SendMessage(to:"parent")` → `messages.jsonl` → the `UserPromptSubmit` hook injects unread parent mail into your next prompt. An OS notification fires for urgent mail. No polling.
+Every run is **detached**: `start`/`send`/`approve`/`answer` spawn a short-lived runner that works in the background and exits. The result reaches the parent via `SendMessage(to:"parent")` → `messages.jsonl` → the `UserPromptSubmit` hook injects unread parent mail into your next prompt. An OS notification fires for urgent mail. No polling.
 
-Pass **`--wait`** to block until the segment pauses/finishes and get the outcome JSON directly in the same call — best for short tasks. For a non-blocking status peek any time: `agnz show <id>`, or read the meta file directly.
+For a status peek any time: `agnz show <id>`. To actually block for an outcome in the same call, use `agnz wait <id>` (see above) — it's a watcher polling the thread, not a second run mode; the detached runner is the only thing doing work.
 
 ## The three outcome states
 
@@ -94,6 +117,17 @@ Pass **`--wait`** to block until the segment pauses/finishes and get the outcome
 **2. `awaiting_input` / approval** — the agent wants to run a gated tool (usually `Edit`/`Write`/`Bash`). Long string args are truncated to a length-annotated preview to protect your context; the full args stay in the meta under `pending.args`. Resolve with `agnz approve <id> allow|deny`. A deny is injected as the tool result and the agent continues — it may try another approach.
 
 **3. `awaiting_input` / question** — the agent called `AskUser` because it genuinely could not decide. `options`/`context` may be present. Resolve with `agnz answer <id> "…"`.
+
+## Inspecting a thread — ask before you read
+
+The thread already carries its own context; reading its transcript costs *your* context, asking it a question costs *its* (local) tokens. Escalate in this order, cheapest first:
+
+1. **The workspace summary block** — the `UserPromptSubmit` hook injection (ADR 0007). Free, already in your context, and often enough to see status and rough spend across every open thread.
+2. **`agnz show <id>`** — the lean structural view above. One call, capped size, covers status/pending/spend/trace stats.
+3. **Ask the thread directly** — `agnz send <name> "clarifying question"`. The thread has full context already; a targeted question is cheaper than pulling its history into yours.
+4. **`inspect.sh`** (from the `agnz-threads` skill) as the last-resort debugging escape hatch — it tails the transcript/trace with its own caps.
+
+Reading `<id>.jsonl`/`<id>.trace.jsonl` directly with `Read` is not a rung on this ladder for routine use, and a `PreToolUse` hook blocks it outright — a single transcript line can carry up to 512 KiB of verbatim tool output, the exact context this plugin exists to keep out of yours. `Grep` against those files still works (matches only, so it's cheap), and `meta.json` is still directly readable for a fast peek at `pending`.
 
 ## Concurrency — agents in parallel
 
@@ -135,7 +169,7 @@ Each sub-agent **drains its inbox at the top of every turn** — messages addres
 
 ## What is deliberately NOT available
 
-- **No streaming.** Outcomes are single events; intermediate tool calls are invisible until the agent pauses or finishes (or use `--wait` to block for the segment).
+- **No streaming.** Outcomes are single events; intermediate tool calls are invisible until the agent pauses or finishes. `agnz wait` blocks on the *outcome*, not on intermediate steps — you still don't see tool calls as they happen.
 - **No daemon.** Nothing runs between runs; state lives in files.
 - **`Bash` is gated.** Policy ships as `ask`; the first call pauses for approval. `agnz approve <id> allow --persist` unlocks it for the run. Note: Bash is **not** path-confined — it is the sandbox escape hatch, gated only by approval (ADR 0003).
 - **No runtime reload of agent definitions.** A running thread keeps its snapshot; `start` a new thread to pick up edits.
