@@ -3,10 +3,11 @@
 // the old MCP tool surface). Verbs:
 //
 //   agnz start  <name> ["task"] --agent <def> | --inline "<frontmatter>"
-//                              [--cwd .] [--description "..."] [--wait]
-//   agnz send   <name|id> "message"   [--wait]
+//                              [--cwd .] [--description "..."]
+//   agnz send   <name|id> "message"
 //   agnz approve <id> allow|deny      [--persist]
 //   agnz answer <id> "answer text"
+//   agnz wait   <id|name>             [--timeout <s>]
 //   agnz stop   <id>                  (archive: hide from list, keep transcript)
 //   agnz list   [--status <s>] [--all]
 //   agnz show   <id>
@@ -14,14 +15,20 @@
 // Every verb prints a JSON object (or array) to stdout so the parent can
 // parse the outcome from a Bash call. Errors print {"error": "..."} and exit 1.
 //
-// start/send/approve/answer normally spawn a detached runner (lib/runner.mjs)
-// and return immediately; results reach the parent via the messages.jsonl hook.
-// Pass --wait to run the segment inline and print its outcome instead.
+// Runs are ALWAYS detached (ADR 0015): start/send/approve/answer spawn a
+// detached runner (lib/runner.mjs) and return {status:"started"}; results
+// reach the parent via the messages.jsonl hook, or by collecting them with
+// `agnz wait <id>` — a watcher that polls the thread meta until the run
+// leaves "running". The old inline `--wait` flag is gone (it serialized the
+// multi-process model and a Bash-tool timeout could kill a run mid-segment);
+// the eval harness keeps its own synchronous path via runThread directly.
 
 import { writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { setTimeout as sleep } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import { createThreadManager } from "../lib/threads.mjs";
 import { createRegistry } from "../lib/tools/registry.mjs";
 import {
@@ -30,11 +37,10 @@ import {
   validateAgentDef,
   buildToolPolicy,
 } from "../lib/agent-defs.mjs";
-import { createWorkspaceStore } from "../lib/workspace-store.mjs";
 import { createSandbox } from "../lib/sandbox.mjs";
 import { publish } from "../lib/event-bus.mjs";
-import { runThread } from "../lib/loop.mjs";
-import { resolveProfile, makeSandbox, PLUGIN_ROOT } from "../lib/orchestrate.mjs";
+import { readTrace, aggregateTrace } from "../lib/trace-stats.mjs";
+import { PLUGIN_ROOT } from "../lib/orchestrate.mjs";
 
 const RUNNER = resolve(PLUGIN_ROOT, "lib", "runner.mjs");
 
@@ -124,29 +130,104 @@ async function recoverIfStale(tm, thread) {
   return thread;
 }
 
-// Run one segment inline (for --wait) and return a CLI-shaped outcome.
-async function runInline(tm, registry, thread, payload) {
-  const profile = await resolveProfile(thread);
-  if (!profile) return { status: "error", error: "no LLM profile configured (run /agnz:setup add)" };
-  const sandbox = makeSandbox(thread, registry);
-  const controller = new AbortController();
-  process.on("SIGTERM", () => controller.abort());
-  const outcome = await runThread({
-    thread,
-    threadMgr: tm,
-    sandbox,
-    registry,
-    profile,
-    pluginRoot: PLUGIN_ROOT,
-    userMessage: payload.userMessage ?? null,
-    resumeInput: payload.resumeInput ?? null,
-    signal: controller.signal,
-  });
-  if (outcome.status === "awaiting_input") {
-    const p = outcome.pending || {};
-    return { status: "awaiting_input", kind: p.kind, tool_call_id: p.toolCallId, tool: p.name, question: p.question };
+// ---- wait: decide the collected outcome from a thread's meta + transcript ----
+// Pure so it is unit-testable without a runner. `messages` is the transcript
+// (only read by the caller when the thread has finished — idle). When the
+// thread is idle we surface `content`: the last assistant message's text, i.e.
+// the distilled final answer — full, uncapped, because it is the designed
+// payload the lead is waiting to collect.
+export function decideWaitOutcome(thread, messages) {
+  const outcome = {
+    thread_id: thread.id,
+    status: thread.status,
+    summary: thread.summary || null,
+    pending: thread.pending || null,
+  };
+  // Surface the crash reason on an error thread — a waiter on a dead run wants
+  // to know why (a small, structured field; the transcript stays unread).
+  if (thread.error) outcome.error = thread.error;
+  if (thread.status === "idle" && Array.isArray(messages)) {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role === "assistant" && typeof m.content === "string" && m.content) {
+        outcome.content = m.content;
+        break;
+      }
+    }
   }
-  return { status: outcome.status, content: outcome.content, finish_reason: outcome.finishReason };
+  return outcome;
+}
+
+// ---- show: a token-lean structural view (ADR 0015 §2) ----
+// A status check must never forward a full tool result into the lead's
+// context, so each recent message's content is capped with an elision marker
+// that reports the original size.
+const RECENT_CONTENT_CAP = 500;
+
+function capContent(content) {
+  if (typeof content !== "string" || content.length <= RECENT_CONTENT_CAP) return content;
+  const kb = (content.length / 1024).toFixed(1);
+  return `${content.slice(0, RECENT_CONTENT_CAP)}…[elided, ${kb} KB total]`;
+}
+
+// Cap a transcript message's content field, preserving every other field
+// (role, tool_call_id, tool_calls, ts). Assistant messages that carry only
+// tool_calls (null content) pass through untouched.
+function capMessageContent(m) {
+  if (!m || typeof m !== "object") return m;
+  return typeof m.content === "string" ? { ...m, content: capContent(m.content) } : m;
+}
+
+// Reduce an agentDef to its policy-relevant identity — name, the first line of
+// its description, and its tool allow/deny lists. The heavy body (system-prompt
+// text) is dropped: the lead asks "show" for state, not for the prompt.
+function reduceAgentDef(agentDef) {
+  if (!agentDef) return null;
+  return {
+    name: agentDef.name || null,
+    description: agentDef.description ? String(agentDef.description).split("\n")[0] : null,
+    tools: agentDef.tools || null,
+    disallowedTools: agentDef.disallowedTools || null,
+  };
+}
+
+// Compact the trace fold to the fields a lead reads at a glance. Drops the
+// per-event detail; keeps turns, tokens, latency, tool outcomes, repair rate.
+function compactStats(s) {
+  return {
+    turns: s.turns,
+    llmCalls: s.llmCalls,
+    tokens: s.tokens,
+    avgLlmLatencyMs: s.avgLlmLatencyMs,
+    durationMs: s.durationMs,
+    toolCalls: s.toolCalls,
+    repairs: s.repairs,
+    terminalReason: s.terminalReason,
+  };
+}
+
+// Build the `show` view. Pure: the caller does the IO (readMessages, readTrace)
+// and passes the results in, so this is directly unit-testable. `stats` is the
+// compacted trace fold or null when the thread has no trace file yet.
+export function buildShowView(thread, messages, stats) {
+  const view = {
+    thread: {
+      thread_id: thread.id,
+      name: thread.name,
+      agent: thread.agentDef?.name,
+      agentDef: reduceAgentDef(thread.agentDef),
+      status: thread.status,
+      summary: thread.summary || null,
+      description: thread.description,
+      cwd: thread.cwd,
+      pending: thread.pending,
+      error: thread.error,
+    },
+    recent: (messages || []).slice(-6).map(capMessageContent),
+  };
+  if (thread.card) view.thread.card = thread.card;
+  if (stats) view.stats = stats;
+  return view;
 }
 
 // ---- verbs ----
@@ -156,6 +237,15 @@ async function main() {
   const cwd = flags.cwd ? resolve(String(flags.cwd)) : process.env.AGNZ_CWD || process.cwd();
   const tm = createThreadManager();
   const registry = createRegistry();
+
+  // --wait is gone (ADR 0015): runs are always detached. Fail loudly with a
+  // pointer rather than silently ignoring the flag, so a stale caller learns
+  // the new collect verb.
+  if (flags.wait && ["start", "send", "approve", "answer"].includes(verb)) {
+    fail(
+      "--wait was removed (ADR 0015): runs are always detached — use 'agnz wait <id> [--timeout <s>]' to collect the outcome",
+    );
+  }
 
   switch (verb) {
     case "start": {
@@ -201,12 +291,8 @@ async function main() {
         out({ thread_id: thread.id, name, agent: agentDef.name, status: "idle" });
         return;
       }
-      if (flags.wait) {
-        out({ thread_id: thread.id, name, agent: agentDef.name, ...(await runInline(tm, registry, thread, { userMessage: message })) });
-      } else {
-        spawnRunner({ threadId: thread.id, userMessage: message });
-        out({ thread_id: thread.id, name, agent: agentDef.name, status: "started" });
-      }
+      spawnRunner({ threadId: thread.id, userMessage: message });
+      out({ thread_id: thread.id, name, agent: agentDef.name, status: "started" });
       return;
     }
 
@@ -226,12 +312,8 @@ async function main() {
         out({ thread_id: thread.id, status: "queued", hint: `thread is ${thread.status}; message queued for the next turn boundary` });
         return;
       }
-      if (flags.wait) {
-        out({ thread_id: thread.id, ...(await runInline(tm, registry, thread, { userMessage: message })) });
-      } else {
-        spawnRunner({ threadId: thread.id, userMessage: message });
-        out({ thread_id: thread.id, status: "started" });
-      }
+      spawnRunner({ threadId: thread.id, userMessage: message });
+      out({ thread_id: thread.id, status: "started" });
       return;
     }
 
@@ -246,12 +328,8 @@ async function main() {
         fail(`thread '${id}' is not awaiting approval (status=${thread.status}, pending=${thread.pending?.kind ?? "none"})`);
       }
       const resumeInput = { toolCallId: thread.pending.toolCallId, decision, persist: flags.persist === true };
-      if (flags.wait) {
-        out({ thread_id: id, ...(await runInline(tm, registry, thread, { resumeInput })) });
-      } else {
-        spawnRunner({ threadId: id, resumeInput });
-        out({ thread_id: id, status: "started" });
-      }
+      spawnRunner({ threadId: id, resumeInput });
+      out({ thread_id: id, status: "started" });
       return;
     }
 
@@ -266,13 +344,46 @@ async function main() {
         fail(`thread '${id}' is not awaiting a question (status=${thread.status}, pending=${thread.pending?.kind ?? "none"})`);
       }
       const resumeInput = { toolCallId: thread.pending.toolCallId, answer };
-      if (flags.wait) {
-        out({ thread_id: id, ...(await runInline(tm, registry, thread, { resumeInput })) });
-      } else {
-        spawnRunner({ threadId: id, resumeInput });
-        out({ thread_id: id, status: "started" });
-      }
+      spawnRunner({ threadId: id, resumeInput });
+      out({ thread_id: id, status: "started" });
       return;
+    }
+
+    case "wait": {
+      // Watcher, not worker (ADR 0015): poll the thread meta with backoff until
+      // the run leaves "running", then print the collected outcome. On timeout
+      // only THIS call dies — the detached runner keeps going, so the lead can
+      // wait again or let the message hook deliver the result passively. Doubles
+      // as "collect": called on an already-finished thread it returns at once.
+      const target = positionals[0];
+      if (!target) fail("wait: <id|name> is required");
+      const timeoutS = flags.timeout != null ? Number(flags.timeout) : 300;
+      if (!Number.isFinite(timeoutS) || timeoutS < 0) fail("wait: --timeout must be a non-negative number of seconds");
+      let thread = await resolveTarget(tm, cwd, target);
+      if (!thread) fail(`no thread '${target}' (and no reusable agent by that name)`);
+
+      const deadline = Date.now() + timeoutS * 1000;
+      let delay = 250; // ms, backs off to a 2s cap — no busy-loop
+      for (;;) {
+        thread = await recoverIfStale(tm, await tm.getThread(thread.id));
+        if (!thread) fail(`thread '${target}' disappeared while waiting`);
+        if (thread.status !== "running") {
+          const msgs = thread.status === "idle" ? await tm.readMessages(thread.id) : null;
+          out(decideWaitOutcome(thread, msgs));
+          return;
+        }
+        if (Date.now() >= deadline) {
+          out({
+            thread_id: thread.id,
+            status: "running",
+            timeout: true,
+            note: "still running — wait again or rely on the message hook",
+          });
+          return;
+        }
+        await sleep(Math.min(delay, Math.max(0, deadline - Date.now())));
+        delay = Math.min(delay * 2, 2000);
+      }
     }
 
     case "stop": {
@@ -356,26 +467,22 @@ async function main() {
       if (!thread) fail(`no thread '${id}'`);
       thread = await recoverIfStale(tm, thread);
       const msgs = await tm.readMessages(id);
-      out({
-        thread: {
-          thread_id: thread.id,
-          name: thread.name,
-          agent: thread.agentDef?.name,
-          status: thread.status,
-          summary: thread.summary || null,
-          description: thread.description,
-          cwd: thread.cwd,
-          pending: thread.pending,
-          error: thread.error,
-        },
-        recent: msgs.slice(-6),
-      });
+      // Surface the trace fold when the thread has a trace file — makes `show`
+      // the one-call structural view (state + spend), so the lead never reaches
+      // for the raw transcript. readTrace returns [] when there is no trace yet.
+      const entries = await readTrace(thread.cwd, thread.id);
+      const stats = entries.length ? compactStats(aggregateTrace(entries)) : null;
+      out(buildShowView(thread, msgs, stats));
       return;
     }
 
     default:
-      fail(`unknown verb '${verb ?? ""}'. Use: start | send | approve | answer | stop | interrupt | list | show`);
+      fail(`unknown verb '${verb ?? ""}'. Use: start | send | approve | answer | wait | stop | interrupt | list | show`);
   }
 }
 
-main().catch((err) => fail(err.message));
+// Only drive the CLI when run as the entrypoint — importing this module (the
+// tests exercise decideWaitOutcome / buildShowView directly) must not run main.
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+  main().catch((err) => fail(err.message));
+}

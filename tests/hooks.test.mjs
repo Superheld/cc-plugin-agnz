@@ -21,6 +21,7 @@ import {
   readWsFingerprint,
   writeWsFingerprint,
   computeThreadFingerprint,
+  isFencedTranscriptRead,
 } from "../scripts/hooks/_lib.mjs";
 
 let ws;
@@ -360,6 +361,52 @@ test("formatThreadsDetailed keeps the legacy 'tok' form when ctxTokens is absent
     { id: "1a2b3c4d", name: "dev", status: "running", spend: { turns: 5, tokens: 1234 } },
   ]);
   assert.match(out, /dev:1a2b3c4d — running · 5 turns · 1,234 tok/);
+});
+
+// ── ADR 0015 §4: the PreToolUse fence decision ───────────────────────────────
+
+test("isFencedTranscriptRead blocks a Read of a thread transcript", () => {
+  assert.equal(
+    isFencedTranscriptRead("Read", "/home/u/proj/.claude/agnz/threads/abc123.jsonl"),
+    true,
+  );
+});
+
+test("isFencedTranscriptRead blocks a Read of a thread trace", () => {
+  assert.equal(
+    isFencedTranscriptRead("Read", "/home/u/proj/.claude/agnz/threads/abc123.trace.jsonl"),
+    true,
+  );
+});
+
+test("isFencedTranscriptRead allows a Read of meta.json (not .jsonl)", () => {
+  assert.equal(
+    isFencedTranscriptRead("Read", "/home/u/proj/.claude/agnz/threads/abc123.meta.json"),
+    false,
+  );
+});
+
+test("isFencedTranscriptRead allows a .jsonl outside the agnz threads dir", () => {
+  // messages.jsonl lives at the workspace root, not under threads/
+  assert.equal(
+    isFencedTranscriptRead("Read", "/home/u/proj/.claude/agnz/messages.jsonl"),
+    false,
+  );
+  // an unrelated project .jsonl is never fenced
+  assert.equal(isFencedTranscriptRead("Read", "/home/u/proj/data/events.jsonl"), false);
+});
+
+test("isFencedTranscriptRead only fences Read, not Grep/Bash/other tools", () => {
+  const transcript = "/home/u/proj/.claude/agnz/threads/abc123.jsonl";
+  assert.equal(isFencedTranscriptRead("Grep", transcript), false);
+  assert.equal(isFencedTranscriptRead("Bash", transcript), false);
+  assert.equal(isFencedTranscriptRead("Edit", transcript), false);
+});
+
+test("isFencedTranscriptRead tolerates a missing / non-string path", () => {
+  assert.equal(isFencedTranscriptRead("Read", undefined), false);
+  assert.equal(isFencedTranscriptRead("Read", null), false);
+  assert.equal(isFencedTranscriptRead("Read", 42), false);
 });
 
 test("formatThreadsDetailed never collapses actionable threads regardless of age", () => {
