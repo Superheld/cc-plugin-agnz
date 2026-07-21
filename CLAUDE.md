@@ -93,11 +93,14 @@ The parent calls `bin/agnz.mjs` via Bash; every verb prints JSON to stdout.
 | `start <name> ["task"]` | Create a thread (`--agent <def>` or `--inline`). Reuse-aware. |
 | `send <name\|id> "msg"` | Send a task; reuses the live thread of that name, else needs an id. |
 | `wait <id\|name> [--timeout <s>]` | Poll a detached run until it leaves `running`; prints the outcome (default 300 s timeout; `timeout:true` after, the runner keeps going). |
-| `approve <id> allow\|deny [--persist]` | Resolve an approval pause (the pending toolCallId is implicit). |
-| `answer <id> "text"` | Resolve an `AskUser` question pause. |
-| `interrupt <id> ["directive"]` | Hard-interrupt: abort the current step (incl. a runaway Bash/Grep), stay resumable. |
-| `stop <id>` | Kill a live thread (SIGTERM to the runner); transcript remains. |
-| `list` / `show <id>` | Inspect threads; `show` is the lean structural view (status, pending, spend, trace stats — no raw transcript); `list` recovers dead-runner threads. |
+| `approve <id\|name> allow\|deny [--persist]` | Resolve an approval pause (the pending toolCallId is implicit). |
+| `answer <id\|name> "text"` | Resolve an `AskUser` question pause. |
+| `interrupt <id\|name> ["directive"]` | Hard-interrupt: abort the current step (incl. a runaway Bash/Grep), stay resumable. |
+| `stop <id\|name>` | End + archive a thread (SIGTERM to a live runner); transcript remains, hidden from the list. |
+| `remove <id\|name>` / `remove --status stopped\|error` | **Delete** a thread permanently — sweeps every `threads/<id>.*` file + index entry. Live threads must be stopped first. |
+| `list` / `show <id\|name>` | Inspect threads; `show` is the lean structural view (status, pending, spend, trace stats — no raw transcript); `list` recovers dead-runner threads. |
+
+All thread-addressing verbs resolve a name to its most recent live thread (same `resolveTarget` path), so `stop <name>` works exactly like `send <name>`.
 
 Always detached — results reach the parent via `messages.jsonl` + the `UserPromptSubmit` hook, or collect sooner with `agnz wait`. There is no `outputSchema`/`structuredContent` any more (that was MCP) — stdout JSON is the contract. Profile management is a slash command (`/agnz:setup`).
 
