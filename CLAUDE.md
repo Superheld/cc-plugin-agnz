@@ -26,9 +26,8 @@ lib/runner.mjs → lib/loop.mjs   ← LLM ↔ tool loop, persists transcript, th
     ├──▶ tools/         (LS, Read, Grep, Edit, Write, Bash, AskUser, SendMessage, Skill)
     ├──▶ sandbox.mjs    (cwd lock + permission policy)
     ├──▶ workspace-store.mjs  (per-project state under <cwd>/.claude/agnz/)
-    ├──▶ thread-index.mjs     (user-wide thread_id → cwd map)
+    ├──▶ config.mjs           (two-layer config: user defaults + project overrides)
     ├──▶ threads.mjs          (thread lifecycle on top of workspace-store)
-    ├──▶ profiles.mjs         (named LLM endpoint configs, user-wide)
     └──▶ llm/openai-compatible.mjs   (native fetch, no SDK)
 ```
 
@@ -49,9 +48,8 @@ lib/runner.mjs → lib/loop.mjs   ← LLM ↔ tool loop, persists transcript, th
 | `lib/messages-log.mjs` | Durable append-only `messages.jsonl` at the workspace root. `appendMessage`, `readMessagesSince(cursor)`, `readAllMessages`. Monotonic `m000001`-style ids. Per-workspace append mutex so concurrent `publish()` calls cannot race on id allocation. |
 | `lib/event-bus.mjs` | In-process pub/sub. `subscribe`/`unsubscribe`/`publish(cwd, message)`. `publish` appends to the durable log first, then fans out to matching direct subscribers and any `"*"` broadcasters. Fires an OS notification via `notifier.mjs` when a message is `urgent` and addressed to `parent`. |
 | `lib/notifier.mjs` | Platform-specific OS notification shim (ADR 0002 §6c). macOS uses `osascript` with AppleScript-escaped title/body; Linux uses `notify-send`; other platforms are silent no-ops. `spawn` (never `exec`), detached, fire-and-forget — a missing command never throws out of `notify()`. |
-| `lib/thread-index.mjs` | User-wide `{threadId → cwd}` map at `~/.claude/agnz/thread-index.json`. Needed because the CLI verbs take only a `thread_id` but the actual files live under the project's cwd — the index resolves the id back to the right workspace store. |
+| `lib/config.mjs` | ADR 0017: the unified two-layer config. `~/.claude/agnz/config.json` (user defaults) + `<cwd>/.claude/agnz/config.json` (optional project overrides, committable), one schema (`{profiles, mappings}`), merged per entry with project winning; every effective value carries its origin. `resolveProfileForModel` is the one model→profile resolution path. Fails loudly (naming ADR 0017) when a legacy `profiles.json` exists without a `config.json`. |
 | `lib/data-dir.mjs` | Resolves two data roots. `resolveUserDir()` returns `~/.claude/agnz/` by default (overridable by `$AGNZ_DATA_DIR`). `resolveProjectDir(cwd)` returns `<cwd>/.claude/agnz/`. |
-| `lib/profiles.mjs` | Named `{baseUrl, apiKey, model, temperature, maxTurns, llmTimeoutMs, ...}` bundles. User-wide. CRUD + ping test. No `defaultPolicy` — policy comes from the agent def, not the profile. |
 | `lib/proc-lock.mjs` | Cross-process advisory lock (atomic mkdir). Serialises read-modify-write on shared state files (`messages.jsonl`, thread `meta.json`, the index) across the many short-lived CLI/runner processes. |
 | `lib/atomic-write.mjs` / `lib/file-lock.mjs` | `atomicWriteFile` (tmp+rename) and `withFileLock` (in-process per-key mutex) — the foundation for safe concurrent writes. |
 | `lib/trace.mjs` | Append-only runtime trace. Writes `<thread-id>.trace.jsonl` alongside the transcript. Event types (ADR 0011 §1): `thread_start` (first run only — tools, model, agent, profile + system prompt), `turn_start` (before every LLM call), `llm_call` (latency + finishReason + normalized usage), `tool_call` (name, latency, outcome), `repair` (JSON-arg repair), `pause`, `thread_end` (reason + per-run totals). Field naming is OpenTelemetry-span-mappable. Always fire-and-forget; failures are silent so tracing never crashes the loop. |
@@ -93,11 +91,14 @@ The parent calls `bin/agnz.mjs` via Bash; every verb prints JSON to stdout.
 | `start <name> ["task"]` | Create a thread (`--agent <def>` or `--inline`). Reuse-aware. |
 | `send <name\|id> "msg"` | Send a task; reuses the live thread of that name, else needs an id. |
 | `wait <id\|name> [--timeout <s>]` | Poll a detached run until it leaves `running`; prints the outcome (default 300 s timeout; `timeout:true` after, the runner keeps going). |
-| `approve <id> allow\|deny [--persist]` | Resolve an approval pause (the pending toolCallId is implicit). |
-| `answer <id> "text"` | Resolve an `AskUser` question pause. |
-| `interrupt <id> ["directive"]` | Hard-interrupt: abort the current step (incl. a runaway Bash/Grep), stay resumable. |
-| `stop <id>` | Kill a live thread (SIGTERM to the runner); transcript remains. |
-| `list` / `show <id>` | Inspect threads; `show` is the lean structural view (status, pending, spend, trace stats — no raw transcript); `list` recovers dead-runner threads. |
+| `approve <id\|name> allow\|deny [--persist]` | Resolve an approval pause (the pending toolCallId is implicit). |
+| `answer <id\|name> "text"` | Resolve an `AskUser` question pause. |
+| `interrupt <id\|name> ["directive"]` | Hard-interrupt: abort the current step (incl. a runaway Bash/Grep), stay resumable. |
+| `stop <id\|name>` | End + archive a thread (SIGTERM to a live runner); transcript remains, hidden from the list. |
+| `remove <id\|name>` / `remove --status stopped\|error` | **Delete** a thread permanently — sweeps every `threads/<id>.*` file + index entry. Live threads must be stopped first. |
+| `list` / `show <id\|name>` | Inspect threads; `show` is the lean structural view (status, pending, spend, trace stats — no raw transcript); `list` recovers dead-runner threads. |
+
+All thread-addressing verbs resolve a name to its most recent live thread (same `resolveTarget` path), so `stop <name>` works exactly like `send <name>`.
 
 Always detached — results reach the parent via `messages.jsonl` + the `UserPromptSubmit` hook, or collect sooner with `agnz wait`. There is no `outputSchema`/`structuredContent` any more (that was MCP) — stdout JSON is the contract. Profile management is a slash command (`/agnz:setup`).
 
@@ -151,8 +152,7 @@ Default `~/.claude/agnz/`. Overridable by `$AGNZ_DATA_DIR`.
 
 ```
 ~/.claude/agnz/
-├── profiles.json            ← user-wide profile store
-└── thread-index.json        ← thread_id → cwd map
+└── config.json              ← user-layer config: {profiles, mappings}
 ```
 
 This root holds only things that are truly user-wide and cross-project. No threads, no memory, no workspace state lives here.
@@ -169,7 +169,7 @@ Always `<cwd>/.claude/agnz/`. Co-located with other Claude Code project state un
     └── <thread-id>.jsonl             ← append-only transcript
 ```
 
-`workspace.json` today is a minimal skeleton (`schemaVersion`, `name`, `cwd`, `createdAt`, `updatedAt`). It is created lazily on the first `agnz start` in a project. ADRs 0002 and 0004 define the fields it will grow (`items`, `mode`, `reviewRequired`) and the sibling files that will join it (`messages.jsonl`, `cursors/`, `scratch/`). Agent definitions live in CC's standard locations (`~/.claude/agents/` and `<cwd>/.claude/agents/`), not under `agnz/`.
+`workspace.json` is pure workspace **state** (ADR 0017): `schemaVersion: 2`, timestamps, and `parent: {cursor, offset, threadFingerprint}` — the parent's delivery position, written by the CC hooks after stdout drain (there is no `cursors/` directory any more). `name`/`cwd` were dropped (derivable from the file's location; a stored cwd was observed lying after a project move). Config lives in `config.json` (either layer). Per thread there are up to four files: `<id>.meta.json`, `<id>.jsonl` (transcript), `<id>.trace.jsonl`, and `<id>.system.txt` (the frozen prompt prefix, write-once — extracted from the meta where it was ~75 % of every rewrite). `agnz remove` sweeps all of them by the `<id>.` prefix. ADR 0004 will grow board fields on `workspace.json`. Agent definitions live in CC's standard locations (`~/.claude/agents/` and `<cwd>/.claude/agents/`), not under `agnz/`.
 
 The old `memory/` directory is gone. The old `threads/` directory under the user-wide root is gone.
 
@@ -208,7 +208,7 @@ LM Studio default endpoint is `http://localhost:1234/v1`. After installing the p
 ```bash
 node ${CLAUDE_PLUGIN_ROOT}/skills/agnz-setup/scripts/companion.mjs setup add lmstudio-devstral http://localhost:1234/v1 mistralai/devstral-small-2-2512
 ```
-Profile resolution at thread start: `workspace.json → modelProfileMappings[agentDef.model]` → fallback to `modelProfileMappings["_default"]` → profile name string. Configure mappings via `/agnz:setup`.
+Profile resolution at thread start (ADR 0017): merged config `mappings[agentDef.model]` → `mappings["_default"]` → the identifier as a profile name — all from the two-layer `config.json` (project overrides user, per entry). Configure via `/agnz:setup`; every write command takes `--project` to target the project override layer, and `info` renders the effective merged view with per-value origins.
 
 ## Useful commands during development
 
@@ -259,6 +259,7 @@ The ADRs under [`docs/adr/`](./docs/adr/) document the architecture. Read them b
 - **[ADR 0014 — CLI replaces the MCP server.](./docs/adr/0014-cli-replaces-mcp.md)** The parent drives agnz through the `bin/agnz.mjs` CLI (verbs, Bash, JSON on stdout) instead of an MCP stdio server. Each run is a detached `lib/runner.mjs` process; results still reach the parent via `messages.jsonl` + the hook. **Implemented (0.13.0):** removed `mcp/server.mjs`/`mcp/jsonrpc.mjs`/`run-tracker.mjs`/`.mcp.json`; added `bin/agnz.mjs`, `lib/runner.mjs`, `lib/orchestrate.mjs`; foundation hardened for the multi-process model (`lib/proc-lock.mjs` cross-process mkdir locks + atomic tmp+rename on `messages.jsonl`/meta/index); plus reuse-by-name, rolling thread summaries (ADR 0007), and opportunistic stale-run recovery. **Parent invocation:** CC adds an enabled plugin's `bin/` to the parent shell's `PATH`, so the parent runs `agnz <verb>` by bare name from any cwd (no `$CLAUDE_PLUGIN_ROOT` needed); `bin/agnz` is a thin sh wrapper over `bin/agnz.mjs`.
 - **[ADR 0015 — Lead-side context discipline.](./docs/adr/0015-lead-context-discipline.md)** The lead-side counterpart to ADR 0013: `--wait` and direct transcript reads both undermine the small-context goal agnz exists for. **Implemented.** `--wait` removed from `start`/`send`/`approve`/`answer` in favour of the `agnz wait` watcher verb; `agnz show` is now the lean structural view (meta minus `systemPromptSnapshot`/`agentDef` body, capped message excerpts, folded-in trace stats); the "ask, don't read" escalation ladder is documented across the skills; a `PreToolUse` hook (`scripts/hooks/pre-tool-use.mjs`) blocks direct `Read` of thread transcripts/traces (`Grep` and `inspect.sh` stay open). The `messages.jsonl` schema-sample mode floated in the ADR did not ship.
 - **[ADR 0016 — Harness calls: the local model as infrastructure service.](./docs/adr/0016-harness-calls.md)** Use the local LLM for small tool-less calls that improve agnz's own infrastructure (e.g. a real rolling-summary call instead of the current heuristic), not just for agent work. **Proposed — deferred pending dogfooding** of the cheaper mechanical resume-card alternative, and pending validation of queueing latency against a serialized local inference server.
+- **[ADR 0017 — Config and state consolidation.](./docs/adr/0017-config-and-state-consolidation.md)** One config schema in two layers (`config.json`, user defaults + committable project overrides, project wins per entry); `workspace.json` reduced to pure state carrying the parent's delivery position (`cursors/` gone); the user-wide thread index deleted (id→cwd resolution is cwd-scoped, `--cwd` for the rare cross-project call); `systemPromptSnapshot` extracted to a write-once `<id>.system.txt`. **Implemented (0.18.0, breaking — no migration):** old layouts fail loudly with a pointer to `/agnz:setup`; the hooks read legacy cursors once as a fallback so no delivered mail is re-injected.
 
 When implementing any ADR, follow it as the spec and keep deviations visible (either an amendment in the ADR or a note in the commit message).
 
@@ -267,5 +268,5 @@ When implementing any ADR, follow it as the spec and keep deviations visible (ei
 - **No streaming.** A detached run returns one outcome at a time. Intermediate progress is not observable to the parent. ADR 0002 changes this picture for agent-to-parent communication via `messages.jsonl`.
 - **Test coverage** (ADR 0011 §4). `node:test` now covers: sandbox path/symlink-escape + permissions (`tests/sandbox.test.mjs`), loop pause/resume (approval allow/deny, question answer, leftover-drain) + error propagation (`tests/loop-resume.test.mjs`), mailbox drain + cursor advance (`tests/mailbox.test.mjs`), the trace schema (`tests/loop-trace.test.mjs`), trace-stats (`tests/trace-stats.test.mjs`), plus the existing workspace-store/thread-index/data-dir plumbing. Loop tests inject a fake LLM via `ctx.chat` and the shared `tests/_fake-llm.mjs` harness. Run `node --test tests/*.test.mjs` — the full suite is green (the former known-red `items: []` expectation in `tests/workspace-store.test.mjs` no longer fails).
 - **Bash sessionCommands are session-scoped only.** Approved commands are not persisted across separate runs. A fresh session re-asks for every command. ADR 0009's `allowedCommands` workspace lists were the planned fix but were removed for simplicity — revisit if this becomes painful.
-- **Multi-session cursor race.** The parent message cursor (`cursors/parent.json`) is per-workspace, not per-session. With two Claude Code sessions open on the same project, whichever session's hook fires first advances the cursor, and the other session never sees those messages. Accepted limitation — per-session cursors were deliberately not built (they'd leave cursor corpses behind for every dead session, and the multi-session-on-one-project case is rare enough that the effort isn't justified yet).
+- **Multi-session cursor race.** The parent message cursor (`workspace.json` → `parent`) is per-workspace, not per-session. With two Claude Code sessions open on the same project, whichever session's hook fires first advances the cursor, and the other session never sees those messages. Accepted limitation — per-session cursors were deliberately not built (they'd leave cursor corpses behind for every dead session, and the multi-session-on-one-project case is rare enough that the effort isn't justified yet).
 - **License.** MIT is declared in `plugin.json` and README but no `LICENSE` file exists in the repo root yet.

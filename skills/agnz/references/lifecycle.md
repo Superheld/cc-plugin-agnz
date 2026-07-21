@@ -83,13 +83,27 @@ agnz interrupt abc "Stop — the approach is wrong, use the existing helper inst
 Closes a thread: signals its runner if one is live, sets status `stopped`, and **keeps the transcript** on disk. A stopped thread drops out of the workspace list — and out of the summary the parent sees each prompt — so this is also the **cleanup verb**.
 
 ```bash
-agnz stop abc
-→ {"thread_id":"abc","status":"stopped","note":"archived — transcript kept; resume with 'agnz send'"}
+agnz stop devstral-e1b        # name or id — same addressing as send/wait
+→ {"thread_id":"abc…","status":"stopped","note":"archived — transcript kept; resume with 'agnz send'"}
 ```
 
 `stop` **archives, it does not delete.** The `.meta.json` + `.jsonl` stay on disk for later inspection — reach for `agnz show <id>` first; the transcript file itself is fenced against direct `Read` (see "Inspecting a thread" below). Use it when an `idle` thread's work is done and you won't resume it.
 
 **Keeping the workspace legible.** Threads stay listed as long as they are *open* — and `idle` counts as open, like a paused conversation you can resume with `send`. Nothing decays them automatically; that is deliberate, so you never lose a thread you meant to continue. The flip side: finished threads you leave `idle` pile up in the parent's per-prompt summary and slowly cost context. The workspace block shows each thread's age (e.g. `idle · 3d`) and, once idle threads accumulate, a one-line reminder. The habit: when a sub-agent's job is truly done, `stop` it. Resuming later still works — the transcript is kept.
+
+### `remove` — delete a thread permanently
+
+The disposal path: deletes **every** file belonging to the thread (meta, transcript, trace — matched by filename prefix, so no companion file is ever left behind) and its index entry. Irreversible. Live threads (`running`/`awaiting_input`) must be `stop`ped first.
+
+```bash
+agnz remove old-probe             # one thread, by name or id
+agnz remove --status stopped      # sweep: every archived thread in this workspace
+agnz remove --status error        # sweep: every crashed thread
+```
+
+The workspace `messages.jsonl` is untouched — communication history survives its participants. Rule of thumb: `stop` when you're done, `remove` when you'd otherwise never look at it again.
+
+All thread-addressing verbs (`send`, `wait`, `approve`, `answer`, `stop`, `remove`, `interrupt`, `show`) accept a **name or an id** interchangeably; a name resolves to its most recent live thread.
 
 ### `list` / `show`
 

@@ -11,7 +11,7 @@
 // `lib/` so that the plugin's hook scripts keep working even if the
 // surrounding module layout is refactored.
 
-import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, renameSync, statSync, openSync, readSync, closeSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, renameSync, rmdirSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 /**
@@ -75,18 +75,77 @@ export function resolveWorkspace(cwd) {
  * next write). Both fields degrade independently to their safe defaults.
  */
 export function readParentCursor(ws) {
-  const path = resolve(ws, "cursors", "parent.json");
-  if (!existsSync(path)) return { cursor: null, offset: 0 };
+  const parent = readParentState(ws);
+  const cursor = typeof parent?.cursor === "string" ? parent.cursor : null;
+  const offset =
+    typeof parent?.offset === "number" && Number.isFinite(parent.offset) && parent.offset >= 0
+      ? parent.offset
+      : 0;
+  return { cursor, offset };
+}
+
+/**
+ * The parent's delivery state lives in workspace.json's `parent` field
+ * (ADR 0017) — { cursor, offset, threadFingerprint } — mirroring how each
+ * sub-agent keeps its inboxCursor in its own thread meta. Reads fall back
+ * to the legacy cursors/ files so an upgraded install does not re-deliver
+ * old messages once. Missing/malformed anywhere → null.
+ */
+function readParentState(ws) {
   try {
-    const data = JSON.parse(readFileSync(path, "utf8"));
-    const cursor = typeof data?.cursor === "string" ? data.cursor : null;
-    const offset =
-      typeof data?.offset === "number" && Number.isFinite(data.offset) && data.offset >= 0
-        ? data.offset
-        : 0;
-    return { cursor, offset };
-  } catch {
-    return { cursor: null, offset: 0 };
+    const data = JSON.parse(readFileSync(resolve(ws, "workspace.json"), "utf8"));
+    if (data?.parent && typeof data.parent === "object") return data.parent;
+  } catch {}
+  // Legacy layout (pre-0.18): two files under cursors/.
+  const legacy = {};
+  try {
+    Object.assign(legacy, JSON.parse(readFileSync(resolve(ws, "cursors", "parent.json"), "utf8")));
+  } catch {}
+  try {
+    Object.assign(legacy, JSON.parse(readFileSync(resolve(ws, "cursors", "parent-ws.json"), "utf8")));
+  } catch {}
+  return legacy;
+}
+
+/**
+ * Merge a patch into workspace.json's `parent` field via read-merge +
+ * tmp-file + atomic rename. Uses the same `<file>.lock` mkdir mutex as
+ * lib/proc-lock.mjs so hook writes and runtime writes exclude each other;
+ * if the lock is held past a short spin, proceed unlocked rather than
+ * stall Claude's prompt flow — the atomic rename still prevents torn
+ * files, and a lost updatedAt bump is the worst concurrent outcome.
+ */
+function writeParentState(ws, patch) {
+  const file = resolve(ws, "workspace.json");
+  const lockDir = `${file}.lock`;
+  let locked = false;
+  const spinUntil = Date.now() + 250;
+  while (!locked && Date.now() < spinUntil) {
+    try {
+      mkdirSync(lockDir);
+      locked = true;
+    } catch {}
+  }
+  try {
+    let current = {};
+    try {
+      current = JSON.parse(readFileSync(file, "utf8")) || {};
+    } catch {}
+    const prev = current.parent && typeof current.parent === "object" ? current.parent : {};
+    const next = {
+      schemaVersion: 2,
+      createdAt: current.createdAt ?? Date.now(),
+      ...current,
+      updatedAt: Date.now(),
+      parent: { ...prev, ...patch },
+    };
+    atomicWriteJson(file, next);
+  } finally {
+    if (locked) {
+      try {
+        rmdirSync(lockDir);
+      } catch {}
+    }
   }
 }
 
@@ -109,14 +168,8 @@ export function atomicWriteJson(path, obj) {
  * malformed file → null (treated as "nothing shown yet").
  */
 export function readWsFingerprint(ws) {
-  const path = resolve(ws, "cursors", "parent-ws.json");
-  if (!existsSync(path)) return null;
-  try {
-    const data = JSON.parse(readFileSync(path, "utf8"));
-    return typeof data?.threadFingerprint === "string" ? data.threadFingerprint : null;
-  } catch {
-    return null;
-  }
+  const parent = readParentState(ws);
+  return typeof parent?.threadFingerprint === "string" ? parent.threadFingerprint : null;
 }
 
 /**
@@ -126,9 +179,7 @@ export function readWsFingerprint(ws) {
  * shown that it never saw.
  */
 export function writeWsFingerprint(ws, fingerprint) {
-  const dir = resolve(ws, "cursors");
-  mkdirSync(dir, { recursive: true });
-  atomicWriteJson(resolve(dir, "parent-ws.json"), { threadFingerprint: fingerprint });
+  writeParentState(ws, { threadFingerprint: fingerprint });
 }
 
 /**
@@ -153,9 +204,7 @@ export function computeThreadFingerprint(threads) {
  * read starts where this one stopped instead of re-scanning from the top.
  */
 export function writeParentCursor(ws, cursor, offset = 0) {
-  const dir = resolve(ws, "cursors");
-  mkdirSync(dir, { recursive: true });
-  atomicWriteJson(resolve(dir, "parent.json"), { cursor, offset });
+  writeParentState(ws, { cursor, offset });
 }
 
 /**
