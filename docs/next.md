@@ -57,6 +57,10 @@ Findings the three-lens review raised and we consciously accepted rather than fi
 
 ## Watch
 
-- **Test-suite flake.** One unreproduced 2-test failure observed 2026-07-20; 15 clean
-  `node --test tests/*.test.mjs` runs since. If it recurs, **capture the failing test
-  names first** — without them there's nothing to chase.
+- **Test-suite flake.** Two occurrences (2026-07-20: 2 tests; 2026-07-21: 1 test), both
+  in the run chained directly after a `git merge`, both green on immediate retry, names
+  not captured either time. Does NOT reproduce via bare branch-switch cycles (5 tried)
+  or back-to-back runs (15+ clean). Working hypothesis: I/O-load-sensitive timing
+  (proc-lock acquisition or a child-process timeout) in the post-git moment. If it
+  recurs, **run with full output and capture the failing test names first** — counts
+  alone (the mistake made twice now) leave nothing to chase.
