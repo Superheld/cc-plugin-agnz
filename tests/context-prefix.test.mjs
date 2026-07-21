@@ -62,16 +62,18 @@ test("system prompt is byte-stable across turns and excludes subdir CLAUDE.md", 
   const outcome = await runThread({ thread, threadMgr, sandbox, registry, profile, chat, userMessage: "read it" });
   assert.equal(outcome.status, "final");
 
-  // Every system-prompt snapshot recorded in the trace must be identical.
+  // thread_start carries the one canonical system-prompt copy; turn_start no
+  // longer duplicates it (the prefix is frozen — see ADR 0012 phase 1 — so a
+  // per-turn copy would just be identical ballast, ADR 0011 amendment).
   const trace = readTrace(projectCwd, thread.id);
-  const prompts = trace
-    .filter((e) => e.type === "thread_start" || e.type === "turn_start")
-    .map((e) => e.systemPrompt);
-  assert.ok(prompts.length >= 2, "expected a thread_start and a turn_start");
-  for (const p of prompts) assert.equal(p, prompts[0], "system prompt drifted between turns");
+  const starts = trace.filter((e) => e.type === "thread_start");
+  const turnStarts = trace.filter((e) => e.type === "turn_start");
+  assert.equal(starts.length, 1, "expected exactly one thread_start");
+  assert.ok(turnStarts.length >= 1, "expected at least one turn_start");
+  for (const e of turnStarts) assert.equal(e.systemPrompt, undefined, "turn_start must not carry systemPrompt");
 
   // The subdir CLAUDE.md must NOT be in the (frozen) system prompt...
-  assert.doesNotMatch(prompts[0], /SUBDIR RULES/);
+  assert.doesNotMatch(starts[0].systemPrompt, /SUBDIR RULES/);
 
   // ...it must be injected once into history as a user message instead.
   const history = await threadMgr.readMessages(thread.id);

@@ -40,9 +40,10 @@ Avoid delegation for work needing deep reasoning — local models are limited.
 | `interrupt <id> ["directive"]` | Hard interrupt a runaway/working agent: aborts the current step, leaves it resumable, optionally queues a directive. |
 | `stop <id>` | End a thread (kills its runner; transcript persists). |
 | `list [--status <s>] [--all]` | List threads in this workspace (`--all` = every workspace). |
-| `show <id>` | Thread state + last few transcript messages. |
+| `show <id>` | Lean structural view: status, pending, spend, trace stats — no raw transcript. |
+| `wait <id\|name> [--timeout <s>]` | Poll a detached run until it leaves `running`; prints the outcome (default timeout 300s). |
 
-Add `--wait` to `start`/`send`/`approve`/`answer` to run the segment synchronously and get the outcome inline (for short tasks). Without it, the run is detached and results arrive via the hook.
+Runs are always detached — there is no `--wait` flag any more. To collect a result in the same call (e.g. after starting several agents in parallel), poll with `agnz wait`: it watches the thread and prints the outcome once it leaves `running`, `content` included. On timeout it prints `{..., timeout:true}` and exits 0 — the runner keeps working underneath; call `wait` again or let the hook deliver the result later. Calling `wait` on a thread that's already finished just returns the outcome (collect mode).
 
 ## Resume, don't recreate
 

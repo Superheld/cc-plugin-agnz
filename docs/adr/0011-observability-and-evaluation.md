@@ -68,6 +68,8 @@ Five parts. All file-based and zero-dependency, consistent with the rest of the 
 | `pause` | approval/question pause | `turn`, `kind`, `tool` |
 | `thread_end` | terminal state | `reason` (`final`/`max_turns`/`error`/`stopped`), `turns`, `totals{...}` |
 
+> **Amendment (ADR 0012 phase 1):** `turn_start` no longer carries `systemPrompt`. That field made sense before the prefix freeze, when the system prompt could grow per turn (visited-dir CLAUDE.md injection) and a per-turn copy was drift observation. Since `thread.systemPromptSnapshot` is now reused byte-identically every turn, a `turn_start` copy is guaranteed-identical ballast — `thread_start` is the single canonical copy for the life of the thread.
+
 `usage` is folded into `llm_call` (it was a standalone event in 0.11.9; superseded). The existing `turn === 0 ? "thread_start" : "turn_start"` branch in `loop.mjs` is kept; the new events are added at their natural call sites:
 
 - `llm_call` wraps the `chat()` call (timestamp before/after for `latencyMs`; `finishReason` and `usage` already returned by the client).

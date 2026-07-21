@@ -15,7 +15,10 @@ Every verb prints a JSON object (or array) to **stdout**. Errors print
 | Flag | Applies to | Meaning |
 |---|---|---|
 | `--cwd <path>` | all | Workspace / sandbox root. Defaults to `$AGNZ_CWD` or the current dir. |
-| `--wait` | start, send, approve, answer | Run the segment **inline** and return the outcome, instead of spawning a detached runner. |
+
+There is no `--wait` flag any more — every run is detached (ADR 0015). Passing
+`--wait` to `start`/`send`/`approve`/`answer` errors, pointing at `agnz wait`
+below.
 
 ## Verbs
 
@@ -42,6 +45,40 @@ mailbox and delivered at the next turn boundary. Error threads are refused.
 agnz send researcher-1 "Now also check the test files."
 → {"thread_id":"abc…","status":"started"}   # or "queued"
 ```
+
+### `wait <id|name> [--timeout <s>]`
+
+Poll a detached run until it leaves `running`, then print the outcome — a
+*watcher*, not a worker. Accepts a thread id or a name (resolved the same way
+`send` resolves names).
+
+```bash
+agnz wait researcher-1 --timeout 120
+→ {"thread_id":"abc…","status":"idle","content":"…"}
+```
+
+`wait` prints the thread's persisted status. The terminal statuses you can
+collect are: `idle` (the run finished — carries `content`, the distilled final
+answer), `awaiting_input` (paused — carries `pending`), `error` (crashed —
+carries `error`), and `stopped` (archived). A finished run is `idle`, not a
+distinct "final" status.
+
+Default timeout is 300 s. On timeout, prints the current state with
+`timeout:true` and exits `0` — the watching call gave up, the detached runner
+underneath keeps going:
+
+```bash
+agnz wait researcher-1 --timeout 5
+→ {"thread_id":"abc…","status":"running","timeout":true}
+```
+
+Call `wait` again, or let the `UserPromptSubmit` hook deliver the result
+passively at your next prompt. Calling `wait` on a thread that's already left
+`running` (idle, `awaiting_input`, stopped, error) returns its outcome
+immediately — a **collect** call for a run you already know finished.
+
+This is the replacement for `--wait`: start several runs detached, do other
+work, then collect each with `wait` — parallel instead of serial.
 
 ### `approve <id> allow|deny [--persist]`
 
@@ -94,17 +131,31 @@ agnz list
 
 ### `show <id>`
 
-Full thread state (status, pending, error, summary, cwd) plus the last few
-transcript messages.
+The lean structural view of a thread (ADR 0015) — the default first-reach
+inspection tool. Returns `meta.json`'s content minus its two heavy embedded
+fields (`systemPromptSnapshot`, the agent def's full body), plus status,
+pending, error, summary, cwd, and spend. Each recent-message excerpt is
+capped (~500 chars) with an elision marker reporting the original size, so a
+routine status check can never forward a full tool result. It also folds in
+the thread's aggregated trace stats — turns, tokens, latency, tool outcomes,
+repair rate, the same fold `lib/trace-stats.mjs` computes — so one call
+answers "what is this thread, what did it do, how heavy is it."
+
+Deliberately **not** included: the raw transcript. For that, ask the thread
+(`agnz send <name> "…"`) or use the `agnz-threads` skill's `inspect.sh` for a
+capped tail — direct `Read` of the transcript/trace `.jsonl` files is blocked
+by a `PreToolUse` hook (see
+[ADR 0015](./adr/0015-lead-context-discipline.md)).
 
 ## How results reach the parent
 
-Detached runs (the default) deliver their result via
+Every run is detached (ADR 0015). Results are delivered via
 `SendMessage(to:"parent")` → `messages.jsonl` → the `UserPromptSubmit` hook,
 which injects unread parent mail into the parent's next prompt (an OS
 notification fires for urgent mail). There is no push — the parent learns of a
-finished agent at its next turn. Use `--wait` to get the outcome synchronously
-in the same call, or `agnz show <id>` to peek any time.
+finished agent at its next turn, unless it explicitly collects sooner with
+`agnz wait <id>`. `agnz show <id>` peeks at the current state any time
+without blocking.
 
 ## Exit codes
 
