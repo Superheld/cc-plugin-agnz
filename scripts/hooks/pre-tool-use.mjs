@@ -33,8 +33,11 @@ try {
   const toolName = input.tool_name;
   const toolInput = input.tool_input || {};
   const filePath = toolInput.file_path;
+  // The hook envelope carries the session cwd; the fence helpers use it to
+  // normalize a relative/dot-segment path before matching (finding F).
+  const cwd = typeof input.cwd === "string" ? input.cwd : undefined;
 
-  if (isFencedTranscriptRead(toolName, filePath)) {
+  if (isFencedTranscriptRead(toolName, filePath, cwd)) {
     // exit 2 = block the tool; stderr is surfaced to the model as the reason.
     process.stderr.write(
       "agnz: reading a thread transcript floods the lead's context " +
@@ -45,7 +48,7 @@ try {
     process.exit(2);
   }
 
-  if (isFencedTranscriptGrep(toolName, toolInput)) {
+  if (isFencedTranscriptGrep(toolName, toolInput, cwd)) {
     // Matches-only Grep on a transcript stays fine — it's context-cheap. What's
     // blocked is a large -A/-B/-C context window, which drags the transcript
     // bulk back into the lead's context the transcript fence exists to keep out.

@@ -587,3 +587,50 @@ test("the Read fence is unaffected by the Grep fence addition", () => {
   assert.equal(isFencedTranscriptRead("Read", "/home/u/proj/.claude/agnz/threads/abc.jsonl"), true);
   assert.equal(isFencedTranscriptRead("Grep", "/home/u/proj/.claude/agnz/threads/abc.jsonl"), false);
 });
+
+// ── path normalization: fence must not fail open on relative/dot paths (F) ────
+
+test("isFencedTranscriptRead normalizes a relative path against cwd", () => {
+  const cwd = "/home/u/proj";
+  assert.equal(
+    isFencedTranscriptRead("Read", ".claude/agnz/threads/x.jsonl", cwd),
+    true,
+    "a relative transcript path must still be fenced",
+  );
+});
+
+test("isFencedTranscriptRead collapses dot-segments before matching", () => {
+  const cwd = "/home/u/proj";
+  assert.equal(
+    isFencedTranscriptRead("Read", "foo/../.claude/agnz/threads/x.jsonl", cwd),
+    true,
+    "a `..` detour into the threads dir must not dodge the fence",
+  );
+});
+
+test("isFencedTranscriptRead still passes absolute paths through unchanged", () => {
+  const cwd = "/home/u/other";
+  // The absolute path wins over cwd (resolve ignores the base for absolutes).
+  assert.equal(
+    isFencedTranscriptRead("Read", "/home/u/proj/.claude/agnz/threads/x.jsonl", cwd),
+    true,
+  );
+  assert.equal(isFencedTranscriptRead("Read", "/home/u/proj/src/app.js", cwd), false);
+});
+
+test("isFencedTranscriptGrep normalizes a relative/dot-segment path against cwd", () => {
+  const cwd = "/home/u/proj";
+  assert.equal(
+    isFencedTranscriptGrep("Grep", { path: ".claude/agnz/threads/x.jsonl", "-A": 50 }, cwd),
+    true,
+  );
+  assert.equal(
+    isFencedTranscriptGrep("Grep", { path: "foo/../.claude/agnz/threads", "-C": 50 }, cwd),
+    true,
+  );
+  // small context window still allowed even when normalized into the threads dir
+  assert.equal(
+    isFencedTranscriptGrep("Grep", { path: ".claude/agnz/threads/x.jsonl", "-A": 5 }, cwd),
+    false,
+  );
+});

@@ -348,11 +348,17 @@ function addressesParent(to) {
  * `/.claude/agnz/threads/` segment is sufficient and avoids false positives on
  * a stray relative path.
  */
-export function isFencedTranscriptRead(toolName, filePath) {
+export function isFencedTranscriptRead(toolName, filePath, cwd) {
   if (toolName !== "Read") return false;
   if (typeof filePath !== "string" || !filePath) return false;
-  if (!filePath.includes("/.claude/agnz/threads/")) return false;
-  return filePath.endsWith(".jsonl");
+  // Normalize before matching so the fence can't be dodged with a relative or
+  // dot-segment path (`.claude/agnz/threads/x.jsonl`, `foo/../.claude/agnz/…`).
+  // CC normally sends absolute paths (resolve leaves those untouched), but we
+  // don't rely on it. `path.resolve` collapses `.`/`..`; no symlink resolution
+  // — hooks must stay fast and never throw.
+  const abs = resolve(cwd || "/", filePath);
+  if (!abs.includes("/.claude/agnz/threads/")) return false;
+  return abs.endsWith(".jsonl");
 }
 
 // The Read fence (above) leaves Grep unconditionally open on transcripts because
@@ -377,15 +383,19 @@ const GREP_CONTEXT_FENCE_LINES = 10;
  * carries the flags under the literal keys "-A"/"-B"/"-C" (numbers) and the path
  * under `path`; `file_path` is accepted defensively in case a caller uses it.
  */
-export function isFencedTranscriptGrep(toolName, toolInput) {
+export function isFencedTranscriptGrep(toolName, toolInput, cwd) {
   if (toolName !== "Grep") return false;
   if (!toolInput || typeof toolInput !== "object") return false;
-  const path =
+  const rawPath =
     typeof toolInput.path === "string"
       ? toolInput.path
       : typeof toolInput.file_path === "string"
         ? toolInput.file_path
         : "";
+  if (!rawPath) return false;
+  // Same normalization as the Read fence: collapse relative / dot-segment paths
+  // against the hook cwd before the segment match (no symlink resolution).
+  const path = resolve(cwd || "/", rawPath);
   if (!path.includes("/.claude/agnz/threads")) return false;
   const ctx = Math.max(
     numOrZero(toolInput["-A"]),

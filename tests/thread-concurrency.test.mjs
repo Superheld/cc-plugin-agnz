@@ -35,3 +35,58 @@ test("functional-patch appends are not lost under concurrency", async () => {
   const after = await tm.getThread(t.id);
   assert.equal(after.sessionCommands.sessionAllow.length, N);
 });
+
+// ── claimThread: runner admission control (finding A, two-runner race) ────────
+
+test("claimThread refuses when a different live runner owns a running thread", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "agnz-proj-"));
+  const tm = createThreadManager();
+  const t = await tm.createThread({ cwd, name: "claim1" });
+  await tm.setStatus(t.id, "running", { runnerPid: 4242 });
+  const before = await tm.getThread(t.id);
+  const ok = await tm.claimThread(t.id, 9999, { isAlive: () => true });
+  assert.equal(ok, false, "a second runner must lose the race");
+  const after = await tm.getThread(t.id);
+  assert.equal(after.runnerPid, 4242, "the owner's runnerPid must not be clobbered");
+  assert.equal(after.status, "running");
+  // SKIP_MUTATION means truly no write — not even an updatedAt bump.
+  assert.equal(after.updatedAt, before.updatedAt, "refused claim must write nothing");
+});
+
+test("claimThread succeeds over a dead runner pid (stale claim is reclaimable)", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "agnz-proj-"));
+  const tm = createThreadManager();
+  const t = await tm.createThread({ cwd, name: "claim2" });
+  await tm.setStatus(t.id, "running", { runnerPid: 999999 });
+  const ok = await tm.claimThread(t.id, 7, { isAlive: () => false });
+  assert.equal(ok, true, "a stale (dead-owner) running thread stays claimable");
+  const after = await tm.getThread(t.id);
+  assert.equal(after.runnerPid, 7);
+  assert.equal(after.status, "running");
+});
+
+test("claimThread succeeds on an idle thread and records the runner pid + running", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "agnz-proj-"));
+  const tm = createThreadManager();
+  const t = await tm.createThread({ cwd, name: "claim3" }); // created idle
+  const ok = await tm.claimThread(t.id, 55, { isAlive: () => true });
+  assert.equal(ok, true);
+  const after = await tm.getThread(t.id);
+  assert.equal(after.runnerPid, 55);
+  assert.equal(after.status, "running");
+});
+
+test("claimThread clears stale pending/error when claiming (invariant matches setStatus RUNNING)", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "agnz-proj-"));
+  const tm = createThreadManager();
+  const t = await tm.createThread({ cwd, name: "claim4" });
+  await tm.setStatus(t.id, "awaiting_input", {
+    pending: { toolCallId: "x", kind: "approval" },
+    error: { message: "stale" },
+  });
+  const ok = await tm.claimThread(t.id, 12, { isAlive: () => true });
+  assert.equal(ok, true);
+  const after = await tm.getThread(t.id);
+  assert.equal(after.pending, null);
+  assert.equal(after.error, null);
+});

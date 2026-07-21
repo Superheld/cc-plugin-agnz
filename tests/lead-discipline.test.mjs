@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { buildShowView, decideWaitOutcome } from "../bin/agnz.mjs";
+import { buildShowView, decideWaitOutcome, resolveTarget } from "../bin/agnz.mjs";
 import { createThreadManager } from "../lib/threads.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -156,6 +156,54 @@ test("decideWaitOutcome surfaces the error on an error thread", () => {
   assert.deepEqual(o.error, err);
 });
 
+// ── capPending: pending.args must not leak uncapped (finding B) ───────────────
+
+test("show caps a fat pending.args while keeping structural fields intact", () => {
+  const big = "W".repeat(50 * 1024); // 50 KiB Write content in the pause payload
+  const pending = {
+    toolCallId: "call-1",
+    kind: "approval",
+    name: "Write",
+    args: { path: "big.txt", content: big },
+  };
+  const view = buildShowView({ id: "t1", status: "awaiting_input", pending }, [], null);
+  const p = view.thread.pending;
+  assert.match(p.args.content, /…\[elided, 50\.0 KB total\]$/);
+  assert.ok(p.args.content.length < big.length, "the fat arg is truncated");
+  assert.equal(p.args.path, "big.txt", "short args pass through untouched");
+  // Structural fields survive intact so the lead can still act.
+  assert.equal(p.toolCallId, "call-1");
+  assert.equal(p.kind, "approval");
+  assert.equal(p.name, "Write");
+});
+
+test("wait caps a fat pending.args too (same helper, both surfaces)", () => {
+  const big = "E".repeat(50 * 1024);
+  const pending = {
+    toolCallId: "c2",
+    kind: "approval",
+    name: "Edit",
+    args: { path: "f.js", old_string: big, new_string: "small" },
+  };
+  const o = decideWaitOutcome({ id: "t1", status: "awaiting_input", summary: null, pending }, null);
+  assert.match(o.pending.args.old_string, /…\[elided, 50\.0 KB total\]$/);
+  assert.equal(o.pending.args.new_string, "small");
+  assert.equal(o.pending.toolCallId, "c2");
+  assert.equal(o.pending.name, "Edit");
+});
+
+test("capPending leaves a small question-pause pending fully intact", () => {
+  const pending = {
+    toolCallId: "c3",
+    kind: "question",
+    question: "Which config file?",
+    options: ["a.json", "b.json"],
+    context: "found two candidates",
+  };
+  const view = buildShowView({ id: "t1", status: "awaiting_input", pending }, [], null);
+  assert.deepEqual(view.thread.pending, pending);
+});
+
 // ── CLI wiring (child-process against a fixture workspace) ────────────────────
 
 let userDir;
@@ -242,6 +290,62 @@ test("wait resolves by agent name, not just id", async () => {
   const outcome = runCli(["wait", "dev"]);
   assert.equal(outcome.status, "idle");
   assert.equal(outcome.content, "final answer from the agent");
+});
+
+// ── resolveTarget wait-inclusive resolution (finding D) ──────────────────────
+// Placed inside the wiring section so the beforeEach fixture (cwd + AGNZ_DATA_DIR)
+// is active — these hit the real thread manager.
+
+test("resolveTarget with includeError resolves an errored thread by name; default excludes it", async () => {
+  const tm = createThreadManager();
+  const crashed = await tm.createThread({ cwd, name: "crashy" });
+  await tm.setStatus(crashed.id, "error", { error: { message: "boom" } });
+
+  // send's default resolution refuses the errored thread (start fresh instead).
+  assert.equal(await resolveTarget(tm, cwd, "crashy"), null);
+  // wait's resolution collects it — the crash outcome is what the waiter wants.
+  const found = await resolveTarget(tm, cwd, "crashy", { includeError: true });
+  assert.equal(found?.id, crashed.id);
+});
+
+test("resolveTarget prefers the most recently updated match when a name is shared", async () => {
+  const tm = createThreadManager();
+  const older = await tm.createThread({ cwd, name: "dup" });
+  await tm.setStatus(older.id, "error", { error: { message: "old" } });
+  const newer = await tm.createThread({ cwd, name: "dup" });
+  await tm.setStatus(newer.id, "error", { error: { message: "new" } });
+  const found = await resolveTarget(tm, cwd, "dup", { includeError: true });
+  assert.equal(found?.id, newer.id, "the newer errored thread wins");
+});
+
+test("wait <name> collects a crashed thread that only exists in error state (finding D)", async () => {
+  const tm = createThreadManager();
+  const crashed = await tm.createThread({ cwd, name: "onlyerror" });
+  await tm.setStatus(crashed.id, "error", { error: { message: "runner died" } });
+  const outcome = runCli(["wait", "onlyerror"]);
+  assert.equal(outcome.thread_id, crashed.id);
+  assert.equal(outcome.status, "error");
+  assert.equal(outcome.error.message, "runner died");
+});
+
+// ── capMessageContent handles content-parts arrays (finding E) ───────────────
+
+test("buildShowView caps a big text part inside an array content message", () => {
+  const big = "P".repeat(48 * 1024);
+  const view = buildShowView({ id: "t1", status: "idle" }, [
+    {
+      role: "tool",
+      tool_call_id: "c1",
+      content: [
+        { type: "text", text: big },
+        { type: "text", text: "short tail" },
+      ],
+    },
+  ], null);
+  const parts = view.recent[0].content;
+  assert.match(parts[0].text, /…\[elided, 48\.0 KB total\]$/);
+  assert.equal(parts[1].text, "short tail");
+  assert.equal(view.recent[0].role, "tool");
 });
 
 test("--wait on start/send fails with a pointer to the wait verb", () => {
