@@ -19,14 +19,15 @@ There is no MCP server. The parent calls the CLI via Bash; every verb prints a J
 |---|---|
 | `start <name> ["task"] --agent <def>` | Create a thread (`--inline "<frontmatter>"` for an ad-hoc role). Without a task it starts idle. |
 | `send <name\|id> "msg"` | Send a task. **Reuses** the existing live thread of that name (resume), else needs an id. |
+| `wait <id\|name> [--timeout <s>]` | Watch a detached run until it settles and print the outcome (default 300 s). A poller, not a run mode — collects even a crashed thread by name. |
 | `approve <id> allow\|deny [--persist]` | Resolve an approval pause (no `tool_call_id` needed — the thread's pending call is used). |
 | `answer <id> "text"` | Resolve an `AskUser` question pause. |
 | `interrupt <id> ["directive"]` | Hard-interrupt a runaway/working agent: aborts the current step, leaves it resumable, optionally queues a directive. |
 | `stop <id>` | End a thread (kills its runner; transcript persists). |
 | `list [--status <s>] [--all]` | List threads in this workspace. |
-| `show <id>` | Thread state + last few transcript messages. |
+| `show <id>` | Lean structural view: status, pending approval/question, spend, and folded trace stats — no raw transcript. |
 
-Add `--wait` to `start`/`send`/`approve`/`answer` to run the segment synchronously and get the outcome inline (for short tasks). Otherwise the run is detached and the result reaches the parent via the message hook: the runner appends to `messages.jsonl`, and the `UserPromptSubmit` hook injects unread parent mail into your next prompt automatically (an OS notification fires for urgent mail). Anything else — inspecting transcripts — is a plain file read under `<cwd>/.claude/agnz/`, or the `/agnz:threads` skill.
+Runs are **always detached**: the CLI returns at once and the runner works in its own process. The result reaches the parent via the message hook — the runner appends to `messages.jsonl`, and the `UserPromptSubmit` hook injects unread parent mail plus a live status block for each active thread into your next prompt automatically (an OS notification fires for urgent mail), so you stay informed without polling. To collect a specific run sooner, `agnz wait <id>`; to inspect one, `agnz show <id>` (or the `/agnz:threads` skill). agnz also protects *your own* Claude session's context: the sub-agents' raw transcripts stay out of it — `show` returns a compact structural view, and a hook keeps the lead from directly reading thread transcripts and traces.
 
 ## Architecture at a glance
 
@@ -71,7 +72,7 @@ This repo is a plain Claude Code plugin. The canonical marketplace is [`Superhel
 /reload-plugins
 ```
 
-Installing wires the hooks (result delivery + spend summary), the bundled agents, and the skills. The parent invokes the CLI via Bash; verify with:
+Installing wires the hooks (result delivery, spend summary, and the context guardrails that keep sub-agent transcripts out of your session), the bundled agents, and the skills. The parent invokes the CLI via Bash; verify with:
 
 ```bash
 agnz list
@@ -149,8 +150,9 @@ JSON-repair events, and a terminal `thread_end`. From it you get:
   `inspect.sh stats`) folds the trace into turns, tokens, latency, tool-error
   and repair rates, with per-model rollups.
 - **Live spend** — the `SessionStart`/`UserPromptSubmit` hooks inject a per-thread
-  spend line (`dev:1a2b3c4d — running · 5 turns · 1,234 tok`) into Claude's
-  context, so the parent sees what's running without reading files.
+  status line (`dev:1a2b3c4d — running · 5 turns · ctx ~2k`, where `ctx` is the
+  resume weight a `send` re-sends) into Claude's context, so the parent sees
+  what's running without reading files.
 - **Evals** — `node evals/run.mjs` runs fixtures against one or more profiles in
   throwaway workspaces and scores outcome + trace metrics, ranking profiles by
   pass rate then token cost. The answer to "which local model for which role?".
