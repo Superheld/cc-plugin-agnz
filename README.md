@@ -44,9 +44,8 @@ lib/runner.mjs → lib/loop.mjs   ← LLM ↔ tool loop, persists transcript, th
     ├──▶ sandbox.mjs    (cwd lock + tiered permission policy)
     ├──▶ agent-defs.mjs (named roles from .claude/agents/ and plugin agents/)
     ├──▶ workspace-store (<cwd>/.claude/agnz/ — threads, workspace.json)
-    ├──▶ thread-index   (user-wide id → cwd map)
     ├──▶ proc-lock.mjs  (cross-process mkdir locks on shared state files)
-    ├──▶ profiles.mjs   (named LLM endpoint configs, user-wide)
+    ├──▶ config.mjs     (two-layer config: user defaults + project overrides)
     └──▶ llm/openai-compatible.mjs  (native fetch, no SDK)
 ```
 
@@ -109,8 +108,7 @@ Two independent roots:
 
 ```
 ~/.claude/agnz/
-├── profiles.json
-└── thread-index.json        ← thread_id → cwd map
+└── config.json              ← user-layer config: {profiles, mappings}
 ```
 
 **Per-project** — one workspace per cwd, co-located with other Claude Code state:
@@ -122,7 +120,6 @@ Two independent roots:
 ├── agnz/
 │   ├── workspace.json       ← shared metadata + modelProfileMappings
 │   ├── messages.jsonl       ← event bus for inter-agent communication
-│   ├── cursors/             ← parent read-cursor state (hook delivery tracking)
 │   └── threads/
 │       ├── <thread-id>.meta.json
 │       ├── <thread-id>.jsonl

@@ -10,7 +10,7 @@
 //   agnz wait   <id|name>             [--timeout <s>]
 //   agnz stop   <id|name>             (archive: hide from list, keep transcript)
 //   agnz remove <id|name> | --status stopped|error   (delete files permanently)
-//   agnz list   [--status <s>] [--all]
+//   agnz list   [--status <s>]
 //   agnz show   <id>
 //
 // Every verb prints a JSON object (or array) to stdout so the parent can
@@ -333,7 +333,7 @@ async function main() {
         out({ thread_id: thread.id, name, agent: agentDef.name, status: "idle" });
         return;
       }
-      spawnRunner({ threadId: thread.id, userMessage: message });
+      spawnRunner({ threadId: thread.id, cwd: thread.cwd, userMessage: message });
       out({ thread_id: thread.id, name, agent: agentDef.name, status: "started" });
       return;
     }
@@ -354,7 +354,7 @@ async function main() {
         out({ thread_id: thread.id, status: "queued", hint: `thread is ${thread.status}; message queued for the next turn boundary` });
         return;
       }
-      spawnRunner({ threadId: thread.id, userMessage: message });
+      spawnRunner({ threadId: thread.id, cwd: thread.cwd, userMessage: message });
       out({ thread_id: thread.id, status: "started" });
       return;
     }
@@ -371,7 +371,7 @@ async function main() {
         fail(`thread '${id}' is not awaiting approval (status=${thread.status}, pending=${thread.pending?.kind ?? "none"})`);
       }
       const resumeInput = { toolCallId: thread.pending.toolCallId, decision, persist: flags.persist === true };
-      spawnRunner({ threadId: id, resumeInput });
+      spawnRunner({ threadId: id, cwd: thread.cwd, resumeInput });
       out({ thread_id: id, status: "started" });
       return;
     }
@@ -388,7 +388,7 @@ async function main() {
         fail(`thread '${id}' is not awaiting a question (status=${thread.status}, pending=${thread.pending?.kind ?? "none"})`);
       }
       const resumeInput = { toolCallId: thread.pending.toolCallId, answer };
-      spawnRunner({ threadId: id, resumeInput });
+      spawnRunner({ threadId: id, cwd: thread.cwd, resumeInput });
       out({ thread_id: id, status: "started" });
       return;
     }
@@ -515,11 +515,10 @@ async function main() {
     }
 
     case "list": {
-      // Default: reconcile the current workspace directly — its threads/ dir is
-      // the source of truth, so a ghost (meta on disk, index entry lost) still
-      // appears and gets re-registered. --all uses the index-driven scan, which
-      // self-heals every workspace the index knows about.
-      let threads = flags.all ? await tm.listThreads() : await tm.reconcileWorkspace(cwd);
+      // The threads/ dir of THIS workspace is the source of truth; the
+      // cross-workspace --all listing died with the user-wide index
+      // (ADR 0017) — use --cwd to list another project.
+      let threads = await tm.reconcileWorkspace(cwd);
       threads = await Promise.all(threads.map((t) => recoverIfStale(tm, t)));
       if (typeof flags.status === "string") threads = threads.filter((t) => t.status === flags.status);
       out(

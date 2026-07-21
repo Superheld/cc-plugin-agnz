@@ -8,7 +8,7 @@ model: haiku
 
 Configuration and status for the **agnz** plugin. Three things live here:
 
-1. **Profiles** — named `{baseUrl, apiKey, model, ...}` bundles in `~/.claude/agnz/profiles.json`.
+1. **Profiles** — named `{baseUrl, apiKey, model, ...}` bundles in the two-layer `config.json` (ADR 0017): `~/.claude/agnz/config.json` holds machine defaults, `<cwd>/.claude/agnz/config.json` optional project overrides (pass `--project` on write commands; project wins per entry).
 2. **Model→profile mappings** — per-project table in `<cwd>/.claude/agnz/workspace.json`. Maps CC model names to profile names so agent defs stay CC-compatible.
 3. **Info** — current state: version, data paths, active profile, per-project agents/skills/threads.
 

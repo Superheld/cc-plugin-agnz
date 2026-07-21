@@ -226,14 +226,30 @@ test("atomicWriteJson writes then renames, leaving no tmp file", () => {
   assert.deepEqual(strays, []);
 });
 
-test("readWsFingerprint / writeWsFingerprint roundtrip", () => {
+test("readWsFingerprint / writeWsFingerprint roundtrip via workspace.json", () => {
   assert.equal(readWsFingerprint(ws), null); // nothing written yet
   writeWsFingerprint(ws, "a:idle,b:running");
   assert.equal(readWsFingerprint(ws), "a:idle,b:running");
-  assert.ok(existsSync(join(ws, "cursors", "parent-ws.json")));
+  // ADR 0017: parent delivery state lives in workspace.json, not cursors/.
+  const wsFile = JSON.parse(readFileSync(join(ws, "workspace.json"), "utf8"));
+  assert.equal(wsFile.parent.threadFingerprint, "a:idle,b:running");
+  assert.equal(existsSync(join(ws, "cursors")), false, "no cursors/ dir is created");
 });
 
-test("readWsFingerprint tolerates a garbled fingerprint file", () => {
+test("fingerprint write preserves an existing cursor in the parent state", () => {
+  writeParentCursor(ws, "m000007", 123);
+  writeWsFingerprint(ws, "x:idle");
+  const wsFile = JSON.parse(readFileSync(join(ws, "workspace.json"), "utf8"));
+  assert.deepEqual(wsFile.parent, { cursor: "m000007", offset: 123, threadFingerprint: "x:idle" });
+});
+
+test("readWsFingerprint falls back to the legacy cursors/ layout", () => {
+  mkdirSync(join(ws, "cursors"), { recursive: true });
+  writeFileSync(join(ws, "cursors", "parent-ws.json"), '{"threadFingerprint":"legacy:idle"}', "utf8");
+  assert.equal(readWsFingerprint(ws), "legacy:idle");
+});
+
+test("readWsFingerprint tolerates a garbled legacy fingerprint file", () => {
   mkdirSync(join(ws, "cursors"), { recursive: true });
   writeFileSync(join(ws, "cursors", "parent-ws.json"), "{not json", "utf8");
   assert.equal(readWsFingerprint(ws), null);

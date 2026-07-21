@@ -32,8 +32,7 @@ import { createThreadManager } from "../lib/threads.mjs";
 import { createSandbox } from "../lib/sandbox.mjs";
 import { createRegistry } from "../lib/tools/registry.mjs";
 import { runThread } from "../lib/loop.mjs";
-import { createProfileStore } from "../lib/profiles.mjs";
-import { resolveUserDir } from "../lib/data-dir.mjs";
+import { loadConfig } from "../lib/config.mjs";
 import { buildToolPolicy } from "../lib/agent-defs.mjs";
 import { aggregateThread } from "../lib/trace-stats.mjs";
 import { buildScorecard, formatScorecard } from "./score.mjs";
@@ -147,17 +146,18 @@ async function runOne(fixture, profile, registry) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
 
-  // Resolve profiles from the *real* user dir BEFORE any AGNZ_DATA_DIR override
+  // Resolve profiles from the *real* config BEFORE any AGNZ_DATA_DIR override
   // happens inside runOne — the profile object is plain data once loaded.
-  const store = createProfileStore({ dataDir: resolveUserDir() });
-  const profileNames = args.profiles || [(await store.get())?.name].filter(Boolean);
+  const config = await loadConfig(process.cwd());
+  const profileNames =
+    args.profiles || [config.mappings._default?.profile].filter(Boolean);
   if (profileNames.length === 0) {
     console.error("[eval] no profile available. Run /agnz:setup first or pass --profile.");
     process.exit(1);
   }
   const profiles = [];
   for (const name of profileNames) {
-    const p = await store.get(name);
+    const p = config.profiles[name];
     if (!p) {
       console.error(`[eval] unknown profile: ${name}`);
       process.exit(1);

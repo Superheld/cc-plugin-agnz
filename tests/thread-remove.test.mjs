@@ -12,7 +12,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createThreadManager } from "../lib/threads.mjs";
-import { lookupThreadCwd } from "../lib/thread-index.mjs";
 
 let projectCwd;
 let userDir;
@@ -38,15 +37,14 @@ test("removeThread deletes every <id>.* file and the index entry", async () => {
   // A companion file the code does not know by name — must be swept too.
   writeFileSync(join(threadsDir, `${thread.id}.future-companion.bin`), "x");
 
-  assert.ok((await lookupThreadCwd(thread.id)) != null, "indexed before removal");
+  assert.ok(await tm.getThread(thread.id), "resolvable before removal");
 
   const { files } = await tm.removeThread(thread.id);
   assert.ok(files.length >= 3, `meta + transcript + companion swept, got: ${files}`);
 
   const leftovers = readdirSync(threadsDir).filter((n) => n.startsWith(thread.id));
   assert.deepEqual(leftovers, [], "no per-thread file survives");
-  assert.equal(await lookupThreadCwd(thread.id), null, "index entry forgotten");
-  assert.equal(await tm.getThread(thread.id), null);
+  assert.equal(await tm.getThread(thread.id), null, "no longer resolvable");
 });
 
 test("removeThread leaves other threads' files untouched", async () => {
