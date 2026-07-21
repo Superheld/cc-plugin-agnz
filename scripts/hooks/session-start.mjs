@@ -47,8 +47,8 @@ try {
     chunks.push(formattedThreads + "\n");
   }
 
-  const cursor = readParentCursor(ws);
-  const unread = readUnreadForParent(ws, cursor);
+  const { cursor, offset } = readParentCursor(ws);
+  const { messages: unread, nextOffset } = readUnreadForParent(ws, cursor, offset);
   if (unread.length > 0) {
     chunks.push(formatMessages(unread) + "\n");
   }
@@ -58,7 +58,7 @@ try {
   flushStdoutThen(chunks.join(""), (err) => {
     if (!err && unread.length > 0) {
       try {
-        writeParentCursor(ws, unread[unread.length - 1].id);
+        writeParentCursor(ws, unread[unread.length - 1].id, nextOffset);
       } catch (cursorErr) {
         process.stderr.write(`[agnz hook cursor write failed: ${cursorErr?.message || cursorErr}]\n`);
       }

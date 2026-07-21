@@ -1,9 +1,13 @@
 #!/usr/bin/env node
 // Claude Code UserPromptSubmit hook for agnz.
 //
-// Runs on every prompt the user submits. Injects any unread messages
-// addressed to `parent` into Claude's context, then advances the
-// parent cursor so the same messages are not re-delivered next time.
+// Runs on every prompt the user submits. Injects, on a real event, unread
+// messages addressed to `parent` and/or the thread-status block, then advances
+// the corresponding state (cursor / fingerprint) so nothing is re-delivered.
+// The block used to ride along with mail only; it now stands on its own — a
+// thread appearing or disappearing between prompts is itself an event the lead
+// may need to act on, so a pure structural delta triggers an injection with no
+// mail present.
 //
 // This script is opt-in — users enable it by adding a matching entry
 // to their ~/.claude/settings.json hooks array. It intentionally stays
@@ -24,6 +28,7 @@ import {
   computeThreadFingerprint,
   readWsFingerprint,
   writeWsFingerprint,
+  decideInjection,
 } from "./_lib.mjs";
 
 try {
@@ -33,38 +38,49 @@ try {
   const ws = resolveWorkspace(input.cwd);
   if (!ws) process.exit(0);
 
-  // Gate on unread parent mail first — this hook only speaks when there is
-  // something to deliver (a deliberate, separately-tracked decision). No mail,
-  // no injection: the thread block rides along with mail, it doesn't stand alone.
-  const cursor = readParentCursor(ws);
-  const unread = readUnreadForParent(ws, cursor);
-  if (unread.length === 0) process.exit(0);
+  // Push on real events like a colleague would: this hook injects when there is
+  // new parent mail OR when the thread set changed structurally since it was
+  // last shown (a thread started/stopped between prompts — an event the lead may
+  // need to act on). The thread block no longer rides along with mail only; a
+  // pure structural delta stands on its own. Compute both signals up front — the
+  // fingerprint keys off id:status only, so read metas WITHOUT the per-thread
+  // trace fold (the expensive part), and re-read with spend only when the block
+  // is actually built below.
+  const { cursor, offset } = readParentCursor(ws);
+  const { messages: unread, nextOffset } = readUnreadForParent(ws, cursor, offset);
 
-  // Decide whether to (re-)inject the thread block. The fingerprint keys off
-  // id:status only, so read metas WITHOUT the per-thread trace fold — that fold
-  // is the expensive part and pointless when nothing renders. Re-read with spend
-  // only on the changed path, where the block is actually built.
   const fingerprint = computeThreadFingerprint(readThreadMetas(ws, { withSpend: false }));
   const changed = fingerprint !== readWsFingerprint(ws);
 
+  const { showBlock, showMessages, exit } = decideInjection({
+    unreadCount: unread.length,
+    changed,
+  });
+  if (exit) process.exit(0);
+
   const chunks = [];
-  if (changed) {
+  if (showBlock) {
     const formattedThreads = formatThreadsDetailed(readThreadMetas(ws));
     if (formattedThreads) chunks.push(`[agnz] ${formattedThreads}\n`);
   }
-  chunks.push(formatMessages(unread) + "\n");
+  if (showMessages) {
+    chunks.push(formatMessages(unread) + "\n");
+  }
 
-  // One flush, then advance BOTH the cursor and the fingerprint — but only after
-  // stdout has drained. Guarding both with !err prevents the silent-loss race
-  // where we mark state as "shown" although the write never reached Claude.
+  // One flush, then advance state — but only after stdout has drained. The
+  // cursor advances ONLY when messages were shown (guarding against marking mail
+  // delivered that never reached Claude); the fingerprint advances ONLY when the
+  // block was shown. Both are gated on !err for the same silent-loss reason.
   flushStdoutThen(chunks.join(""), (err) => {
     if (!err) {
-      try {
-        writeParentCursor(ws, unread[unread.length - 1].id);
-      } catch (cursorErr) {
-        process.stderr.write(`[agnz hook cursor write failed: ${cursorErr?.message || cursorErr}]\n`);
+      if (showMessages) {
+        try {
+          writeParentCursor(ws, unread[unread.length - 1].id, nextOffset);
+        } catch (cursorErr) {
+          process.stderr.write(`[agnz hook cursor write failed: ${cursorErr?.message || cursorErr}]\n`);
+        }
       }
-      if (changed) {
+      if (showBlock) {
         try {
           writeWsFingerprint(ws, fingerprint);
         } catch (fpErr) {
