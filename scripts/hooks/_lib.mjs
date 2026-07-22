@@ -478,22 +478,29 @@ export function decideInjection({ unreadCount, changed }) {
 }
 
 /**
- * Fold a thread's trace.jsonl into a tiny spend summary: turns and total
- * tokens (ADR 0011 §3). Inlined here rather than importing
- * lib/trace-stats.mjs to keep the hooks self-contained per the convention
- * at the top of this file. Missing/garbled trace → { turns: 0, tokens: 0 }.
+ * Fold a thread's trace.jsonl into a tiny spend summary (ADR 0011 §3):
+ * turns, cumulative tokens, and `lastCtx` — the total of the LAST llm_call,
+ * i.e. the thread's real context size, which is what a resume re-sends.
+ * The cumulative sum re-counts the whole history every turn (each prompt
+ * contains the full transcript), so it is a billing-ish figure, never a
+ * context-size figure — the lead block must not present it as one.
+ * Inlined here rather than importing lib/trace-stats.mjs to keep the hooks
+ * self-contained per the convention at the top of this file.
+ * Missing/garbled trace → { turns: 0, tokens: 0, lastCtx: null }.
  */
 export function readThreadSpend(wsDir, threadId) {
   const path = join(wsDir, "threads", `${threadId}.trace.jsonl`);
-  if (!existsSync(path)) return { turns: 0, tokens: 0 };
+  const empty = { turns: 0, tokens: 0, lastCtx: null };
+  if (!existsSync(path)) return empty;
   let raw;
   try {
     raw = readFileSync(path, "utf8");
   } catch {
-    return { turns: 0, tokens: 0 };
+    return empty;
   }
   let turns = 0;
   let tokens = 0;
+  let lastCtx = null;
   for (const line of raw.split("\n")) {
     if (!line) continue;
     let e;
@@ -505,9 +512,10 @@ export function readThreadSpend(wsDir, threadId) {
     if (e.type === "thread_start" || e.type === "turn_start") turns += 1;
     else if (e.type === "llm_call" && e.usage && typeof e.usage.total === "number") {
       tokens += e.usage.total;
+      lastCtx = e.usage.total;
     }
   }
-  return { turns, tokens };
+  return { turns, tokens, lastCtx };
 }
 
 /**
@@ -573,11 +581,6 @@ export function readThreadMetas(wsDir, { withSpend = true } = {}) {
       } catch { return []; }
     });
   } catch { return []; }
-}
-
-/** Compact token count with thousands separators (1234 -> "1,234"). */
-function formatTokens(n) {
-  return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }
 
 /**
@@ -681,16 +684,18 @@ export function formatThreadsDetailed(threads, now = Date.now()) {
     const age = formatAge(t.updatedAt, now);
     const ageTag = age ? ` · ${age}` : "";
     const s = t.spend || { turns: 0, tokens: 0 };
-    // Card-bearing thread (ctxTokens known): show turns + the resume-relevant
-    // context size — what a `send` re-sends to the model — and DROP the
-    // cumulative token sum, which is misleading for reuse (inflated by re-sends)
-    // and stays available in `agnz list`/`show`. The block is on a context diet.
-    // Legacy thread (no card): fall back to cumulative turns · tokens.
+    // Always show turns + the resume-relevant context size — what a `send`
+    // re-sends to the model. Card-bearing threads carry it directly; legacy
+    // threads derive it from the last llm_call in the trace. The cumulative
+    // token sum is deliberately NOT shown here: it re-counts the transcript
+    // every turn and read as "the thread's size" when it is not (it stays
+    // available in `agnz list`/`show`). No usable figure → turns only.
     let spend = "";
-    if (t.ctxTokens != null) {
-      spend = ` · ${s.turns} turns · ctx ${formatCtx(t.ctxTokens)}`;
-    } else if (s.turns || s.tokens) {
-      spend = ` · ${s.turns} turns · ${formatTokens(s.tokens)} tok`;
+    const ctx = t.ctxTokens != null ? t.ctxTokens : s.lastCtx;
+    if (ctx != null) {
+      spend = ` · ${s.turns} turns · ctx ${formatCtx(ctx)}`;
+    } else if (s.turns) {
+      spend = ` · ${s.turns} turns`;
     }
     // Second line: the rolling summary (→ description → role, fallback-chained
     // in readThreadMetas). This is what lets the parent see what a thread did

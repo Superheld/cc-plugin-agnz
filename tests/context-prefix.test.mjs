@@ -103,6 +103,53 @@ test("a subdir CLAUDE.md is injected only once even across repeated visits", asy
   assert.equal(ctxMsgs.length, 1);
 });
 
+test("AGENTS.md stands in when a directory has no CLAUDE.md", async () => {
+  const threadMgr = createThreadManager();
+  // cwd: AGENTS.md only. sub/: replace the fixture CLAUDE.md with AGENTS.md.
+  writeFileSync(join(projectCwd, "AGENTS.md"), "CWD AGENTS RULES: vendor-neutral.");
+  rmSync(join(projectCwd, "sub", "CLAUDE.md"));
+  writeFileSync(join(projectCwd, "sub", "AGENTS.md"), "SUBDIR AGENTS RULES: still careful.");
+
+  const thread = await threadMgr.createThread({ cwd: projectCwd, name: "dev", agentDef: { name: "dev", tools: ["Read"] } });
+  const sandbox = createSandbox({ root: projectCwd, policy: { Read: "allow" } });
+  const registry = createRegistry();
+  const profile = { baseUrl: "http://fake", model: "fake", name: "p" };
+  const chat = fakeChat([
+    toolCall("c1", "Read", { path: "sub/data.txt" }),
+    finalMessage("done"),
+  ]);
+
+  await runThread({ thread, threadMgr, sandbox, registry, profile, chat, userMessage: "read it" });
+
+  // cwd AGENTS.md is in the frozen prefix, framed as already-loaded conventions.
+  const prompt = await threadMgr.readSystemPrompt(thread.id);
+  assert.match(prompt, /Project conventions \(already loaded/);
+  assert.match(prompt, /CWD AGENTS RULES/);
+
+  // subdir AGENTS.md is injected once into history, like a subdir CLAUDE.md.
+  const history = await threadMgr.readMessages(thread.id);
+  const ctxMsgs = history.filter((m) => m.role === "user" && /SUBDIR AGENTS RULES/.test(m.content || ""));
+  assert.equal(ctxMsgs.length, 1);
+});
+
+test("CLAUDE.md wins over AGENTS.md when both exist (no duplicate injection)", async () => {
+  const threadMgr = createThreadManager();
+  // Both at cwd level; many repos symlink one to the other, so only one may load.
+  writeFileSync(join(projectCwd, "CLAUDE.md"), "CWD CLAUDE RULES.");
+  writeFileSync(join(projectCwd, "AGENTS.md"), "CWD AGENTS RULES.");
+
+  const thread = await threadMgr.createThread({ cwd: projectCwd, name: "dev", agentDef: { name: "dev", tools: ["Read"] } });
+  const sandbox = createSandbox({ root: projectCwd, policy: { Read: "allow" } });
+  const registry = createRegistry();
+  const profile = { baseUrl: "http://fake", model: "fake", name: "p" };
+
+  await runThread({ thread, threadMgr, sandbox, registry, profile, chat: fakeChat([finalMessage("ok")]), userMessage: "hi" });
+
+  const prompt = await threadMgr.readSystemPrompt(thread.id);
+  assert.match(prompt, /CWD CLAUDE RULES/);
+  assert.doesNotMatch(prompt, /CWD AGENTS RULES/);
+});
+
 test("the snapshot is persisted as the thread's system-prompt file after the first run", async () => {
   const threadMgr = createThreadManager();
   const thread = await threadMgr.createThread({ cwd: projectCwd, name: "dev", agentDef: { name: "dev", tools: ["Read"] } });
