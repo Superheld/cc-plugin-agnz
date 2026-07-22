@@ -2,7 +2,7 @@
 name: agnz-threads
 description: Inspect agnz threads in the current project — list all threads or get a lean structural view (status, pending, spend, trace stats) of a specific thread. This skill should be used when the user asks to "list threads", "show thread status", "what is the agent doing", "inspect thread X", "show what happened in thread X", "show thread history", "debug agent output", or when a thread is paused and needs resolution.
 argument-hint: "list | <thread-id-prefix>"
-allowed-tools: Bash(node *) Read Glob
+allowed-tools: Bash(node:*), Read, Glob
 model: haiku
 ---
 
