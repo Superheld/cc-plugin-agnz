@@ -163,6 +163,29 @@ export function decideWaitOutcome(thread, messages) {
   return outcome;
 }
 
+// ---- last activity: liveness signal for running threads ----
+// The most recent tool_call in a trace fold: { name, target?, ts?, agoMs?,
+// outcome? }. Pure over the entries array so it is unit-testable; the callers
+// (wait's timeout branch, show, list) do the trace IO. Null when the thread
+// has no tool_call yet.
+export function lastToolActivity(entries, now = Date.now()) {
+  if (!Array.isArray(entries)) return null;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    if (e && e.type === "tool_call" && typeof e.name === "string") {
+      const activity = { name: e.name };
+      if (typeof e.target === "string") activity.target = e.target;
+      if (typeof e.outcome === "string") activity.outcome = e.outcome;
+      if (typeof e.ts === "number") {
+        activity.ts = e.ts;
+        activity.agoMs = Math.max(0, now - e.ts);
+      }
+      return activity;
+    }
+  }
+  return null;
+}
+
 // ---- show: a token-lean structural view (ADR 0015 §2) ----
 // A status check must never forward a full tool result into the lead's
 // context, so each recent message's content is capped with an elision marker
@@ -419,10 +442,15 @@ async function main() {
           return;
         }
         if (Date.now() >= deadline) {
+          // Attach the last tool activity so the waiter can judge liveness at
+          // once: a seconds-old Write means "keep waiting", a minutes-old one
+          // means "look closer" — no transcript read either way.
+          const activity = lastToolActivity(await readTrace(thread.cwd, thread.id));
           out({
             thread_id: thread.id,
             status: "running",
             timeout: true,
+            ...(activity ? { lastActivity: activity } : {}),
             note: "still running — wait again or rely on the message hook",
           });
           return;
@@ -522,17 +550,25 @@ async function main() {
       threads = await Promise.all(threads.map((t) => recoverIfStale(tm, t)));
       if (typeof flags.status === "string") threads = threads.filter((t) => t.status === flags.status);
       out(
-        threads.map((t) => ({
-          thread_id: t.id,
-          name: t.name,
-          agent: t.agentDef?.name,
-          status: t.status,
-          summary:
-            t.summary ||
-            t.description ||
-            (t.agentDef?.description ? t.agentDef.description.split("\n")[0].slice(0, 140) : null),
-          updatedAt: t.updatedAt,
-        })),
+        await Promise.all(
+          threads.map(async (t) => ({
+            thread_id: t.id,
+            name: t.name,
+            agent: t.agentDef?.name,
+            status: t.status,
+            summary:
+              t.summary ||
+              t.description ||
+              (t.agentDef?.description ? t.agentDef.description.split("\n")[0].slice(0, 140) : null),
+            updatedAt: t.updatedAt,
+            // Liveness for running threads only — everything else is summed up
+            // by its summary, and skipping the trace read keeps the common
+            // all-idle listing cheap.
+            ...(t.status === "running"
+              ? { lastActivity: lastToolActivity(await readTrace(t.cwd, t.id)) }
+              : {}),
+          })),
+        ),
       );
       return;
     }
@@ -550,7 +586,13 @@ async function main() {
       // for the raw transcript. readTrace returns [] when there is no trace yet.
       const entries = await readTrace(thread.cwd, thread.id);
       const stats = entries.length ? compactStats(aggregateTrace(entries)) : null;
-      out(buildShowView(thread, msgs, stats));
+      const view = buildShowView(thread, msgs, stats);
+      // Same liveness rule as list: only a running thread needs it.
+      if (thread.status === "running") {
+        const activity = lastToolActivity(entries);
+        if (activity) view.thread.lastActivity = activity;
+      }
+      out(view);
       return;
     }
 

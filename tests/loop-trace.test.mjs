@@ -169,6 +169,9 @@ test("a complete run emits thread_start, llm_call, tool_call, thread_end", async
   assert.equal(toolCalls[0].name, "LS");
   assert.equal(toolCalls[0].outcome, "ok");
   assert.equal(typeof toolCalls[0].latencyMs, "number");
+  // `target` carries the path-ish argument — the raw material for the
+  // last-activity display on running threads.
+  assert.equal(toolCalls[0].target, ".");
 
   // Exactly one thread_end with the final reason and accumulated totals.
   const ends = byType("thread_end");

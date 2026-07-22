@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { buildShowView, decideWaitOutcome, resolveTarget } from "../bin/agnz.mjs";
+import { buildShowView, decideWaitOutcome, resolveTarget, lastToolActivity } from "../bin/agnz.mjs";
 import { createThreadManager } from "../lib/threads.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -114,6 +114,37 @@ test("buildShowView attaches stats only when provided", () => {
 });
 
 // ── decideWaitOutcome (pure) ─────────────────────────────────────────────────
+
+test("lastToolActivity picks the most recent tool_call and computes agoMs", () => {
+  const now = 1_000_000;
+  const a = lastToolActivity(
+    [
+      { ts: 1000, type: "thread_start" },
+      { ts: 2000, type: "tool_call", name: "Read", target: "a.mjs", outcome: "ok" },
+      { ts: 3000, type: "llm_call", usage: { total: 10 } },
+      { ts: 4000, type: "tool_call", name: "Write", target: "b.mjs", outcome: "ok" },
+    ],
+    now,
+  );
+  assert.deepEqual(a, { name: "Write", target: "b.mjs", outcome: "ok", ts: 4000, agoMs: 996_000 });
+});
+
+test("lastToolActivity is null on an empty or tool-less trace", () => {
+  assert.equal(lastToolActivity([]), null);
+  assert.equal(lastToolActivity(null), null);
+  assert.equal(
+    lastToolActivity([
+      { ts: 1, type: "thread_start" },
+      { ts: 2, type: "llm_call", usage: { total: 10 } },
+    ]),
+    null,
+  );
+});
+
+test("lastToolActivity tolerates a target-less tool_call (field simply absent)", () => {
+  const a = lastToolActivity([{ ts: 5, type: "tool_call", name: "SendMessage", outcome: "ok" }], 10);
+  assert.deepEqual(a, { name: "SendMessage", outcome: "ok", ts: 5, agoMs: 5 });
+});
 
 test("decideWaitOutcome returns the last assistant answer on an idle thread", () => {
   const o = decideWaitOutcome({ id: "t1", status: "idle", summary: "done", pending: null }, [
