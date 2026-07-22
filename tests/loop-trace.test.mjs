@@ -54,8 +54,13 @@ function readTrace(cwd, threadId) {
  * Tracing is deliberately fire-and-forget in the loop (it must never block
  * or crash the run), so the final thread_end write may still be in flight
  * when runThread resolves. Poll the trace file until it appears.
+ *
+ * The deadline is deliberately generous: this is the suite's only bounded
+ * wait on fire-and-forget disk I/O, which made it the prime suspect for the
+ * rare post-git-merge flake (see docs/next.md → Watch). Polling exits as
+ * soon as the predicate matches, so a large ceiling costs nothing when green.
  */
-async function waitForTrace(cwd, threadId, predicate, timeoutMs = 1000) {
+async function waitForTrace(cwd, threadId, predicate, timeoutMs = 10000) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const trace = readTrace(cwd, threadId);

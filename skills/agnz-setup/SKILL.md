@@ -2,7 +2,7 @@
 name: agnz-setup
 description: Configure and inspect the agnz plugin — profiles, model→profile mappings, and current status. This skill should be used when the user asks to "add a profile", "set up agnz", "configure lmstudio", "show agnz status", "what profiles exist", "map sonnet to a local model", or anything about agnz configuration and setup.
 argument-hint: "list | add <name> | remove <name> | use <name> | test [name] | mapping list|set|remove | info"
-allowed-tools: Bash(node *) AskUserQuestion
+allowed-tools: Bash(node:*), AskUserQuestion
 model: haiku
 ---
 

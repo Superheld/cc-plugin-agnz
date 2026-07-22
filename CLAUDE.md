@@ -75,7 +75,7 @@ lib/runner.mjs → lib/loop.mjs   ← LLM ↔ tool loop, persists transcript, th
 
 `lib/memory.mjs` **was deleted** as part of the 0.4.0 refactor. There is no project-memory or global-memory `.md` scope any more. If a future design needs persistent cross-run context for a workspace, it goes into `workspace.json` (per ADR 0001) or into board item notes (per ADR 0004), not into a parallel memory store.
 
-Repo layout follows the standard Claude Code plugin layout: `.claude-plugin/plugin.json` at the root, with `lib/`, `bin/`, `commands/`, `scripts/`, `hooks/`, `docs/`, `skills/` as siblings. This repo is a **pure plugin repo** — no marketplace manifest. The marketplace lives elsewhere.
+Repo layout follows the standard Claude Code plugin layout: `.claude-plugin/plugin.json` at the root, with `lib/`, `bin/`, `scripts/`, `hooks/`, `docs/`, `skills/` as siblings. This repo is a **pure plugin repo** — no marketplace manifest. The marketplace lives elsewhere.
 
 - `tmp/` — gitignored scratch dir for live tests with the sub-agent (created on demand)
 - `docs/adr/` — Architecture Decision Records (see bottom of this file)
