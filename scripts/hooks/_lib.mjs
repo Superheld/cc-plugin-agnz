@@ -387,7 +387,7 @@ function addressesParent(to) {
  *
  * Deliberately porous, per the ADR:
  *   - only `Read` is fenced — `Grep` returns matches only (context-cheap) and
- *     `Bash`/inspect.sh tails with its own caps, so both stay allowed;
+ *     `Bash` tails with its own caps, so both stay allowed;
  *   - `meta.json` is NOT matched (ends `.json`, not `.jsonl`) — whether to also
  *     fence raw meta reads is an open question in the ADR, not settled here;
  *   - `.jsonl` files outside the threads dir (e.g. messages.jsonl at the
@@ -478,22 +478,29 @@ export function decideInjection({ unreadCount, changed }) {
 }
 
 /**
- * Fold a thread's trace.jsonl into a tiny spend summary: turns and total
- * tokens (ADR 0011 §3). Inlined here rather than importing
- * lib/trace-stats.mjs to keep the hooks self-contained per the convention
- * at the top of this file. Missing/garbled trace → { turns: 0, tokens: 0 }.
+ * Fold a thread's trace.jsonl into a tiny spend summary (ADR 0011 §3):
+ * turns, cumulative tokens, and `lastCtx` — the total of the LAST llm_call,
+ * i.e. the thread's real context size, which is what a resume re-sends.
+ * The cumulative sum re-counts the whole history every turn (each prompt
+ * contains the full transcript), so it is a billing-ish figure, never a
+ * context-size figure — the lead block must not present it as one.
+ * Inlined here rather than importing lib/trace-stats.mjs to keep the hooks
+ * self-contained per the convention at the top of this file.
+ * Missing/garbled trace → { turns: 0, tokens: 0, lastCtx: null }.
  */
 export function readThreadSpend(wsDir, threadId) {
   const path = join(wsDir, "threads", `${threadId}.trace.jsonl`);
-  if (!existsSync(path)) return { turns: 0, tokens: 0 };
+  const empty = { turns: 0, tokens: 0, lastCtx: null };
+  if (!existsSync(path)) return empty;
   let raw;
   try {
     raw = readFileSync(path, "utf8");
   } catch {
-    return { turns: 0, tokens: 0 };
+    return empty;
   }
   let turns = 0;
   let tokens = 0;
+  let lastCtx = null;
   for (const line of raw.split("\n")) {
     if (!line) continue;
     let e;
@@ -505,9 +512,64 @@ export function readThreadSpend(wsDir, threadId) {
     if (e.type === "thread_start" || e.type === "turn_start") turns += 1;
     else if (e.type === "llm_call" && e.usage && typeof e.usage.total === "number") {
       tokens += e.usage.total;
+      lastCtx = e.usage.total;
     }
   }
-  return { turns, tokens };
+  return { turns, tokens, lastCtx };
+}
+
+/**
+ * Last tool activity of a thread, from the tail of its trace.jsonl: the most
+ * recent tool_call event's { name, target, ts, outcome }. This is what makes a
+ * long-running thread legible at a glance ("last: Write lib/foo.mjs 12s ago" =
+ * alive and working; a stale timestamp = probably hung). Tail-read only (last
+ * 8 KiB) so the hook stays fast on a multi-hundred-KB trace; scanning backwards
+ * with a tolerant parse makes a partial first line harmless. Missing trace or
+ * no tool_call in the tail window → null.
+ */
+export function readLastActivity(wsDir, threadId) {
+  const path = join(wsDir, "threads", `${threadId}.trace.jsonl`);
+  let size;
+  try {
+    size = statSync(path).size;
+  } catch {
+    return null;
+  }
+  if (size === 0) return null;
+  const TAIL_BYTES = 8192;
+  const start = Math.max(0, size - TAIL_BYTES);
+  let raw;
+  try {
+    const len = size - start;
+    const buf = Buffer.allocUnsafe(len);
+    const fd = openSync(path, "r");
+    try {
+      readSync(fd, buf, 0, len, start);
+    } finally {
+      closeSync(fd);
+    }
+    raw = buf.toString("utf8");
+  } catch {
+    return null;
+  }
+  const lines = raw.split("\n").filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let e;
+    try {
+      e = JSON.parse(lines[i]);
+    } catch {
+      continue; // partial or garbled line — keep scanning backwards
+    }
+    if (e && e.type === "tool_call" && typeof e.name === "string") {
+      return {
+        name: e.name,
+        target: typeof e.target === "string" ? e.target : null,
+        ts: typeof e.ts === "number" ? e.ts : null,
+        outcome: typeof e.outcome === "string" ? e.outcome : null,
+      };
+    }
+  }
+  return null;
 }
 
 /**
@@ -551,6 +613,10 @@ export function readThreadMetas(wsDir, { withSpend = true } = {}) {
           : (withSpend ? readThreadSpend(wsDir, meta.id) : null);
         const ctxTokens = card ? (card.ctxTokens ?? null) : null;
         const task = card ? (card.task ?? null) : null;
+        // Liveness signal, only for threads that are actually running — for
+        // everything else the card/summary already says what happened, and
+        // skipping the read keeps the common (all-idle) case at zero extra IO.
+        const lastActivity = meta.status === "running" ? readLastActivity(wsDir, meta.id) : null;
         return [{
           id: meta.id,
           name: meta.name || null,
@@ -569,15 +635,11 @@ export function readThreadMetas(wsDir, { withSpend = true } = {}) {
           ctxTokens,
           task,
           spend,
+          lastActivity,
         }];
       } catch { return []; }
     });
   } catch { return []; }
-}
-
-/** Compact token count with thousands separators (1234 -> "1,234"). */
-function formatTokens(n) {
-  return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }
 
 /**
@@ -619,6 +681,19 @@ function parseTs(v) {
     return Number.isNaN(n) ? null : n;
   }
   return null;
+}
+
+/**
+ * Finer-grained "how long ago" for the last-activity line: liveness needs
+ * seconds resolution ("12s ago" reads alive, "9m ago" reads hung), which the
+ * minute-floor formatAge deliberately doesn't provide.
+ */
+function formatAgoFine(deltaMs) {
+  const secs = Math.max(0, Math.floor(deltaMs / 1000));
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m`;
+  return `${Math.floor(mins / 60)}h`;
 }
 
 /** Human-compact age from a timestamp: "now" / "5m" / "3h" / "2d". */
@@ -681,16 +756,28 @@ export function formatThreadsDetailed(threads, now = Date.now()) {
     const age = formatAge(t.updatedAt, now);
     const ageTag = age ? ` · ${age}` : "";
     const s = t.spend || { turns: 0, tokens: 0 };
-    // Card-bearing thread (ctxTokens known): show turns + the resume-relevant
-    // context size — what a `send` re-sends to the model — and DROP the
-    // cumulative token sum, which is misleading for reuse (inflated by re-sends)
-    // and stays available in `agnz list`/`show`. The block is on a context diet.
-    // Legacy thread (no card): fall back to cumulative turns · tokens.
+    // Always show turns + the resume-relevant context size — what a `send`
+    // re-sends to the model. Card-bearing threads carry it directly; legacy
+    // threads derive it from the last llm_call in the trace. The cumulative
+    // token sum is deliberately NOT shown here: it re-counts the transcript
+    // every turn and read as "the thread's size" when it is not (it stays
+    // available in `agnz show`). No usable figure → turns only.
     let spend = "";
-    if (t.ctxTokens != null) {
-      spend = ` · ${s.turns} turns · ctx ${formatCtx(t.ctxTokens)}`;
-    } else if (s.turns || s.tokens) {
-      spend = ` · ${s.turns} turns · ${formatTokens(s.tokens)} tok`;
+    const ctx = t.ctxTokens != null ? t.ctxTokens : s.lastCtx;
+    if (ctx != null) {
+      spend = ` · ${s.turns} turns · ctx ${formatCtx(ctx)}`;
+    } else if (s.turns) {
+      spend = ` · ${s.turns} turns`;
+    }
+    // Liveness for running threads: the last tool call from the trace tail.
+    // "last: Write lib/foo.mjs (12s ago)" answers "is it still working?"
+    // without anyone opening a transcript.
+    let activity = "";
+    if (t.status === "running" && t.lastActivity && t.lastActivity.name) {
+      const a = t.lastActivity;
+      const what = a.target ? `${a.name} ${String(a.target).slice(0, 60)}` : a.name;
+      const ago = a.ts != null ? ` (${formatAgoFine(now - a.ts)} ago)` : "";
+      activity = ` · last: ${what}${ago}`;
     }
     // Second line: the rolling summary (→ description → role, fallback-chained
     // in readThreadMetas). This is what lets the parent see what a thread did
@@ -698,18 +785,18 @@ export function formatThreadsDetailed(threads, now = Date.now()) {
     // a multi-line final answer can't break the block; cap the length.
     const summary = t.summary ? String(t.summary).replace(/\s+/g, " ").trim() : "";
     const sumLine = summary ? `\n      ${summary.slice(0, 100)}` : "";
-    return `  ${label} — ${t.status}${ageTag}${spend}${sumLine}`;
+    return `  ${label} — ${t.status}${ageTag}${spend}${activity}${sumLine}`;
   });
 
   // Collapsed stale-idle bucket: names only (up to 6, then "+N more"), pointing
-  // at /agnz:threads for the detail. Dropping their per-thread summary/spend is
+  // at `agnz show` for the detail. Dropping their per-thread summary/spend is
   // the bulk of the per-prompt weight this context-diet sheds.
   if (staleIdle.length > 0) {
     const names = staleIdle.map((t) => t.name || (t.id || "").slice(0, 8));
     const shown = names.slice(0, 6);
     const overflow = names.length - shown.length;
     const nameList = overflow > 0 ? `${shown.join(", ")} +${overflow} more` : shown.join(", ");
-    lines.push(`  ${staleIdle.length} idle >24h: ${nameList} — details: /agnz:threads`);
+    lines.push(`  ${staleIdle.length} idle >24h: ${nameList} — details: agnz show <name>`);
   }
 
   const idle = sorted.filter(t => t.status === "idle").length;

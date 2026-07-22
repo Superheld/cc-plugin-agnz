@@ -38,6 +38,19 @@ test("functional-patch appends are not lost under concurrency", async () => {
 
 // ── claimThread: runner admission control (finding A, two-runner race) ────────
 
+test("claimThread clears the CLI's pendingRun spawn marker in the same atomic write", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "agnz-proj-"));
+  const tm = createThreadManager();
+  const t = await tm.createThread({ cwd, name: "spawnmark" });
+  // The CLI stamps this before spawning the runner (send→wait race fix).
+  await tm.updateThread(t.id, { pendingRun: { spawnedAt: Date.now() } });
+  const ok = await tm.claimThread(t.id, 42, { isAlive: () => true });
+  assert.equal(ok, true);
+  const after = await tm.getThread(t.id);
+  assert.equal(after.pendingRun, null);
+  assert.equal(after.status, "running");
+});
+
 test("claimThread refuses when a different live runner owns a running thread", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "agnz-proj-"));
   const tm = createThreadManager();

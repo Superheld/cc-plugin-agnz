@@ -30,8 +30,8 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env.AGNZ_DATA_DIR;
-  rmSync(userDir, { recursive: true, force: true });
-  rmSync(cwd, { recursive: true, force: true });
+  rmSync(userDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  rmSync(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 test("a fresh manager resolves by id after reconcileWorkspace seeds it", async () => {

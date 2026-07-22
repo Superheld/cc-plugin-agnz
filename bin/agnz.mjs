@@ -10,8 +10,7 @@
 //   agnz wait   <id|name>             [--timeout <s>]
 //   agnz stop   <id|name>             (archive: hide from list, keep transcript)
 //   agnz remove <id|name> | --status stopped|error   (delete files permanently)
-//   agnz list   [--status <s>]
-//   agnz show   <id>
+//   agnz show   [<id|name>]           (no target: list all threads; --status <s> filters)
 //
 // Every verb prints a JSON object (or array) to stdout so the parent can
 // parse the outcome from a Bash call. Errors print {"error": "..."} and exit 1.
@@ -95,7 +94,21 @@ async function resolveTarget(tm, cwd, token, { includeError = false } = {}) {
   const candidates = threads
     .filter((t) => t.name === token && (includeError || t.status !== "error"))
     .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-  return candidates[0] || null;
+  if (candidates[0]) return candidates[0];
+  // Git-style unique id prefix, tried last (a name always wins over a prefix).
+  // The lead block shows 8-char short ids — whatever we display must be
+  // addressable. Minimum 4 chars keeps accidental matches out; ambiguity is
+  // an explicit error, never a silent pick.
+  if (typeof token === "string" && token.length >= 4) {
+    const byPrefix = threads.filter((t) => t.id.startsWith(token));
+    if (byPrefix.length === 1) return byPrefix[0];
+    if (byPrefix.length > 1) {
+      throw new Error(
+        `id prefix '${token}' is ambiguous: ${byPrefix.map((t) => t.id.slice(0, 8)).join(", ")}`,
+      );
+    }
+  }
+  return null;
 }
 export { resolveTarget };
 
@@ -105,6 +118,39 @@ function spawnRunner(payload) {
   writeFileSync(pf, JSON.stringify(payload));
   const child = spawn(process.execPath, [RUNNER, pf], { detached: true, stdio: "ignore" });
   child.unref();
+}
+
+// Stamp the spawn intent BEFORE the runner process exists, then spawn. Between
+// "CLI printed started" and "runner claimed the thread" the meta still says
+// idle with the previous outcome — without the marker, a wait fired right
+// after send collects that stale outcome as if it were the answer (dogfooding
+// find, 2026-07-22). claimThread clears the marker atomically on takeover.
+async function spawnRun(tm, payload) {
+  await tm.updateThread(payload.threadId, { pendingRun: { spawnedAt: Date.now() } });
+  spawnRunner(payload);
+}
+
+// How long a spawned runner gets to claim its thread before the marker is
+// distrusted. Spawn→claim is normally well under a second; 15 s covers a
+// loaded machine without letting a crashed spawn stall `wait` forever.
+export const PENDING_RUN_GRACE_MS = 15_000;
+
+// Pure collect gate for `wait` (unit-testable): collect only when the thread
+// is not running AND no fresh spawn marker exists. A stale marker means the
+// runner died before claiming — collect then, but say so, instead of
+// presenting the previous outcome as the fresh answer.
+export function decideCollect(thread, now = Date.now()) {
+  if (thread.status === "running") return { collect: false };
+  const pr = thread.pendingRun;
+  if (pr && typeof pr.spawnedAt === "number") {
+    if (now - pr.spawnedAt < PENDING_RUN_GRACE_MS) return { collect: false };
+    return {
+      collect: true,
+      staleNote:
+        "a spawned run never started (runner likely crashed before claiming) — showing the previous outcome",
+    };
+  }
+  return { collect: true };
 }
 
 // Is a pid still a live process? Signal 0 probes without delivering anything.
@@ -161,6 +207,29 @@ export function decideWaitOutcome(thread, messages) {
     }
   }
   return outcome;
+}
+
+// ---- last activity: liveness signal for running threads ----
+// The most recent tool_call in a trace fold: { name, target?, ts?, agoMs?,
+// outcome? }. Pure over the entries array so it is unit-testable; the callers
+// (wait's timeout branch, show, list) do the trace IO. Null when the thread
+// has no tool_call yet.
+export function lastToolActivity(entries, now = Date.now()) {
+  if (!Array.isArray(entries)) return null;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    if (e && e.type === "tool_call" && typeof e.name === "string") {
+      const activity = { name: e.name };
+      if (typeof e.target === "string") activity.target = e.target;
+      if (typeof e.outcome === "string") activity.outcome = e.outcome;
+      if (typeof e.ts === "number") {
+        activity.ts = e.ts;
+        activity.agoMs = Math.max(0, now - e.ts);
+      }
+      return activity;
+    }
+  }
+  return null;
 }
 
 // ---- show: a token-lean structural view (ADR 0015 §2) ----
@@ -268,6 +337,9 @@ export function buildShowView(thread, messages, stats) {
     recent: (messages || []).slice(-6).map(capMessageContent),
   };
   if (thread.card) view.thread.card = thread.card;
+  // A pendingRun marker means a spawned runner has not claimed yet — the
+  // "idle" status above is about to flip; surface it so show isn't misread.
+  if (thread.pendingRun) view.thread.pendingRun = thread.pendingRun;
   if (stats) view.stats = stats;
   return view;
 }
@@ -315,7 +387,7 @@ async function main() {
         agentDef,
         name,
         // The founding purpose of the thread, used as a durable legibility
-        // label (agnz list / the parent hook) long after the transcript has
+        // label (agnz show / the parent hook) long after the transcript has
         // scrolled away. Prefer an explicit --description; otherwise fall back
         // to the initial task so a thread always says what it was started for,
         // even if it never reaches a final answer.
@@ -333,7 +405,7 @@ async function main() {
         out({ thread_id: thread.id, name, agent: agentDef.name, status: "idle" });
         return;
       }
-      spawnRunner({ threadId: thread.id, cwd: thread.cwd, userMessage: message });
+      await spawnRun(tm, { threadId: thread.id, cwd: thread.cwd, userMessage: message });
       out({ thread_id: thread.id, name, agent: agentDef.name, status: "started" });
       return;
     }
@@ -354,7 +426,7 @@ async function main() {
         out({ thread_id: thread.id, status: "queued", hint: `thread is ${thread.status}; message queued for the next turn boundary` });
         return;
       }
-      spawnRunner({ threadId: thread.id, cwd: thread.cwd, userMessage: message });
+      await spawnRun(tm, { threadId: thread.id, cwd: thread.cwd, userMessage: message });
       out({ thread_id: thread.id, status: "started" });
       return;
     }
@@ -371,7 +443,7 @@ async function main() {
         fail(`thread '${id}' is not awaiting approval (status=${thread.status}, pending=${thread.pending?.kind ?? "none"})`);
       }
       const resumeInput = { toolCallId: thread.pending.toolCallId, decision, persist: flags.persist === true };
-      spawnRunner({ threadId: id, cwd: thread.cwd, resumeInput });
+      await spawnRun(tm, { threadId: id, cwd: thread.cwd, resumeInput });
       out({ thread_id: id, status: "started" });
       return;
     }
@@ -388,7 +460,7 @@ async function main() {
         fail(`thread '${id}' is not awaiting a question (status=${thread.status}, pending=${thread.pending?.kind ?? "none"})`);
       }
       const resumeInput = { toolCallId: thread.pending.toolCallId, answer };
-      spawnRunner({ threadId: id, cwd: thread.cwd, resumeInput });
+      await spawnRun(tm, { threadId: id, cwd: thread.cwd, resumeInput });
       out({ thread_id: id, status: "started" });
       return;
     }
@@ -413,17 +485,35 @@ async function main() {
       for (;;) {
         thread = await recoverIfStale(tm, await tm.getThread(thread.id));
         if (!thread) fail(`thread '${target}' disappeared while waiting`);
-        if (thread.status !== "running") {
+        // decideCollect closes the send→wait race: right after a spawn the meta
+        // still says idle with the PREVIOUS outcome until the runner claims —
+        // the pendingRun marker keeps us polling through that window.
+        const gate = decideCollect(thread);
+        if (gate.collect) {
           const msgs = thread.status === "idle" ? await tm.readMessages(thread.id) : null;
-          out(decideWaitOutcome(thread, msgs));
+          const outcome = decideWaitOutcome(thread, msgs);
+          if (gate.staleNote) {
+            outcome.note = gate.staleNote;
+            // Clear the dead marker so it doesn't re-annotate every future call.
+            await tm.updateThread(thread.id, { pendingRun: null }).catch(() => {});
+          }
+          out(outcome);
           return;
         }
         if (Date.now() >= deadline) {
+          // Attach the last tool activity so the waiter can judge liveness at
+          // once: a seconds-old Write means "keep waiting", a minutes-old one
+          // means "look closer" — no transcript read either way.
+          const activity = lastToolActivity(await readTrace(thread.cwd, thread.id));
           out({
             thread_id: thread.id,
-            status: "running",
+            status: thread.status,
             timeout: true,
-            note: "still running — wait again or rely on the message hook",
+            ...(activity ? { lastActivity: activity } : {}),
+            note:
+              thread.status === "running"
+                ? "still running — wait again or rely on the message hook"
+                : "spawned run is still starting — wait again",
           });
           return;
         }
@@ -514,32 +604,46 @@ async function main() {
       return;
     }
 
-    case "list": {
-      // The threads/ dir of THIS workspace is the source of truth; the
-      // cross-workspace --all listing died with the user-wide index
-      // (ADR 0017) — use --cwd to list another project.
-      let threads = await tm.reconcileWorkspace(cwd);
-      threads = await Promise.all(threads.map((t) => recoverIfStale(tm, t)));
-      if (typeof flags.status === "string") threads = threads.filter((t) => t.status === flags.status);
-      out(
-        threads.map((t) => ({
-          thread_id: t.id,
-          name: t.name,
-          agent: t.agentDef?.name,
-          status: t.status,
-          summary:
-            t.summary ||
-            t.description ||
-            (t.agentDef?.description ? t.agentDef.description.split("\n")[0].slice(0, 140) : null),
-          updatedAt: t.updatedAt,
-        })),
-      );
-      return;
-    }
-
+    // The ONE inspection verb (0.19 zoo cut): `show` without a target lists
+    // the workspace (absorbing the old `list` verb, kept as an undocumented
+    // alias so scripts and muscle memory don't break); with a target it is
+    // the lean per-thread structural view (ADR 0015 §2). Everything deeper —
+    // trace analysis, per-model stats — is dashboard/log territory, not CLI.
+    case "list":
     case "show": {
       const target = positionals[0];
-      if (!target) fail("show: <id|name> is required");
+      if (!target) {
+        // The threads/ dir of THIS workspace is the source of truth; the
+        // cross-workspace --all listing died with the user-wide index
+        // (ADR 0017) — use --cwd to list another project.
+        let threads = await tm.reconcileWorkspace(cwd);
+        threads = await Promise.all(threads.map((t) => recoverIfStale(tm, t)));
+        if (typeof flags.status === "string") threads = threads.filter((t) => t.status === flags.status);
+        out(
+          await Promise.all(
+            threads.map(async (t) => ({
+              thread_id: t.id,
+              name: t.name,
+              agent: t.agentDef?.name,
+              status: t.status,
+              summary:
+                t.summary ||
+                t.description ||
+                (t.agentDef?.description ? t.agentDef.description.split("\n")[0].slice(0, 140) : null),
+              updatedAt: t.updatedAt,
+              // Liveness for running threads only — everything else is summed up
+              // by its summary, and skipping the trace read keeps the common
+              // all-idle listing cheap.
+              ...(t.status === "running"
+                ? { lastActivity: lastToolActivity(await readTrace(t.cwd, t.id)) }
+                : {}),
+              // A spawned-but-not-yet-claimed run: the idle status is about to flip.
+              ...(t.pendingRun ? { pendingRun: t.pendingRun } : {}),
+            })),
+          ),
+        );
+        return;
+      }
       let thread = await resolveTarget(tm, cwd, target, { includeError: true });
       if (!thread) fail(`no thread '${target}'`);
       const id = thread.id;
@@ -550,12 +654,18 @@ async function main() {
       // for the raw transcript. readTrace returns [] when there is no trace yet.
       const entries = await readTrace(thread.cwd, thread.id);
       const stats = entries.length ? compactStats(aggregateTrace(entries)) : null;
-      out(buildShowView(thread, msgs, stats));
+      const view = buildShowView(thread, msgs, stats);
+      // Same liveness rule as list: only a running thread needs it.
+      if (thread.status === "running") {
+        const activity = lastToolActivity(entries);
+        if (activity) view.thread.lastActivity = activity;
+      }
+      out(view);
       return;
     }
 
     default:
-      fail(`unknown verb '${verb ?? ""}'. Use: start | send | approve | answer | wait | stop | remove | interrupt | list | show`);
+      fail(`unknown verb '${verb ?? ""}'. Use: start | send | approve | answer | wait | stop | remove | interrupt | show`);
   }
 }
 

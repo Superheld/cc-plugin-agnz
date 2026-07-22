@@ -61,13 +61,6 @@ node ${CLAUDE_PLUGIN_ROOT}/lib/trace-stats.mjs <thread-id>
 node ${CLAUDE_PLUGIN_ROOT}/lib/trace-stats.mjs <thread-id> --json
 ```
 
-Or via the `agnz-threads` skill's terminal helper (needs `jq` + `node`):
-
-```bash
-bash skills/agnz-threads/scripts/inspect.sh stats        # workspace totals
-bash skills/agnz-threads/scripts/inspect.sh <id-prefix>  # meta + stats + transcript
-```
-
 Example workspace view:
 
 ```

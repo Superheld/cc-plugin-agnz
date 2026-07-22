@@ -17,6 +17,20 @@ chose to defer. Dated entries reflect what was true when written.
   (`~/.claude/agents/`, `<cwd>/.claude/agents/`). Consolidate that story before
   designing the CLI/fence on top of it, or ADR 0017 just cements the sprawl.
 
+- **Team awareness for sub-agents — design captured in [ADR 0018](adr/0018-team-as-derived-state.md) (Proposed, 2026-07-23); discuss + dogfood before building.** Original note (2026-07-22):
+  Agent-to-agent messaging exists mechanically (`SendMessage(to: <name>)`, mailbox
+  drain at turn start) but is invisible to the agents: no roster, no idea what
+  teammates specialise in, no discovery. The self-context fix (agent knows its own
+  name/address, deny semantics, turn budget) shipped; everything beyond that is
+  deliberately NOT built yet. Points for the discussion: (a) should inter-agent
+  messaging be its own tool or stay a `SendMessage` addressing mode; (b) where does
+  the roster come from — static injection at thread start goes stale in the frozen
+  prefix, so teammate info probably belongs in the turn-start injection alongside
+  the inbox; (c) Bruce's sketch: when an agent hits a question/task outside its own
+  goal, it should get information about its surrounding (who else exists, who owns
+  what), mail the right party, and either wait or continue — half-formed, revisit
+  together before building anything.
+
 ## Deferred (trigger-gated)
 
 - **ADR 0016 — harness calls — deferred.** Letting the loop reach for a local utility
@@ -86,3 +100,21 @@ Findings the three-lens review raised and we consciously accepted rather than fi
   exit-code-gating lessons are now tooling, not discipline. Watch continues: if
   the flake recurs *despite* the raised deadline, the hypothesis is falsified
   and the names will finally be on file.
+
+  **CLOSED (2026-07-22): root cause caught with a stack trace.** The flake
+  recurred twice in back-to-back full-suite runs and the log finally had the
+  error: `ENOTEMPTY … rmSync` thrown from a test file's `afterEach` — NOT an
+  assertion, NOT `waitForTrace` (that hypothesis is hereby falsified; the 10 s
+  deadline stays as harmless hardening). Mechanism: the loop's trace appends and
+  `publish()` calls are fire-and-forget, so `runThread` can resolve while a
+  write is still in flight; `afterEach`'s recursive `rmSync` then races it —
+  the straggler re-creates a file inside a directory `rm` has already emptied,
+  and the final `rmdir` fails ENOTEMPTY. That's why the failing test name was
+  never the same (the victim is whichever test is cleaning up) and why retries
+  were always green. Fix: every recursive cleanup `rmSync` in `tests/` now
+  passes `maxRetries: 10, retryDelay: 50` — Node re-scans the directory on
+  ENOTEMPTY retry, sweeping the straggler. Copy that option pair into the
+  `afterEach` of any NEW test file that creates a workspace dir. (Optional
+  deeper fix, unbuilt: have `runThread` drain pending trace/publish writes
+  before returning — would make traces deterministic and `waitForTrace`
+  unnecessary; only worth it if the retry fix ever proves insufficient.)

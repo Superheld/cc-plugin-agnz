@@ -30,7 +30,7 @@ There is no MCP server. The parent calls the CLI via Bash; every verb prints a J
 
 Every thread-addressing verb accepts a **name or an id**; a name resolves to its most recent live thread.
 
-Runs are **always detached**: the CLI returns at once and the runner works in its own process. The result reaches the parent via the message hook — the runner appends to `messages.jsonl`, and the `UserPromptSubmit` hook injects unread parent mail plus a live status block for each active thread into your next prompt automatically (an OS notification fires for urgent mail), so you stay informed without polling. To collect a specific run sooner, `agnz wait <id>`; to inspect one, `agnz show <id>` (or the `/agnz:threads` skill). agnz also protects *your own* Claude session's context: the sub-agents' raw transcripts stay out of it — `show` returns a compact structural view, and a hook keeps the lead from directly reading thread transcripts and traces.
+Runs are **always detached**: the CLI returns at once and the runner works in its own process. The result reaches the parent via the message hook — the runner appends to `messages.jsonl`, and the `UserPromptSubmit` hook injects unread parent mail plus a live status block for each active thread into your next prompt automatically (an OS notification fires for urgent mail), so you stay informed without polling. To collect a specific run sooner, `agnz wait <id>`; to inspect one, `agnz show <id>` (without a target, `show` lists all threads). agnz also protects *your own* Claude session's context: the sub-agents' raw transcripts stay out of it — `show` returns a compact structural view, and a hook keeps the lead from directly reading thread transcripts and traces.
 
 ## Architecture at a glance
 
@@ -59,7 +59,7 @@ Results flow back independently of the CLI process via `messages.jsonl` + the `U
 Each turn the agent receives a system prompt composed of:
 
 1. **Sandbox framing** — cwd, tool workflow rules (Grep before Read, Read before Write — ADR 0013), messaging instructions
-2. **CLAUDE.md files** — `<cwd>/CLAUDE.md` at startup; subdirectory `CLAUDE.md` files are added as the agent accesses files in those directories
+2. **Project conventions** — `<cwd>/CLAUDE.md` at startup (or `AGENTS.md` if no CLAUDE.md exists — first hit wins, so symlinked pairs don't duplicate); subdirectory files are added as the agent accesses those directories
 3. **Tool restrictions** — which tools are allowed/denied per the agent def
 4. **Skills catalog** — names + descriptions of available skills; agent loads full content on demand via `Skill({action:"load", name:"..."})`
 5. **Agent body** — the role definition from the agent def frontmatter
@@ -79,7 +79,7 @@ This repo is a plain Claude Code plugin. The canonical marketplace is [`Superhel
 Installing wires the hooks (result delivery, spend summary, and the context guardrails that keep sub-agent transcripts out of your session), the bundled agents, and the skills. The parent invokes the CLI via Bash; verify with:
 
 ```bash
-agnz list
+agnz show
 ```
 
 After code changes, update in place: `/plugin marketplace update agnz && /plugin install agnz@agnz && /reload-plugins`.
@@ -150,7 +150,6 @@ Two independent roots:
 | Skill | Slash command | Purpose |
 |---|---|---|
 | `agnz-setup` | `/agnz:setup` | Manage LLM profiles (add, remove, use, test, mappings) |
-| `agnz-threads` | `/agnz:threads` | List and inspect threads in the current workspace |
 | `agnz` | — | Progressive-disclosure reference for agent definitions and the CLI lifecycle |
 
 ## Observability & evaluation
@@ -159,9 +158,11 @@ Every thread writes an append-only runtime trace next to its transcript
 (`<thread-id>.trace.jsonl`): per-turn LLM latency + token usage, tool outcomes,
 JSON-repair events, and a terminal `thread_end`. From it you get:
 
-- **Stats** — `node ${CLAUDE_PLUGIN_ROOT}/lib/trace-stats.mjs [<thread-id>]` (or
-  `inspect.sh stats`) folds the trace into turns, tokens, latency, tool-error
-  and repair rates, with per-model rollups.
+- **Stats** — `agnz show <id>` folds one thread's trace into turns, tokens,
+  latency, tool-error and repair rates. Workspace-wide rollups (per-model
+  comparisons) are deliberately not a CLI concern: the trace files are plain
+  JSONL, built to be read by external tooling (`lib/trace-stats.mjs` remains
+  available as an importable aggregator).
 - **Live spend** — the `SessionStart`/`UserPromptSubmit` hooks inject a per-thread
   status line (`dev:1a2b3c4d — running · 5 turns · ctx ~2k`, where `ctx` is the
   resume weight a `send` re-sends) into Claude's context, so the parent sees
