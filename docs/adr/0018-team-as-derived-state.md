@@ -47,7 +47,19 @@ Delta-only injection (roster re-sent only when changed, mirroring the parent hoo
 
 The epic/goal is **not stored anywhere**. The lead writes it into the task messages it sends — it already does; a kickoff directive to each crew member ("Epic 2: rebuild the billing flow. You own X; reviewer owns Y") is the mission statement, and it lands in the transcript where it survives resumes. Text in the conversation is the most flexible carrier for something that changes per epic (constraint 1), and the lead — who owns the epic anyway — is its natural author.
 
-### 3. Coordination stays hub-and-spoke
+### 3. Agent = named thread (the identity commitment)
+
+The address-book discussion (2026-07-23) surfaced the underlying identity question: is an "agent" the def, the thread, or something that persists across threads? This ADR commits to the simplest coherent model:
+
+**The name is the identity; the thread is its memory; the def is only the role (class, not instance).**
+
+- "Reuse the agent" = resume its thread, with all accumulated context (`send <name>`).
+- "Same role, fresh head" = a **new agent** with a new name (`dev-auth`, `dev-billing`) — not a second thread under the same name.
+- Naming convention for the lead (skill guidance, not mechanism): **name = mission instance**. Mission continues → resume; new mission → new name. Sharing one name across parallel threads is the anti-pattern; `resolveTarget`'s most-recent-wins is the fallback, not the design.
+
+The rejected-for-now alternative — **agent as a persistent identity across threads** (one `reviewer`, many conversations over time) — is deliberately out of scope: an identity that remembers nothing between threads is just a reused string, so this model is only honest with cross-thread memory underneath it. That is ADR 0008 (brain) territory, and the boundary is drawn here precisely so the messaging layer never half-implements a brain by accident.
+
+### 4. Coordination stays hub-and-spoke
 
 The lead orchestrates: assigns work, routes handoffs, decides sequencing. Agent-to-agent traffic is limited to what the mailbox already allows — questions, answers, status (`SendMessage(to: "reviewer", kind: "question", …)`), which the roster finally makes *usable* (you can only ask someone you know exists). **No agent-to-agent task delegation**: local models orchestrating each other is a failure multiplier, and it would bypass the approval model. Mesh coordination, if ever, is a separate ADR with dogfooding scars behind it.
 
@@ -69,8 +81,18 @@ The lead orchestrates: assigns work, routes handoffs, decides sequencing. Agent-
 
 Dogfood the smallest real crew — **dev → reviewer → test on the dashboard project** — orchestrated hub-and-spoke by the lead. Run it once *before* implementing the roster (baseline: where does mutual blindness actually hurt?) and once after. The friction log decides what, if anything, comes next (board? kickoff sugar? nothing?).
 
+## Delivery to idle colleagues (the address book's honest gap)
+
+Mailbox delivery happens at turn start — an idle agent has no next turn until something spawns it, so a question addressed to an idle colleague lies unread. Two answers were considered:
+
+- **Auto-wake** (incoming a2a mail spawns the recipient's runner): rejected — agents would burn tokens on runs the lead never initiated, bypassing the control model. This is mesh coordination through the back door.
+- **Lead-mediated wake** (chosen direction): the hook block surfaces unread a2a mail for idle recipients ("reviewer has 1 unread from dev — idle"); the lead decides whether to wake it. Hub-and-spoke consistent. The roster marks idle colleagues honestly: `reviewer — idle — replies when next started`.
+
+The address book itself is context, never tool schema: dynamic names inside the `tools[]` payload would mutate the prompt every turn and break prefix caching (ADR 0012); the roster injection appends cache-safely instead.
+
 ## Open questions
 
 - Should the roster line include the colleague's `ctx` weight so an agent can judge how loaded a colleague is? (Lean: no — that's the lead's concern.)
 - Does `to: "*"` broadcast deserve a CLI verb for kickoffs? Caveat: broadcast mail only reaches agents at their next turn — an idle agent has no next turn until the lead sends to it, so a kickoff broadcast is weaker than it looks.
 - Roster wording for paused colleagues (`awaiting_input` — worth telling an agent that its reviewer is stuck on an approval?).
+- Should the lead-mediated wake be a one-keystroke affair (`agnz send reviewer ""` is awkward; maybe `send` with no message just wakes = drains the inbox)?
