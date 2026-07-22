@@ -232,7 +232,7 @@ node --test tests/*.test.mjs
 - **Comments explain *why*, not what.** The code already says what it does.
 - **JSONL for streams, JSON for snapshots.** Thread transcripts append-only, thread meta rewritten in place.
 - **Two data roots, two lifetimes.** User-wide under `resolveUserDir()` is for cross-project personal state (profiles). Per-project under `resolveProjectDir(cwd)` is for work-in-progress state that belongs with the code. Don't cross the streams.
-- **Sub-agent prompts live in `lib/prompts.mjs`** (`INSTRUCTIONS`, `SANDBOX_FRAMING`, `AVAILABLE_TOOLS`, `DENIED_TOOLS`, `SKILLS_HEADER`).
+- **Sub-agent prompts live in `lib/prompts.mjs`** (`SANDBOX_FRAMING`, `AVAILABLE_TOOLS`, `DENIED_TOOLS`, `SKILLS_HEADER`). `SANDBOX_FRAMING` carries `{agentName}`/`{maxTurns}`/`{cwd}` placeholders, all static per thread so the rendered prefix stays freezable (ADR 0012).
 - **Edit-tool gotcha: em-dash in comments.** Several files (notably `loop.mjs`) use `—` (U+2014) in inline comments. The Edit tool's `old_string` match silently fails on these. Workaround: use a shorter `old_string` that avoids the em-dash line, or diagnose with `hexdump -C`.
 
 ## Design-in-progress: the ADRs

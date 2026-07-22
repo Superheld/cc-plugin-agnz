@@ -150,6 +150,29 @@ test("CLAUDE.md wins over AGENTS.md when both exist (no duplicate injection)", a
   assert.doesNotMatch(prompt, /CWD AGENTS RULES/);
 });
 
+test("the system prompt tells the agent who it is, its address, and its turn budget", async () => {
+  const threadMgr = createThreadManager();
+  const thread = await threadMgr.createThread({
+    cwd: projectCwd,
+    name: "probe",
+    agentDef: { name: "researcher-1", tools: ["Read"], maxTurns: 7 },
+  });
+  const sandbox = createSandbox({ root: projectCwd, policy: { Read: "allow" } });
+  const registry = createRegistry();
+  const profile = { baseUrl: "http://fake", model: "fake", name: "p" };
+
+  await runThread({ thread, threadMgr, sandbox, registry, profile, chat: fakeChat([finalMessage("ok")]), userMessage: "hi" });
+
+  const prompt = await threadMgr.readSystemPrompt(thread.id);
+  // Identity: the agent's own mailbox address, stated as such.
+  assert.match(prompt, /You are 'researcher-1'/);
+  assert.match(prompt, /'researcher-1' is your own message address/);
+  // Turn budget: the agentDef's maxTurns, not the default.
+  assert.match(prompt, /at most 7 turns/);
+  // No placeholder may survive rendering.
+  assert.doesNotMatch(prompt, /\{agentName\}|\{maxTurns\}|\{cwd\}/);
+});
+
 test("the snapshot is persisted as the thread's system-prompt file after the first run", async () => {
   const threadMgr = createThreadManager();
   const thread = await threadMgr.createThread({ cwd: projectCwd, name: "dev", agentDef: { name: "dev", tools: ["Read"] } });
