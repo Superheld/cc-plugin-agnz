@@ -85,7 +85,10 @@ test("vendor and VCS dirs are skipped, hidden files are searched", async () => {
 });
 
 test("binary files (NUL in first 8 KiB) are skipped", async () => {
-  writeFileSync(join(root, "bin.dat"), Buffer.from([0x6e, 0x00, 0x65, 0x65, 0x64, 0x6c, 0x65]));
+  // The pattern must stay intact next to the NUL — otherwise this test
+  // passes even without the skip (the NUL would break the match itself,
+  // as a mutation run proved).
+  writeFileSync(join(root, "bin.dat"), Buffer.concat([Buffer.from([0x00]), Buffer.from("needle\n")]));
   file("text.txt", "needle\n");
   const r = await Grep.run({ pattern: "needle" }, ctx);
   assert.match(r.content, /Found 1 match/);
