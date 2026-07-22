@@ -71,3 +71,18 @@ Findings the three-lens review raised and we consciously accepted rather than fi
   `grep '^ℹ (pass|fail)'` — which exits 0 on a *match*, including "fail 2" — so a red
   suite did not stop the pipeline. Gate release chains on the test runner's exit code
   (`node --test ... && git merge ...`), never on a grep of its summary.
+
+  **Hunt (2026-07-22, quality pass):** deliberate reproduction attempts failed —
+  10 full-suite runs each chained directly behind a 40-file `git merge` in an
+  isolated clone (0 red), plus 20 runs of the prime-suspect file under sustained
+  `dd`+`sync` disk load with `UV_THREADPOOL_SIZE=2` (0 red). Structural analysis
+  found exactly one bounded wait on fire-and-forget disk I/O in the whole suite:
+  `waitForTrace` in `tests/loop-trace.test.mjs`, 1 s deadline, two call sites —
+  which matches every observed occurrence (1–2 tests red, green on retry,
+  I/O-load correlation; the trace append can lag behind `runThread` resolving).
+  Actions taken: deadline raised 1 s → 10 s (poll exits early when green, so the
+  ceiling is free), and `scripts/test.sh` added — tees the full log, echoes
+  failing names on red, exits with the runner's verdict — so the names-first and
+  exit-code-gating lessons are now tooling, not discipline. Watch continues: if
+  the flake recurs *despite* the raised deadline, the hypothesis is falsified
+  and the names will finally be on file.
