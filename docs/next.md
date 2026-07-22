@@ -17,7 +17,7 @@ chose to defer. Dated entries reflect what was true when written.
   (`~/.claude/agents/`, `<cwd>/.claude/agents/`). Consolidate that story before
   designing the CLI/fence on top of it, or ADR 0017 just cements the sprawl.
 
-- **Team awareness for sub-agents — needs a design discussion (Bruce, 2026-07-22).**
+- **Team awareness for sub-agents — design captured in [ADR 0018](adr/0018-team-as-derived-state.md) (Proposed, 2026-07-23); discuss + dogfood before building.** Original note (2026-07-22):
   Agent-to-agent messaging exists mechanically (`SendMessage(to: <name>)`, mailbox
   drain at turn start) but is invisible to the agents: no roster, no idea what
   teammates specialise in, no discovery. The self-context fix (agent knows its own
