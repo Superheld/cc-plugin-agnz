@@ -164,3 +164,30 @@ test("an LLM error marks the thread error and rethrows", async () => {
   assert.equal(after.status, "error");
   assert.match(after.error.message, /boom from llm/);
 });
+
+test("a run stamps a live 'working:' summary that replaces the previous segment's outcome", async () => {
+  const threadMgr = createThreadManager();
+  const thread = await threadMgr.createThread({ cwd: projectCwd, name: "dev", agentDef: { name: "dev" } });
+  // A previous segment left its outcome on the meta — exactly the state that
+  // read as CURRENT status in list/hook while the thread was running again.
+  await threadMgr.setStatus(thread.id, "idle", { summary: "reached turn limit (40)" });
+
+  // Capture the summary mid-run: at the first chat() call the run-start stamp
+  // has happened, the finish stamp has not.
+  let midRunSummary = null;
+  const inner = fakeChat([finalMessage("all done")]);
+  const chat = async (...args) => {
+    midRunSummary = (await threadMgr.getThread(thread.id)).summary;
+    return inner(...args);
+  };
+  const { sandbox, registry, profile } = makeThread(threadMgr, {}, chat);
+  await runThread({
+    thread: await threadMgr.getThread(thread.id),
+    threadMgr, sandbox, registry, profile, chat,
+    userMessage: "Refactor the parser module",
+  });
+
+  assert.equal(midRunSummary, "working: Refactor the parser module");
+  const after = await threadMgr.getThread(thread.id);
+  assert.notEqual(after.summary, midRunSummary, "the finish stamp overwrites the working marker");
+});
