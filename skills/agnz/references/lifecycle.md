@@ -105,7 +105,7 @@ agnz remove --status error        # sweep: every crashed thread
 
 The workspace `messages.jsonl` is untouched — communication history survives its participants. Rule of thumb: `stop` when you're done, `remove` when you'd otherwise never look at it again.
 
-All thread-addressing verbs (`send`, `wait`, `approve`, `answer`, `stop`, `remove`, `interrupt`, `show`) accept a **name or an id** interchangeably; a name resolves to its most recent live thread.
+All thread-addressing verbs (`send`, `wait`, `approve`, `answer`, `stop`, `remove`, `interrupt`, `show`) accept a **name or an id** interchangeably; a name resolves to its most recent live thread. A **unique id prefix** (≥ 4 chars, git-style) works too — the 8-char short ids shown in the lead block and `list` are directly usable; an ambiguous prefix is an explicit error, and a name always wins over a prefix.
 
 ### `list` / `show`
 

@@ -58,24 +58,24 @@ When a thread is `awaiting_input`, the `pending` object in meta has everything n
 
 Each thread also has a runtime trace at `.claude/agnz/threads/<id>.trace.jsonl`
 (events: `thread_start`, `turn_start`, `llm_call`, `tool_call`, `repair`,
-`pause`, `thread_end`). `lib/trace-stats.mjs` folds it into turns, token spend,
-LLM latency, tool outcomes, and repair rate — the answer to "how much did this
-agent cost and how did it go". Use this when the user asks "how many tokens",
-"how long did it take", "how many tool calls", "which model is cheaper", or to
-compare local models per profile.
+`pause`, `thread_end`), folded into turns, token spend, LLM latency, tool
+outcomes, and repair rate — the answer to "how much did this agent cost and
+how did it go".
+
+Two entry points, split by scope:
 
 ```bash
-# workspace-wide totals + per-model breakdown
-node ${CLAUDE_PLUGIN_ROOT}/lib/trace-stats.mjs
+# ONE thread → agnz show already folds its trace stats in (the `stats` block).
+# No separate call needed.
+agnz show <id|name>
 
-# one thread, detailed (turns, tokens, tool outcomes, repairs)
-node ${CLAUDE_PLUGIN_ROOT}/lib/trace-stats.mjs <thread-id>
-
-# machine-readable for further processing
-node ${CLAUDE_PLUGIN_ROOT}/lib/trace-stats.mjs <thread-id> --json
+# The WHOLE workspace → totals + per-model/per-agent breakdown. Use when the
+# user asks "which model is cheaper", "total spend", or compares profiles.
+agnz stats
 ```
 
-The CLI reads `<cwd>/.claude/agnz/` (override with `AGNZ_CWD`).
+(`inspect.sh stats` remains as a terminal shortcut over the same aggregation.)
+The CLI reads `<cwd>/.claude/agnz/` (override with `--cwd`).
 
 ## Hygiene
 

@@ -12,6 +12,7 @@
 //   agnz remove <id|name> | --status stopped|error   (delete files permanently)
 //   agnz list   [--status <s>]
 //   agnz show   <id>
+//   agnz stats                        (workspace-wide trace aggregation)
 //
 // Every verb prints a JSON object (or array) to stdout so the parent can
 // parse the outcome from a Bash call. Errors print {"error": "..."} and exit 1.
@@ -40,7 +41,7 @@ import {
 } from "../lib/agent-defs.mjs";
 import { createSandbox } from "../lib/sandbox.mjs";
 import { publish } from "../lib/event-bus.mjs";
-import { readTrace, aggregateTrace } from "../lib/trace-stats.mjs";
+import { readTrace, aggregateTrace, aggregateWorkspace } from "../lib/trace-stats.mjs";
 import { PLUGIN_ROOT } from "../lib/orchestrate.mjs";
 
 const RUNNER = resolve(PLUGIN_ROOT, "lib", "runner.mjs");
@@ -95,7 +96,21 @@ async function resolveTarget(tm, cwd, token, { includeError = false } = {}) {
   const candidates = threads
     .filter((t) => t.name === token && (includeError || t.status !== "error"))
     .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-  return candidates[0] || null;
+  if (candidates[0]) return candidates[0];
+  // Git-style unique id prefix, tried last (a name always wins over a prefix).
+  // The lead block shows 8-char short ids — whatever we display must be
+  // addressable. Minimum 4 chars keeps accidental matches out; ambiguity is
+  // an explicit error, never a silent pick.
+  if (typeof token === "string" && token.length >= 4) {
+    const byPrefix = threads.filter((t) => t.id.startsWith(token));
+    if (byPrefix.length === 1) return byPrefix[0];
+    if (byPrefix.length > 1) {
+      throw new Error(
+        `id prefix '${token}' is ambiguous: ${byPrefix.map((t) => t.id.slice(0, 8)).join(", ")}`,
+      );
+    }
+  }
+  return null;
 }
 export { resolveTarget };
 
@@ -105,6 +120,39 @@ function spawnRunner(payload) {
   writeFileSync(pf, JSON.stringify(payload));
   const child = spawn(process.execPath, [RUNNER, pf], { detached: true, stdio: "ignore" });
   child.unref();
+}
+
+// Stamp the spawn intent BEFORE the runner process exists, then spawn. Between
+// "CLI printed started" and "runner claimed the thread" the meta still says
+// idle with the previous outcome — without the marker, a wait fired right
+// after send collects that stale outcome as if it were the answer (dogfooding
+// find, 2026-07-22). claimThread clears the marker atomically on takeover.
+async function spawnRun(tm, payload) {
+  await tm.updateThread(payload.threadId, { pendingRun: { spawnedAt: Date.now() } });
+  spawnRunner(payload);
+}
+
+// How long a spawned runner gets to claim its thread before the marker is
+// distrusted. Spawn→claim is normally well under a second; 15 s covers a
+// loaded machine without letting a crashed spawn stall `wait` forever.
+export const PENDING_RUN_GRACE_MS = 15_000;
+
+// Pure collect gate for `wait` (unit-testable): collect only when the thread
+// is not running AND no fresh spawn marker exists. A stale marker means the
+// runner died before claiming — collect then, but say so, instead of
+// presenting the previous outcome as the fresh answer.
+export function decideCollect(thread, now = Date.now()) {
+  if (thread.status === "running") return { collect: false };
+  const pr = thread.pendingRun;
+  if (pr && typeof pr.spawnedAt === "number") {
+    if (now - pr.spawnedAt < PENDING_RUN_GRACE_MS) return { collect: false };
+    return {
+      collect: true,
+      staleNote:
+        "a spawned run never started (runner likely crashed before claiming) — showing the previous outcome",
+    };
+  }
+  return { collect: true };
 }
 
 // Is a pid still a live process? Signal 0 probes without delivering anything.
@@ -291,6 +339,9 @@ export function buildShowView(thread, messages, stats) {
     recent: (messages || []).slice(-6).map(capMessageContent),
   };
   if (thread.card) view.thread.card = thread.card;
+  // A pendingRun marker means a spawned runner has not claimed yet — the
+  // "idle" status above is about to flip; surface it so show isn't misread.
+  if (thread.pendingRun) view.thread.pendingRun = thread.pendingRun;
   if (stats) view.stats = stats;
   return view;
 }
@@ -356,7 +407,7 @@ async function main() {
         out({ thread_id: thread.id, name, agent: agentDef.name, status: "idle" });
         return;
       }
-      spawnRunner({ threadId: thread.id, cwd: thread.cwd, userMessage: message });
+      await spawnRun(tm, { threadId: thread.id, cwd: thread.cwd, userMessage: message });
       out({ thread_id: thread.id, name, agent: agentDef.name, status: "started" });
       return;
     }
@@ -377,7 +428,7 @@ async function main() {
         out({ thread_id: thread.id, status: "queued", hint: `thread is ${thread.status}; message queued for the next turn boundary` });
         return;
       }
-      spawnRunner({ threadId: thread.id, cwd: thread.cwd, userMessage: message });
+      await spawnRun(tm, { threadId: thread.id, cwd: thread.cwd, userMessage: message });
       out({ thread_id: thread.id, status: "started" });
       return;
     }
@@ -394,7 +445,7 @@ async function main() {
         fail(`thread '${id}' is not awaiting approval (status=${thread.status}, pending=${thread.pending?.kind ?? "none"})`);
       }
       const resumeInput = { toolCallId: thread.pending.toolCallId, decision, persist: flags.persist === true };
-      spawnRunner({ threadId: id, cwd: thread.cwd, resumeInput });
+      await spawnRun(tm, { threadId: id, cwd: thread.cwd, resumeInput });
       out({ thread_id: id, status: "started" });
       return;
     }
@@ -411,7 +462,7 @@ async function main() {
         fail(`thread '${id}' is not awaiting a question (status=${thread.status}, pending=${thread.pending?.kind ?? "none"})`);
       }
       const resumeInput = { toolCallId: thread.pending.toolCallId, answer };
-      spawnRunner({ threadId: id, cwd: thread.cwd, resumeInput });
+      await spawnRun(tm, { threadId: id, cwd: thread.cwd, resumeInput });
       out({ thread_id: id, status: "started" });
       return;
     }
@@ -436,9 +487,19 @@ async function main() {
       for (;;) {
         thread = await recoverIfStale(tm, await tm.getThread(thread.id));
         if (!thread) fail(`thread '${target}' disappeared while waiting`);
-        if (thread.status !== "running") {
+        // decideCollect closes the send→wait race: right after a spawn the meta
+        // still says idle with the PREVIOUS outcome until the runner claims —
+        // the pendingRun marker keeps us polling through that window.
+        const gate = decideCollect(thread);
+        if (gate.collect) {
           const msgs = thread.status === "idle" ? await tm.readMessages(thread.id) : null;
-          out(decideWaitOutcome(thread, msgs));
+          const outcome = decideWaitOutcome(thread, msgs);
+          if (gate.staleNote) {
+            outcome.note = gate.staleNote;
+            // Clear the dead marker so it doesn't re-annotate every future call.
+            await tm.updateThread(thread.id, { pendingRun: null }).catch(() => {});
+          }
+          out(outcome);
           return;
         }
         if (Date.now() >= deadline) {
@@ -448,10 +509,13 @@ async function main() {
           const activity = lastToolActivity(await readTrace(thread.cwd, thread.id));
           out({
             thread_id: thread.id,
-            status: "running",
+            status: thread.status,
             timeout: true,
             ...(activity ? { lastActivity: activity } : {}),
-            note: "still running — wait again or rely on the message hook",
+            note:
+              thread.status === "running"
+                ? "still running — wait again or rely on the message hook"
+                : "spawned run is still starting — wait again",
           });
           return;
         }
@@ -567,9 +631,20 @@ async function main() {
             ...(t.status === "running"
               ? { lastActivity: lastToolActivity(await readTrace(t.cwd, t.id)) }
               : {}),
+            // A spawned-but-not-yet-claimed run: the idle status is about to flip.
+            ...(t.pendingRun ? { pendingRun: t.pendingRun } : {}),
           })),
         ),
       );
+      return;
+    }
+
+    case "stats": {
+      // Workspace-wide trace aggregation with per-model/per-agent breakdown —
+      // the one job lib/trace-stats.mjs does that `show` (single thread) does
+      // not already fold in. Replaces pointing users at the raw
+      // `node lib/trace-stats.mjs` invocation.
+      out(await aggregateWorkspace(cwd));
       return;
     }
 
@@ -597,7 +672,7 @@ async function main() {
     }
 
     default:
-      fail(`unknown verb '${verb ?? ""}'. Use: start | send | approve | answer | wait | stop | remove | interrupt | list | show`);
+      fail(`unknown verb '${verb ?? ""}'. Use: start | send | approve | answer | wait | stop | remove | interrupt | list | show | stats`);
   }
 }
 

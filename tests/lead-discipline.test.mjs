@@ -20,7 +20,14 @@ import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { buildShowView, decideWaitOutcome, resolveTarget, lastToolActivity } from "../bin/agnz.mjs";
+import {
+  buildShowView,
+  decideWaitOutcome,
+  resolveTarget,
+  lastToolActivity,
+  decideCollect,
+  PENDING_RUN_GRACE_MS,
+} from "../bin/agnz.mjs";
 import { createThreadManager } from "../lib/threads.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -144,6 +151,62 @@ test("lastToolActivity is null on an empty or tool-less trace", () => {
 test("lastToolActivity tolerates a target-less tool_call (field simply absent)", () => {
   const a = lastToolActivity([{ ts: 5, type: "tool_call", name: "SendMessage", outcome: "ok" }], 10);
   assert.deepEqual(a, { name: "SendMessage", outcome: "ok", ts: 5, agoMs: 5 });
+});
+
+test("decideCollect: running blocks, no marker collects", () => {
+  assert.deepEqual(decideCollect({ status: "running" }), { collect: false });
+  assert.deepEqual(decideCollect({ status: "idle" }), { collect: true });
+  assert.deepEqual(decideCollect({ status: "error" }), { collect: true });
+});
+
+test("decideCollect: a fresh pendingRun blocks collect (send→wait race)", () => {
+  const now = 1_000_000;
+  const gate = decideCollect({ status: "idle", pendingRun: { spawnedAt: now - 500 } }, now);
+  assert.deepEqual(gate, { collect: false });
+});
+
+test("decideCollect: a stale pendingRun collects with an honest note", () => {
+  const now = 1_000_000;
+  const gate = decideCollect(
+    { status: "idle", pendingRun: { spawnedAt: now - PENDING_RUN_GRACE_MS - 1 } },
+    now,
+  );
+  assert.equal(gate.collect, true);
+  assert.match(gate.staleNote, /never started/);
+});
+
+// resolveTarget's prefix logic only needs reconcileWorkspace/getThread — a
+// stub tm lets us control the id set (real ids are random uuids, so an
+// ambiguous prefix can't be manufactured through the real manager).
+function stubTm(threads) {
+  return { reconcileWorkspace: async () => threads, getThread: async () => null };
+}
+
+test("resolveTarget resolves a unique id prefix (git-style short handle)", async () => {
+  const tm = stubTm([
+    { id: "abc12345-1111", name: "dev", status: "idle" },
+    { id: "def67890-2222", name: "res", status: "idle" },
+  ]);
+  const hit = await resolveTarget(tm, "/x", "abc12345");
+  assert.equal(hit.id, "abc12345-1111");
+});
+
+test("resolveTarget rejects an ambiguous id prefix explicitly", async () => {
+  const tm = stubTm([
+    { id: "abc12345-1111", name: "a", status: "idle" },
+    { id: "abc19999-2222", name: "b", status: "idle" },
+  ]);
+  await assert.rejects(() => resolveTarget(tm, "/x", "abc1"), /ambiguous/);
+});
+
+test("resolveTarget: a name match beats a prefix match; short tokens never prefix-match", async () => {
+  const tm = stubTm([
+    { id: "abcd9999-1111", name: "other", status: "idle" },
+    { id: "ffff0000-2222", name: "abcd", status: "idle" },
+  ]);
+  const byName = await resolveTarget(tm, "/x", "abcd");
+  assert.equal(byName.id, "ffff0000-2222", "the human-chosen name wins");
+  assert.equal(await resolveTarget(tm, "/x", "abc"), null, "3 chars is below the prefix minimum");
 });
 
 test("decideWaitOutcome returns the last assistant answer on an idle thread", () => {
@@ -394,4 +457,53 @@ test("--wait on start/send fails with a pointer to the wait verb", () => {
   const parsed = JSON.parse(stdout);
   assert.match(parsed.error, /--wait was removed/);
   assert.match(parsed.error, /agnz wait <id>/);
+});
+
+test("wait right after a spawn does NOT hand out the previous outcome (pendingRun gate)", async () => {
+  const id = await seedIdleThread();
+  const tm = createThreadManager();
+  await tm.reconcileWorkspace(cwd); // id→cwd resolution is cwd-scoped (ADR 0017)
+  // Simulate what send does just before spawning: stamp the fresh marker.
+  await tm.updateThread(id, { pendingRun: { spawnedAt: Date.now() } });
+  const outcome = runCli(["wait", id, "--timeout", "1"]);
+  assert.equal(outcome.timeout, true, "must keep polling, not collect");
+  assert.equal(outcome.content, undefined, "the stale final answer must not leak out");
+  assert.match(outcome.note, /still starting/);
+});
+
+test("wait on a stale spawn marker collects, says so, and clears the marker", async () => {
+  const id = await seedIdleThread();
+  const tm = createThreadManager();
+  await tm.reconcileWorkspace(cwd); // id→cwd resolution is cwd-scoped (ADR 0017)
+  // Runner died before claiming: the marker is well past the grace window.
+  await tm.updateThread(id, { pendingRun: { spawnedAt: Date.now() - 10 * 60 * 1000 } });
+  const outcome = runCli(["wait", id]);
+  assert.equal(outcome.content, "final answer from the agent");
+  assert.match(outcome.note, /never started/);
+  const after = await tm.getThread(id);
+  assert.equal(after.pendingRun, null, "dead marker swept so it cannot re-annotate");
+});
+
+test("show resolves the 8-char short id the lead block displays", async () => {
+  const id = await seedIdleThread();
+  const view = runCli(["show", id.slice(0, 8)]);
+  assert.equal(view.thread.thread_id, id);
+});
+
+test("stats aggregates workspace traces with per-model breakdown", async () => {
+  const id = await seedIdleThread();
+  writeFileSync(
+    join(cwd, ".claude", "agnz", "threads", `${id}.trace.jsonl`),
+    [
+      { ts: 1, type: "thread_start", model: "devstral", agent: "dev" },
+      { ts: 2, type: "llm_call", turn: 0, latencyMs: 100, usage: { prompt: 10, completion: 5, total: 15 } },
+      { ts: 3, type: "tool_call", turn: 0, name: "Read", outcome: "ok" },
+      { ts: 4, type: "thread_end", reason: "final" },
+    ].map((e) => JSON.stringify(e)).join("\n") + "\n",
+  );
+  const ws = runCli(["stats"]);
+  assert.equal(ws.totals.threads, 1);
+  assert.equal(ws.totals.llmCalls, 1);
+  assert.equal(ws.totals.tokens.total, 15);
+  assert.ok(ws.byModel && Object.keys(ws.byModel).includes("devstral"));
 });

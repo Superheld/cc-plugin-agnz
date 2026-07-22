@@ -97,8 +97,11 @@ The parent calls `bin/agnz.mjs` via Bash; every verb prints JSON to stdout.
 | `stop <id\|name>` | End + archive a thread (SIGTERM to a live runner); transcript remains, hidden from the list. |
 | `remove <id\|name>` / `remove --status stopped\|error` | **Delete** a thread permanently — sweeps every `threads/<id>.*` file + index entry. Live threads must be stopped first. |
 | `list` / `show <id\|name>` | Inspect threads; `show` is the lean structural view (status, pending, spend, trace stats — no raw transcript); `list` recovers dead-runner threads. |
+| `stats` | Workspace-wide trace aggregation (totals + per-model/per-agent breakdown via `aggregateWorkspace`); single-thread stats are already folded into `show`. |
 
-All thread-addressing verbs resolve a name to its most recent live thread (same `resolveTarget` path), so `stop <name>` works exactly like `send <name>`.
+All thread-addressing verbs resolve a name to its most recent live thread (same `resolveTarget` path), so `stop <name>` works exactly like `send <name>`. A unique id **prefix** (≥ 4 chars, git-style) also resolves — the 8-char short ids the hook block displays are addressable; ambiguity is an explicit error, and a name beats a prefix.
+
+**The send→wait race is closed by a spawn marker:** every spawning verb stamps `pendingRun: {spawnedAt}` on the meta *before* the runner process exists, `claimThread` clears it atomically on takeover, and `wait` (via the pure `decideCollect` gate) refuses to collect while a fresh marker stands — so a `wait` fired right after `send` can no longer grab the previous run's outcome from the still-idle meta. A marker older than 15 s (`PENDING_RUN_GRACE_MS`) means the runner died before claiming; `wait` then collects the old outcome but labels it with an honest note and sweeps the marker. The loop also stamps `summary: "working: <task>"` at run start, so `list`/hook summaries are never a stale previous outcome while a thread runs.
 
 Always detached — results reach the parent via `messages.jsonl` + the `UserPromptSubmit` hook, or collect sooner with `agnz wait`. There is no `outputSchema`/`structuredContent` any more (that was MCP) — stdout JSON is the contract. Profile management is a slash command (`/agnz:setup`).
 
