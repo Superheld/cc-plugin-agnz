@@ -17,6 +17,20 @@ chose to defer. Dated entries reflect what was true when written.
   (`~/.claude/agents/`, `<cwd>/.claude/agents/`). Consolidate that story before
   designing the CLI/fence on top of it, or ADR 0017 just cements the sprawl.
 
+- **Team awareness for sub-agents — needs a design discussion (Bruce, 2026-07-22).**
+  Agent-to-agent messaging exists mechanically (`SendMessage(to: <name>)`, mailbox
+  drain at turn start) but is invisible to the agents: no roster, no idea what
+  teammates specialise in, no discovery. The self-context fix (agent knows its own
+  name/address, deny semantics, turn budget) shipped; everything beyond that is
+  deliberately NOT built yet. Points for the discussion: (a) should inter-agent
+  messaging be its own tool or stay a `SendMessage` addressing mode; (b) where does
+  the roster come from — static injection at thread start goes stale in the frozen
+  prefix, so teammate info probably belongs in the turn-start injection alongside
+  the inbox; (c) Bruce's sketch: when an agent hits a question/task outside its own
+  goal, it should get information about its surrounding (who else exists, who owns
+  what), mail the right party, and either wait or continue — half-formed, revisit
+  together before building anything.
+
 ## Deferred (trigger-gated)
 
 - **ADR 0016 — harness calls — deferred.** Letting the loop reach for a local utility
