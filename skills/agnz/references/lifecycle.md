@@ -40,7 +40,7 @@ agnz wait researcher-1 --timeout 120
 → {"thread_id":"abc…","status":"idle","content":"…"}
 ```
 
-Default timeout is 300s. On timeout it prints `{..., timeout:true}` and exits 0 — the underlying detached runner is untouched and keeps working; call `wait` again, or just let the `UserPromptSubmit` hook deliver the result at your next prompt. Calling `wait` on a thread that's already left `running` (idle, awaiting_input, stopped, error) returns its outcome immediately — a **collect** call, useful right after you already know the run finished.
+Default timeout is 300s. On timeout it prints `{..., timeout:true}` plus a `lastActivity` field — the agent's most recent tool call (`{name, target, agoMs}`) — and exits 0. Read `lastActivity` as a liveness check: an `agoMs` of a few seconds means "still working, keep waiting"; minutes of silence mean "look closer" (`agnz show`, or `interrupt` if it ran amok). The underlying detached runner is untouched either way; call `wait` again, or just let the `UserPromptSubmit` hook deliver the result at your next prompt. Calling `wait` on a thread that's already left `running` (idle, awaiting_input, stopped, error) returns its outcome immediately — a **collect** call, useful right after you already know the run finished.
 
 This is what replaces `--wait`: start several agents detached, do your own work, then collect each with `wait` — parallel instead of serial.
 
@@ -51,6 +51,8 @@ agnz start billing "…" --agent researcher
 agnz wait auth
 agnz wait billing
 ```
+
+**Long runs: put `wait` in the background.** If your harness's Bash tool supports background execution (Claude Code: `run_in_background`), run `agnz wait <id> --timeout 600` as a background task and go on with other work — the harness notifies you the moment the wait exits, i.e. when the agent finishes, pauses, or the timeout fires. That turns "agent finished" into an event you're woken up for instead of a state you have to remember to poll, and it costs nothing while you're busy elsewhere. On a `timeout:true` notification, check `lastActivity` and decide: re-arm another background `wait`, or intervene.
 
 ### `approve`
 

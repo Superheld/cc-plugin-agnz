@@ -16,6 +16,7 @@ import { join } from "node:path";
 import {
   readThreadSpend,
   readThreadMetas,
+  readLastActivity,
   formatThreadsDetailed,
   atomicWriteJson,
   readWsFingerprint,
@@ -81,6 +82,63 @@ test("readThreadMetas attaches spend and skips stopped threads", () => {
   assert.deepEqual(metas[0].spend, { turns: 1, tokens: 50, lastCtx: 50 });
 });
 
+test("readLastActivity returns the most recent tool_call with name/target/ts", () => {
+  writeThread("t1", { status: "running" }, [
+    { ts: 1, type: "thread_start", turn: 0 },
+    { ts: 2, type: "tool_call", turn: 0, name: "Read", target: "lib/a.mjs", outcome: "ok" },
+    { ts: 3, type: "llm_call", turn: 0, usage: { total: 50 } },
+    { ts: 4, type: "tool_call", turn: 1, name: "Write", target: "lib/b.mjs", outcome: "ok" },
+    { ts: 5, type: "llm_call", turn: 1, usage: { total: 60 } },
+  ]);
+  assert.deepEqual(readLastActivity(ws, "t1"), {
+    name: "Write",
+    target: "lib/b.mjs",
+    ts: 4,
+    outcome: "ok",
+  });
+});
+
+test("readLastActivity tail-reads a large trace (partial first line is harmless)", () => {
+  // Enough events that the 8 KiB tail window starts mid-file and its first
+  // line is a fragment — the backwards scan must still find the last call.
+  const lines = [];
+  for (let i = 0; i < 500; i++) {
+    lines.push({ ts: i, type: "tool_call", turn: i, name: "Read", target: `pad/${"x".repeat(40)}/${i}.txt`, outcome: "ok" });
+  }
+  lines.push({ ts: 9999, type: "tool_call", turn: 500, name: "Edit", target: "lib/final.mjs", outcome: "ok" });
+  writeThread("t1", { status: "running" }, lines);
+  const a = readLastActivity(ws, "t1");
+  assert.equal(a.name, "Edit");
+  assert.equal(a.target, "lib/final.mjs");
+  assert.equal(a.ts, 9999);
+});
+
+test("readLastActivity is null without a trace or without any tool_call", () => {
+  writeThread("t1", { status: "running" }, null);
+  assert.equal(readLastActivity(ws, "t1"), null);
+  writeThread("t2", { status: "running" }, [
+    { ts: 1, type: "thread_start", turn: 0 },
+    { ts: 2, type: "llm_call", turn: 0, usage: { total: 10 } },
+  ]);
+  assert.equal(readLastActivity(ws, "t2"), null);
+});
+
+test("readThreadMetas attaches lastActivity only to running threads", () => {
+  const trace = [
+    { ts: 1, type: "thread_start", turn: 0 },
+    { ts: 2, type: "tool_call", turn: 0, name: "Bash", target: "node --test", outcome: "ok" },
+  ];
+  writeThread("t1", { status: "running", name: "dev" }, trace);
+  writeThread("t2", { status: "idle", name: "done" }, trace);
+
+  const metas = readThreadMetas(ws);
+  const running = metas.find((m) => m.name === "dev");
+  const idle = metas.find((m) => m.name === "done");
+  assert.equal(running.lastActivity.name, "Bash");
+  assert.equal(running.lastActivity.target, "node --test");
+  assert.equal(idle.lastActivity, null);
+});
+
 test("formatThreadsDetailed renders short-id, status, and spend", () => {
   const now = 1782065400570;
   const out = formatThreadsDetailed(
@@ -98,6 +156,37 @@ test("formatThreadsDetailed renders short-id, status, and spend", () => {
   assert.doesNotMatch(out, /91,?234/);
   // a zero-spend fresh idle thread shows the age tag but omits the spend suffix
   assert.match(out, /9f8e7d6c — idle · now$/m);
+});
+
+test("formatThreadsDetailed shows a last-activity line for running threads", () => {
+  const now = 1782065400570;
+  const out = formatThreadsDetailed(
+    [
+      {
+        id: "1a2b3c4d5e6f",
+        name: "dev",
+        status: "running",
+        spend: { turns: 5, tokens: 9000, lastCtx: 1234 },
+        lastActivity: { name: "Write", target: "lib/runner.mjs", ts: now - 12_000, outcome: "ok" },
+      },
+    ],
+    now,
+  );
+  assert.match(out, /dev:1a2b3c4d — running · 5 turns · ctx ~1k · last: Write lib\/runner\.mjs \(12s ago\)/);
+});
+
+test("formatThreadsDetailed omits the activity tag for non-running threads and null activity", () => {
+  const now = 1782065400570;
+  const out = formatThreadsDetailed(
+    [
+      // idle thread carrying a (stale-by-design) lastActivity must not show it
+      { id: "9f8e7d6c", name: "done", status: "idle", updatedAt: now, spend: { turns: 2, tokens: 40, lastCtx: 40 }, lastActivity: { name: "Read", target: "x", ts: now } },
+      // running thread without any recorded tool call yet
+      { id: "1a2b3c4d", name: "dev", status: "running", spend: { turns: 1, tokens: 10, lastCtx: 10 }, lastActivity: null },
+    ],
+    now,
+  );
+  assert.doesNotMatch(out, /last:/);
 });
 
 test("formatThreadsDetailed header drops the idle breakdown when none are idle", () => {

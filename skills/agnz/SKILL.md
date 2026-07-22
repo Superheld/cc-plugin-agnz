@@ -43,7 +43,7 @@ Avoid delegation for work needing deep reasoning — local models are limited.
 | `show <id>` | Lean structural view: status, pending, spend, trace stats — no raw transcript. |
 | `wait <id\|name> [--timeout <s>]` | Poll a detached run until it leaves `running`; prints the outcome (default timeout 300s). |
 
-Runs are always detached — there is no `--wait` flag any more. To collect a result in the same call (e.g. after starting several agents in parallel), poll with `agnz wait`: it watches the thread and prints the outcome once it leaves `running`, `content` included. On timeout it prints `{..., timeout:true}` and exits 0 — the runner keeps working underneath; call `wait` again or let the hook deliver the result later. Calling `wait` on a thread that's already finished just returns the outcome (collect mode).
+Runs are always detached — there is no `--wait` flag any more. To collect a result in the same call (e.g. after starting several agents in parallel), poll with `agnz wait`: it watches the thread and prints the outcome once it leaves `running`, `content` included. On timeout it prints `{..., timeout:true}` plus `lastActivity` (the agent's most recent tool call — seconds old means alive, minutes old means look closer) and exits 0 — the runner keeps working underneath; call `wait` again or let the hook deliver the result later. Calling `wait` on a thread that's already finished just returns the outcome (collect mode). For long runs, launch `agnz wait` as a **background** Bash task (Claude Code: `run_in_background`) — the harness wakes you when it exits, so an agent finishing becomes an event instead of something to poll.
 
 ## Resume, don't recreate
 

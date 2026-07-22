@@ -519,6 +519,60 @@ export function readThreadSpend(wsDir, threadId) {
 }
 
 /**
+ * Last tool activity of a thread, from the tail of its trace.jsonl: the most
+ * recent tool_call event's { name, target, ts, outcome }. This is what makes a
+ * long-running thread legible at a glance ("last: Write lib/foo.mjs 12s ago" =
+ * alive and working; a stale timestamp = probably hung). Tail-read only (last
+ * 8 KiB) so the hook stays fast on a multi-hundred-KB trace; scanning backwards
+ * with a tolerant parse makes a partial first line harmless. Missing trace or
+ * no tool_call in the tail window → null.
+ */
+export function readLastActivity(wsDir, threadId) {
+  const path = join(wsDir, "threads", `${threadId}.trace.jsonl`);
+  let size;
+  try {
+    size = statSync(path).size;
+  } catch {
+    return null;
+  }
+  if (size === 0) return null;
+  const TAIL_BYTES = 8192;
+  const start = Math.max(0, size - TAIL_BYTES);
+  let raw;
+  try {
+    const len = size - start;
+    const buf = Buffer.allocUnsafe(len);
+    const fd = openSync(path, "r");
+    try {
+      readSync(fd, buf, 0, len, start);
+    } finally {
+      closeSync(fd);
+    }
+    raw = buf.toString("utf8");
+  } catch {
+    return null;
+  }
+  const lines = raw.split("\n").filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let e;
+    try {
+      e = JSON.parse(lines[i]);
+    } catch {
+      continue; // partial or garbled line — keep scanning backwards
+    }
+    if (e && e.type === "tool_call" && typeof e.name === "string") {
+      return {
+        name: e.name,
+        target: typeof e.target === "string" ? e.target : null,
+        ts: typeof e.ts === "number" ? e.ts : null,
+        outcome: typeof e.outcome === "string" ? e.outcome : null,
+      };
+    }
+  }
+  return null;
+}
+
+/**
  * Single source of truth for "which threads does the lead see". A thread
  * stays listed as long as it is *open* — idle counts as open (finished but
  * resumable, like a paused conversation). `stopped` is the archive state:
@@ -559,6 +613,10 @@ export function readThreadMetas(wsDir, { withSpend = true } = {}) {
           : (withSpend ? readThreadSpend(wsDir, meta.id) : null);
         const ctxTokens = card ? (card.ctxTokens ?? null) : null;
         const task = card ? (card.task ?? null) : null;
+        // Liveness signal, only for threads that are actually running — for
+        // everything else the card/summary already says what happened, and
+        // skipping the read keeps the common (all-idle) case at zero extra IO.
+        const lastActivity = meta.status === "running" ? readLastActivity(wsDir, meta.id) : null;
         return [{
           id: meta.id,
           name: meta.name || null,
@@ -577,6 +635,7 @@ export function readThreadMetas(wsDir, { withSpend = true } = {}) {
           ctxTokens,
           task,
           spend,
+          lastActivity,
         }];
       } catch { return []; }
     });
@@ -622,6 +681,19 @@ function parseTs(v) {
     return Number.isNaN(n) ? null : n;
   }
   return null;
+}
+
+/**
+ * Finer-grained "how long ago" for the last-activity line: liveness needs
+ * seconds resolution ("12s ago" reads alive, "9m ago" reads hung), which the
+ * minute-floor formatAge deliberately doesn't provide.
+ */
+function formatAgoFine(deltaMs) {
+  const secs = Math.max(0, Math.floor(deltaMs / 1000));
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m`;
+  return `${Math.floor(mins / 60)}h`;
 }
 
 /** Human-compact age from a timestamp: "now" / "5m" / "3h" / "2d". */
@@ -697,13 +769,23 @@ export function formatThreadsDetailed(threads, now = Date.now()) {
     } else if (s.turns) {
       spend = ` · ${s.turns} turns`;
     }
+    // Liveness for running threads: the last tool call from the trace tail.
+    // "last: Write lib/foo.mjs (12s ago)" answers "is it still working?"
+    // without anyone opening a transcript.
+    let activity = "";
+    if (t.status === "running" && t.lastActivity && t.lastActivity.name) {
+      const a = t.lastActivity;
+      const what = a.target ? `${a.name} ${String(a.target).slice(0, 60)}` : a.name;
+      const ago = a.ts != null ? ` (${formatAgoFine(now - a.ts)} ago)` : "";
+      activity = ` · last: ${what}${ago}`;
+    }
     // Second line: the rolling summary (→ description → role, fallback-chained
     // in readThreadMetas). This is what lets the parent see what a thread did
     // without opening its transcript — even weeks later. Collapse whitespace so
     // a multi-line final answer can't break the block; cap the length.
     const summary = t.summary ? String(t.summary).replace(/\s+/g, " ").trim() : "";
     const sumLine = summary ? `\n      ${summary.slice(0, 100)}` : "";
-    return `  ${label} — ${t.status}${ageTag}${spend}${sumLine}`;
+    return `  ${label} — ${t.status}${ageTag}${spend}${activity}${sumLine}`;
   });
 
   // Collapsed stale-idle bucket: names only (up to 6, then "+N more"), pointing
