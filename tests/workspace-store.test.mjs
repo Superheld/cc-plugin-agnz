@@ -25,7 +25,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  rmSync(cwd, { recursive: true, force: true });
+  rmSync(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("createWorkspaceStore", () => {

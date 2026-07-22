@@ -141,8 +141,8 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env.AGNZ_DATA_DIR;
-  rmSync(projectCwd, { recursive: true, force: true });
-  rmSync(userDir, { recursive: true, force: true });
+  rmSync(projectCwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  rmSync(userDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 test("loop executes a text-leaked tool call instead of finishing", async () => {

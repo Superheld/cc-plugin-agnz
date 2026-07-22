@@ -217,8 +217,8 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env.AGNZ_DATA_DIR;
-  rmSync(userDir, { recursive: true, force: true });
-  rmSync(cwd, { recursive: true, force: true });
+  rmSync(userDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  rmSync(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 // Run the CLI as a child process, inheriting AGNZ_DATA_DIR so it resolves the
