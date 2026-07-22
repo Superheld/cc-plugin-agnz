@@ -42,8 +42,8 @@ try {
     process.stderr.write(
       "agnz: reading a thread transcript floods the lead's context " +
         "(this is what agnz exists to avoid). Use 'agnz show <id>' for the " +
-        "structural view, 'agnz send <name> \"question\"' to ask the thread " +
-        "itself, or the /agnz:threads inspect script for capped debugging output.\n",
+        "structural view, or 'agnz send <name> \"question\"' to ask the thread " +
+        "itself.\n",
     );
     process.exit(2);
   }

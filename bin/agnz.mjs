@@ -10,9 +10,7 @@
 //   agnz wait   <id|name>             [--timeout <s>]
 //   agnz stop   <id|name>             (archive: hide from list, keep transcript)
 //   agnz remove <id|name> | --status stopped|error   (delete files permanently)
-//   agnz list   [--status <s>]
-//   agnz show   <id>
-//   agnz stats                        (workspace-wide trace aggregation)
+//   agnz show   [<id|name>]           (no target: list all threads; --status <s> filters)
 //
 // Every verb prints a JSON object (or array) to stdout so the parent can
 // parse the outcome from a Bash call. Errors print {"error": "..."} and exit 1.
@@ -41,7 +39,7 @@ import {
 } from "../lib/agent-defs.mjs";
 import { createSandbox } from "../lib/sandbox.mjs";
 import { publish } from "../lib/event-bus.mjs";
-import { readTrace, aggregateTrace, aggregateWorkspace } from "../lib/trace-stats.mjs";
+import { readTrace, aggregateTrace } from "../lib/trace-stats.mjs";
 import { PLUGIN_ROOT } from "../lib/orchestrate.mjs";
 
 const RUNNER = resolve(PLUGIN_ROOT, "lib", "runner.mjs");
@@ -389,7 +387,7 @@ async function main() {
         agentDef,
         name,
         // The founding purpose of the thread, used as a durable legibility
-        // label (agnz list / the parent hook) long after the transcript has
+        // label (agnz show / the parent hook) long after the transcript has
         // scrolled away. Prefer an explicit --description; otherwise fall back
         // to the initial task so a thread always says what it was started for,
         // even if it never reaches a final answer.
@@ -606,51 +604,46 @@ async function main() {
       return;
     }
 
-    case "list": {
-      // The threads/ dir of THIS workspace is the source of truth; the
-      // cross-workspace --all listing died with the user-wide index
-      // (ADR 0017) — use --cwd to list another project.
-      let threads = await tm.reconcileWorkspace(cwd);
-      threads = await Promise.all(threads.map((t) => recoverIfStale(tm, t)));
-      if (typeof flags.status === "string") threads = threads.filter((t) => t.status === flags.status);
-      out(
-        await Promise.all(
-          threads.map(async (t) => ({
-            thread_id: t.id,
-            name: t.name,
-            agent: t.agentDef?.name,
-            status: t.status,
-            summary:
-              t.summary ||
-              t.description ||
-              (t.agentDef?.description ? t.agentDef.description.split("\n")[0].slice(0, 140) : null),
-            updatedAt: t.updatedAt,
-            // Liveness for running threads only — everything else is summed up
-            // by its summary, and skipping the trace read keeps the common
-            // all-idle listing cheap.
-            ...(t.status === "running"
-              ? { lastActivity: lastToolActivity(await readTrace(t.cwd, t.id)) }
-              : {}),
-            // A spawned-but-not-yet-claimed run: the idle status is about to flip.
-            ...(t.pendingRun ? { pendingRun: t.pendingRun } : {}),
-          })),
-        ),
-      );
-      return;
-    }
-
-    case "stats": {
-      // Workspace-wide trace aggregation with per-model/per-agent breakdown —
-      // the one job lib/trace-stats.mjs does that `show` (single thread) does
-      // not already fold in. Replaces pointing users at the raw
-      // `node lib/trace-stats.mjs` invocation.
-      out(await aggregateWorkspace(cwd));
-      return;
-    }
-
+    // The ONE inspection verb (0.19 zoo cut): `show` without a target lists
+    // the workspace (absorbing the old `list` verb, kept as an undocumented
+    // alias so scripts and muscle memory don't break); with a target it is
+    // the lean per-thread structural view (ADR 0015 §2). Everything deeper —
+    // trace analysis, per-model stats — is dashboard/log territory, not CLI.
+    case "list":
     case "show": {
       const target = positionals[0];
-      if (!target) fail("show: <id|name> is required");
+      if (!target) {
+        // The threads/ dir of THIS workspace is the source of truth; the
+        // cross-workspace --all listing died with the user-wide index
+        // (ADR 0017) — use --cwd to list another project.
+        let threads = await tm.reconcileWorkspace(cwd);
+        threads = await Promise.all(threads.map((t) => recoverIfStale(tm, t)));
+        if (typeof flags.status === "string") threads = threads.filter((t) => t.status === flags.status);
+        out(
+          await Promise.all(
+            threads.map(async (t) => ({
+              thread_id: t.id,
+              name: t.name,
+              agent: t.agentDef?.name,
+              status: t.status,
+              summary:
+                t.summary ||
+                t.description ||
+                (t.agentDef?.description ? t.agentDef.description.split("\n")[0].slice(0, 140) : null),
+              updatedAt: t.updatedAt,
+              // Liveness for running threads only — everything else is summed up
+              // by its summary, and skipping the trace read keeps the common
+              // all-idle listing cheap.
+              ...(t.status === "running"
+                ? { lastActivity: lastToolActivity(await readTrace(t.cwd, t.id)) }
+                : {}),
+              // A spawned-but-not-yet-claimed run: the idle status is about to flip.
+              ...(t.pendingRun ? { pendingRun: t.pendingRun } : {}),
+            })),
+          ),
+        );
+        return;
+      }
       let thread = await resolveTarget(tm, cwd, target, { includeError: true });
       if (!thread) fail(`no thread '${target}'`);
       const id = thread.id;
@@ -672,7 +665,7 @@ async function main() {
     }
 
     default:
-      fail(`unknown verb '${verb ?? ""}'. Use: start | send | approve | answer | wait | stop | remove | interrupt | list | show | stats`);
+      fail(`unknown verb '${verb ?? ""}'. Use: start | send | approve | answer | wait | stop | remove | interrupt | show`);
   }
 }
 

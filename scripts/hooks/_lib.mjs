@@ -387,7 +387,7 @@ function addressesParent(to) {
  *
  * Deliberately porous, per the ADR:
  *   - only `Read` is fenced — `Grep` returns matches only (context-cheap) and
- *     `Bash`/inspect.sh tails with its own caps, so both stay allowed;
+ *     `Bash` tails with its own caps, so both stay allowed;
  *   - `meta.json` is NOT matched (ends `.json`, not `.jsonl`) — whether to also
  *     fence raw meta reads is an open question in the ADR, not settled here;
  *   - `.jsonl` files outside the threads dir (e.g. messages.jsonl at the
@@ -761,7 +761,7 @@ export function formatThreadsDetailed(threads, now = Date.now()) {
     // threads derive it from the last llm_call in the trace. The cumulative
     // token sum is deliberately NOT shown here: it re-counts the transcript
     // every turn and read as "the thread's size" when it is not (it stays
-    // available in `agnz list`/`show`). No usable figure → turns only.
+    // available in `agnz show`). No usable figure → turns only.
     let spend = "";
     const ctx = t.ctxTokens != null ? t.ctxTokens : s.lastCtx;
     if (ctx != null) {
@@ -789,14 +789,14 @@ export function formatThreadsDetailed(threads, now = Date.now()) {
   });
 
   // Collapsed stale-idle bucket: names only (up to 6, then "+N more"), pointing
-  // at /agnz:threads for the detail. Dropping their per-thread summary/spend is
+  // at `agnz show` for the detail. Dropping their per-thread summary/spend is
   // the bulk of the per-prompt weight this context-diet sheds.
   if (staleIdle.length > 0) {
     const names = staleIdle.map((t) => t.name || (t.id || "").slice(0, 8));
     const shown = names.slice(0, 6);
     const overflow = names.length - shown.length;
     const nameList = overflow > 0 ? `${shown.join(", ")} +${overflow} more` : shown.join(", ");
-    lines.push(`  ${staleIdle.length} idle >24h: ${nameList} — details: /agnz:threads`);
+    lines.push(`  ${staleIdle.length} idle >24h: ${nameList} — details: agnz show <name>`);
   }
 
   const idle = sorted.filter(t => t.status === "idle").length;

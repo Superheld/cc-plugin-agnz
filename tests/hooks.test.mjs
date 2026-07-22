@@ -399,7 +399,7 @@ test("formatThreadsDetailed collapses idle threads older than 24h into one line"
   // fresh idle stays in full format
   assert.match(out, /fresh:fresh111 — idle · 1m/);
   // the two stale idles collapse into a single aggregate line, names only
-  assert.match(out, /2 idle >24h: cleanup-probe, janitor — details: \/agnz:threads/);
+  assert.match(out, /2 idle >24h: cleanup-probe, janitor — details: agnz show <name>/);
   // no full-format line for the stale ones
   assert.doesNotMatch(out, /janitor:old22222/);
   // header still counts ALL idle threads (fresh + stale)
@@ -418,7 +418,7 @@ test("formatThreadsDetailed caps the aggregate at 6 names with a +N more overflo
   }));
   const out = formatThreadsDetailed(stale, now);
   // 6 names shown, 2 elided
-  assert.match(out, /8 idle >24h: n0, n1, n2, n3, n4, n5 \+2 more — details: \/agnz:threads/);
+  assert.match(out, /8 idle >24h: n0, n1, n2, n3, n4, n5 \+2 more — details: agnz show <name>/);
 });
 
 test("readThreadMetas reads a card and short-circuits the trace fold", () => {
