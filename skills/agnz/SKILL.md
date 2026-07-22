@@ -39,9 +39,7 @@ Avoid delegation for work needing deep reasoning — local models are limited.
 | `answer <id> "answer text"` | Resolve an `AskUser` question pause. |
 | `interrupt <id> ["directive"]` | Hard interrupt a runaway/working agent: aborts the current step, leaves it resumable, optionally queues a directive. |
 | `stop <id>` | End a thread (kills its runner; transcript persists). |
-| `list [--status <s>] [--all]` | List threads in this workspace (`--all` = every workspace). |
-| `show <id>` | Lean structural view: status, pending, spend, trace stats — no raw transcript. |
-| `stats` | Workspace-wide trace aggregation: totals + per-model/per-agent breakdown (single-thread stats are already folded into `show`). |
+| `show [<id\|name>] [--status <s>]` | The one inspection verb. No target: list all threads in this workspace. With a target: lean structural view — status, pending, spend, trace stats, no raw transcript. |
 | `wait <id\|name> [--timeout <s>]` | Poll a detached run until it leaves `running`; prints the outcome (default timeout 300s). |
 
 Runs are always detached — there is no `--wait` flag any more. To collect a result in the same call (e.g. after starting several agents in parallel), poll with `agnz wait`: it watches the thread and prints the outcome once it leaves `running`, `content` included. On timeout it prints `{..., timeout:true}` plus `lastActivity` (the agent's most recent tool call — seconds old means alive, minutes old means look closer) and exits 0 — the runner keeps working underneath; call `wait` again or let the hook deliver the result later. Calling `wait` on a thread that's already finished just returns the outcome (collect mode). For long runs, launch `agnz wait` as a **background** Bash task (Claude Code: `run_in_background`) — the harness wakes you when it exits, so an agent finishing becomes an event instead of something to poll.
@@ -51,7 +49,7 @@ Runs are always detached — there is no `--wait` flag any more. To collect a re
 Threads are persistent. **`send <name>` reuses** the most recent live thread of that name instead of spawning a new one — so a follow-up keeps its context:
 
 ```bash
-agnz list
+agnz show
 agnz send researcher "Continue: now add the tests."
 ```
 

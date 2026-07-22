@@ -105,18 +105,18 @@ agnz remove --status error        # sweep: every crashed thread
 
 The workspace `messages.jsonl` is untouched — communication history survives its participants. Rule of thumb: `stop` when you're done, `remove` when you'd otherwise never look at it again.
 
-All thread-addressing verbs (`send`, `wait`, `approve`, `answer`, `stop`, `remove`, `interrupt`, `show`) accept a **name or an id** interchangeably; a name resolves to its most recent live thread. A **unique id prefix** (≥ 4 chars, git-style) works too — the 8-char short ids shown in the lead block and `list` are directly usable; an ambiguous prefix is an explicit error, and a name always wins over a prefix.
+All thread-addressing verbs (`send`, `wait`, `approve`, `answer`, `stop`, `remove`, `interrupt`, `show`) accept a **name or an id** interchangeably; a name resolves to its most recent live thread. A **unique id prefix** (≥ 4 chars, git-style) works too — the 8-char short ids shown in the lead block are directly usable; an ambiguous prefix is an explicit error, and a name always wins over a prefix.
 
-### `list` / `show`
+### `show` — the one inspection verb
 
 ```bash
-agnz list                 # threads in this workspace: name, status, summary, spend
-agnz show abc             # lean structural view: status, pending, spend, trace stats
+agnz show                 # no target: all threads — name, status, summary, spend
+agnz show abc1            # one thread: lean structural view — status, pending, spend, trace stats
 ```
 
-`show` strips the two heavy embedded fields (`systemPromptSnapshot`, the agent def's full body) that live in `meta.json`, and caps each recent-message excerpt at ~500 chars with an elision marker reporting the original size — a routine status check can never forward a full tool result. It also folds in the thread's trace stats (turns/tokens/latency/tool outcomes — the same aggregation `lib/trace-stats.mjs` computes) so one call answers "what is this thread, what did it do, how heavy is it" without a second lookup.
+With a target, `show` strips the two heavy embedded fields (`systemPromptSnapshot`, the agent def's full body) that live in `meta.json`, and caps each recent-message excerpt at ~500 chars with an elision marker reporting the original size — a routine status check can never forward a full tool result. It also folds in the thread's trace stats (turns/tokens/latency/tool outcomes) so one call answers "what is this thread, what did it do, how heavy is it" without a second lookup.
 
-`list` opportunistically recovers threads whose runner died (a crash leaves no daemon to clean up) by marking them `error`.
+Without a target it lists the workspace (`--status <s>` filters) and opportunistically recovers threads whose runner died (a crash leaves no daemon to clean up) by marking them `error`. Deeper analysis — per-model comparisons, cost breakdowns — is log territory (`<id>.trace.jsonl`), not a CLI concern.
 
 ## How results arrive
 
@@ -141,7 +141,6 @@ The thread already carries its own context; reading its transcript costs *your* 
 1. **The workspace summary block** — the `UserPromptSubmit` hook injection (ADR 0007). Free, already in your context, and often enough to see status and rough spend across every open thread.
 2. **`agnz show <id>`** — the lean structural view above. One call, capped size, covers status/pending/spend/trace stats.
 3. **Ask the thread directly** — `agnz send <name> "clarifying question"`. The thread has full context already; a targeted question is cheaper than pulling its history into yours.
-4. **`inspect.sh`** (from the `agnz-threads` skill) as the last-resort debugging escape hatch — it tails the transcript/trace with its own caps.
 
 Reading `<id>.jsonl`/`<id>.trace.jsonl` directly with `Read` is not a rung on this ladder for routine use, and a `PreToolUse` hook blocks it outright — a single transcript line can carry up to 512 KiB of verbatim tool output, the exact context this plugin exists to keep out of yours. `Grep` against those files still works (matches only, so it's cheap), and `meta.json` is still directly readable for a fast peek at `pending`.
 

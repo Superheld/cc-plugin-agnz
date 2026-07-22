@@ -489,21 +489,3 @@ test("show resolves the 8-char short id the lead block displays", async () => {
   const view = runCli(["show", id.slice(0, 8)]);
   assert.equal(view.thread.thread_id, id);
 });
-
-test("stats aggregates workspace traces with per-model breakdown", async () => {
-  const id = await seedIdleThread();
-  writeFileSync(
-    join(cwd, ".claude", "agnz", "threads", `${id}.trace.jsonl`),
-    [
-      { ts: 1, type: "thread_start", model: "devstral", agent: "dev" },
-      { ts: 2, type: "llm_call", turn: 0, latencyMs: 100, usage: { prompt: 10, completion: 5, total: 15 } },
-      { ts: 3, type: "tool_call", turn: 0, name: "Read", outcome: "ok" },
-      { ts: 4, type: "thread_end", reason: "final" },
-    ].map((e) => JSON.stringify(e)).join("\n") + "\n",
-  );
-  const ws = runCli(["stats"]);
-  assert.equal(ws.totals.threads, 1);
-  assert.equal(ws.totals.llmCalls, 1);
-  assert.equal(ws.totals.tokens.total, 15);
-  assert.ok(ws.byModel && Object.keys(ws.byModel).includes("devstral"));
-});

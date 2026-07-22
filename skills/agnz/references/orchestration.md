@@ -7,7 +7,7 @@ All invocations are CLI calls via Bash: `agnz <verb> …`.
 Every thread has a name, a purpose, and a transcript. Check existing threads first:
 
 ```bash
-agnz list          # (or the /agnz:threads skill)
+agnz show          # list all threads in this workspace
 ```
 
 `send <name>` **reuses** the most recent live thread of that name — the sub-agent picks up where it left off with all its context:
@@ -78,7 +78,7 @@ agnz start billing "Investigate how billing works" --agent researcher
 # or collect them explicitly once your own work is done:
 agnz wait auth
 agnz wait billing
-agnz list          # see status/spend of both; a pause on one doesn't block the other
+agnz show          # see status/spend of both; a pause on one does not block the other
 ```
 
 Each run is its own OS process — genuine parallelism, nothing resident between runs. `wait` is a watcher, not a worker: if you don't call it (or the timeout hits), the runner keeps working underneath and the hook still delivers the result when you next prompt.

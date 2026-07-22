@@ -124,7 +124,7 @@ filters). Each entry carries `name`, `status`, a rolling `summary`, and
 `updatedAt`. Opportunistically marks threads whose runner has died as `error`.
 
 ```bash
-agnz list
+agnz show
 → [{"thread_id":"abc…","name":"researcher-1","agent":"researcher",
     "status":"idle","summary":"Summarised request logging; auth uses JWT","updatedAt":…}]
 ```
@@ -142,8 +142,7 @@ repair rate, the same fold `lib/trace-stats.mjs` computes — so one call
 answers "what is this thread, what did it do, how heavy is it."
 
 Deliberately **not** included: the raw transcript. For that, ask the thread
-(`agnz send <name> "…"`) or use the `agnz-threads` skill's `inspect.sh` for a
-capped tail — direct `Read` of the transcript/trace `.jsonl` files is blocked
+(`agnz send <name> "…"`) — direct `Read` of the transcript/trace `.jsonl` files is blocked
 by a `PreToolUse` hook (see
 [ADR 0015](./adr/0015-lead-context-discipline.md)).
 
