@@ -1,98 +1,109 @@
-# ADR 0018 — Team as derived state, mission as a message
+# ADR 0018 — Teams: an ephemeral container, derived contents
 
-- **Status:** Proposed (discussion draft — do not implement before Bruce and the lead have converged)
-- **Date:** 2026-07-23
-- **Relates to:** ADR 0002 (mailbox), ADR 0003 (agent definitions), ADR 0004 (board — deliberately still unbuilt), ADR 0012 (frozen prompt prefix)
+- **Status:** Proposed, v2 (discussion draft — do not implement before Bruce and the lead have converged)
+- **Date:** 2026-07-23 (v2 same day — v1's object-less model was revised after round 3 of the discussion, see "Considered and rejected")
+- **Relates to:** ADR 0002 (mailbox), ADR 0003 (agent definitions), ADR 0004 (board — still unbuilt), ADR 0008 (brain — explicitly fenced off), ADR 0012 (frozen prompt prefix)
 
 ## Context
 
 agnz is architected for concurrent agents (detached OS processes, per-agent mailboxes, `SendMessage(to: <name>)`), but the agents are **mutually invisible**: no agent knows who else exists, what they specialise in, or what they are working on. The team layer exists mechanically and is absent experientially.
 
-Three constraints shape the design, all from the 2026-07-23 discussion:
+Constraints and findings from the 2026-07-23 discussion (three rounds):
 
-1. **Goals are epic-scoped, not project-scoped.** A team works on epic 1, then a new goal follows with epic 2 — same or different team. Anything stored in project config would be stale by construction. (This killed the first proposal: `team: {name, goal}` in `config.json`.)
-2. **Solo use must stay frictionless.** "Wenn man mal nur nen Reviewer braucht" must not require creating, naming, or dissolving a team. Team-ness has to be a gradient, not a mode.
-3. **Late joiners are normal.** Agents spawn at different times. Anything baked into the frozen system-prompt prefix (ADR 0012) describes the team as it was at *thread start* — a colleague spawned later would be invisible, a stopped one would linger. A prefix roster is stale by construction, same disease as (1) in a different organ.
+1. **Goals are epic-scoped, not project-scoped.** A team works on epic 1, then a new goal follows with epic 2 — same or different members. Anything stored in project config is stale by construction.
+2. **Solo use must stay frictionless.** Spawning one reviewer must not require creating, naming, or dissolving anything.
+3. **Late joiners and the frozen prefix.** Anything baked into the frozen system-prompt prefix (ADR 0012) describes the world at thread start; membership knowledge must be delivered dynamically (turn-start injection), never in the prefix.
+4. **The workspace is the wrong scope for an address book** (round 3, killed v1). Live threads in one workspace can belong to unrelated missions — janitor jobs, probes, a different epic. "Every live thread sees every other" is noise and invites cross-talk between unrelated missions. The *mission* is the right scope, and it needs an explicit boundary.
+5. **A crew needs termination semantics** (round 3). Without an explicit "my part is complete" signal, nobody — not the members, not the lead — can distinguish "idle, waiting for input" from "done". v1 had no answer; a team model must.
 
-Additionally, one hardware fact defuses the scheduling worry: when all agents use the **same local model**, the inference server serialises requests — N "parallel" agents interleave at the token level automatically. The server queue *is* the scheduler. Only agents wanting *different* models (swap thrashing) would ever need a real concurrency brake, and that stays unbuilt until it hurts.
+One hardware note defuses the scheduling worry: with all agents on the **same local model**, the inference server serialises requests — N "parallel" agents interleave at the token level automatically; the server queue is the scheduler. Only mixed-model teams (swap thrashing) would ever need a real concurrency brake; that stays unbuilt until it hurts.
 
 ## Decision (proposed)
 
-**The team is not an object. The team is the set of live threads, and every piece of team context is *derived* at read time from state that already exists.**
+**The team is an explicit, ephemeral container. Everything *inside* it is derived from state that already exists.**
 
-The insight that makes the layer thin: nothing needs to be *managed*, because everything is already *there* —
+The container is the boundary (membership, goal, budget, termination). The contents stay cheap: who a member is, what they specialise in, and what they are doing right now all come from agent defs, thread metas, and resume cards — nothing is duplicated into a second registry that could drift.
 
-| Team question | Existing source |
-|---|---|
-| Who exists? | live thread metas (`threads/*.meta.json`) |
-| Who is specialised in what? | the agent def's `description` (ADR 0003) — that field *is* the specialisation text |
-| Who works on what right now? | resume-card `task` + the `working:` live summary |
-| How do I reach them? | thread name = mailbox address (ADR 0002) |
+### 1. The team container
 
-### 1. Roster injection at turn start (the one new mechanism)
+A team is created at spawn time (epic-scoped, constraint 1) and lives as `<teamId>.team.json` beside the threads:
 
-`drainTopOfTurnContext` (which already injects inbox mail and one-time dir context) gains a third section, injected **only when at least one other live thread exists** — the solo case sees nothing, costs nothing:
-
+```json
+{
+  "id": "…",
+  "name": "billing-rework",
+  "goal": "Epic 2: rebuild the billing flow against the new API",
+  "members": [
+    { "name": "dev",      "agent": "dev",      "task": "implement the flow" },
+    { "name": "reviewer", "agent": "reviewer", "task": "review every change dev announces" },
+    { "name": "tester",   "agent": "tester",   "task": "write and run e2e tests" }
+  ],
+  "budget": { "wakes": 30 },
+  "status": "working",
+  "ended": []
+}
 ```
-Team — other agents in this workspace (address them with SendMessage):
-- reviewer — checks changes before committing — awaiting_input
-- tester — writes and runs the test suite — working: auth e2e tests
-```
 
-One line per colleague: `name — def-description first line — status/current task`. Derived fresh every turn, so late joiners appear, stopped agents vanish, and nothing can go stale. Deliberately **not** in the frozen prefix (constraint 3).
+- **Each member keeps its own thread**; the team is the clamp around them (`teamId` on the thread meta). A single shared multi-party transcript was considered and rejected: local models need strict role alternation, and "whose turn is it" in a shared transcript is exactly the kind of ambiguity that breaks chat templates. Per-member threads under one umbrella give the same behaviour without the risk.
+- The per-member `task` is the team-scoped role ("welche Aufgabe sie in diesem Team haben") — sharper than the def's generic description, written by the lead at team start.
+- Teams are ephemeral: `stop`/`remove` on the team sweeps the container (and archives/deletes member threads like today's verbs do).
 
-Delta-only injection (roster re-sent only when changed, mirroring the parent hook's fingerprint gate) is the cache-friendly refinement; first implementation may re-send when changed since the last turn, keyed by a roster fingerprint on the thread meta.
+### 2. Scoped address book
 
-### 2. Mission is a message, not a field
+A member's turn-start injection (alongside inbox mail) carries the **team block**: goal + one line per teammate — `name — team task — status/current activity` — derived fresh every turn from defs, metas, and cards. Members can only address teammates (+ `parent`); **an agent spawned without a team has no peer recipients at all** — `SendMessage` to anything but `parent` fails with "you have no team". That is the solo case handled by construction (constraint 2): no roster section, no recipients, no overhead, byte-identical to today.
 
-The epic/goal is **not stored anywhere**. The lead writes it into the task messages it sends — it already does; a kickoff directive to each crew member ("Epic 2: rebuild the billing flow. You own X; reviewer owns Y") is the mission statement, and it lands in the transcript where it survives resumes. Text in the conversation is the most flexible carrier for something that changes per epic (constraint 1), and the lead — who owns the epic anyway — is its natural author.
+Names are **team-scoped**: "reviewer" resolves within the team; two teams can each have a "reviewer" without collision.
 
-### 3. Agent = named thread (the identity commitment)
+The address book is context, never tool schema — dynamic names inside the `tools[]` payload would mutate the prompt every turn and break prefix caching (ADR 0012).
 
-The address-book discussion (2026-07-23) surfaced the underlying identity question: is an "agent" the def, the thread, or something that persists across threads? This ADR commits to the simplest coherent model:
+### 3. Auto-wake within the team — with a leash
 
-**The name is the identity; the thread is its memory; the def is only the role (class, not instance).**
+Inside a team, mail wakes its recipient: a member's `SendMessage(to: "reviewer", …)` spawns the reviewer's runner if it is idle (delivery stays turn-start drain — the wake just creates the turn). This is what makes the crew an actual autonomous unit rather than a lead-driven relay: they work in a shared context toward the goal, and the lead supervises rather than routes.
 
-- "Reuse the agent" = resume its thread, with all accumulated context (`send <name>`).
-- "Same role, fresh head" = a **new agent** with a new name (`dev-auth`, `dev-billing`) — not a second thread under the same name.
-- Naming convention for the lead (skill guidance, not mechanism): **name = mission instance**. Mission continues → resume; new mission → new name. Sharing one name across parallel threads is the anti-pattern; `resolveTarget`'s most-recent-wins is the fallback, not the design.
+The leash, because `maxTurns` bounds only a single run and auto-wake creates *new* runs without limit (A asks B, B asks A, …):
 
-The rejected-for-now alternative — **agent as a persistent identity across threads** (one `reviewer`, many conversations over time) — is deliberately out of scope: an identity that remembers nothing between threads is just a reused string, so this model is only honest with cross-thread memory underneath it. That is ADR 0008 (brain) territory, and the boundary is drawn here precisely so the messaging layer never half-implements a brain by accident.
+- The team `budget` (e.g. `wakes: 30`) counts every auto-wake. Exhausted → no further auto-wakes; the team pauses and the lead is notified (`to: parent`, urgent) to decide: raise the budget, intervene, or stop.
+- The lead's own `send` never counts against the budget and always works.
+- Per-run `maxTurns` still applies to every member run, unchanged.
 
-### 4. Coordination stays hub-and-spoke
+**Outside a team, nothing auto-wakes** — mail to a team-less idle agent would lie unread, which is why team-less agents have no peer recipients in the first place. (v1's "lead-mediated wake" survives only as the answer for *cross-team* or parent-directed mail, if that ever becomes a need.)
 
-The lead orchestrates: assigns work, routes handoffs, decides sequencing. Agent-to-agent traffic is limited to what the mailbox already allows — questions, answers, status (`SendMessage(to: "reviewer", kind: "question", …)`), which the roster finally makes *usable* (you can only ask someone you know exists). **No agent-to-agent task delegation**: local models orchestrating each other is a failure multiplier, and it would bypass the approval model. Mesh coordination, if ever, is a separate ADR with dogfooding scars behind it.
+### 4. Termination: end declarations
+
+A new message kind **`end`** ("my part is complete", with a short result summary as text). Team bookkeeping records who has ended (`ended: [...]`). The team reaches `done` when **every member has declared end and no unread intra-team mail remains** (an unread question re-opens work: waking the recipient clears its inbox; a member that already declared end and then receives mail is woken again and may withdraw its end simply by working — its next end declaration re-closes it).
+
+The lead sees end declarations and the team status through the usual channels — hook block (team line: `billing-rework — 2/3 ended · 12/30 wakes`) and `agnz show <team>` for the structural view — and decides what happens next, as today. Nothing terminates silently.
+
+### 5. Agent = named thread; the lead starts an agent or a team
+
+Unchanged from v1, now team-namespaced: the member name is the identity *within its team*, the thread is its memory, the def is only the role. "Same role, fresh head" = a new name (or a new team). Persistent cross-thread/cross-team agent identity is deliberately fenced off to ADR 0008 (brain) — an identity that remembers nothing between threads is just a reused string, and the boundary keeps the messaging layer from half-building a brain.
+
+CLI shape (sketch, to be refined at implementation): `agnz start` unchanged for solo agents; `agnz team start <name> --goal "…" --member <name>:<def>:"<task>" …` (or a spec file passed inline) for crews; `show`/`stop`/`remove` accept a team name and operate on the container.
 
 ## Considered and rejected
 
-- **`team: {name, goal}` in project config** — rejected: epic-scoped vs. project-scoped mismatch (constraint 1); the file would lie the day epic 2 starts.
-- **Team as a first-class object** (`agnz team start "epic" --agents dev,review,test`, shared prefix, joint teardown) — rejected *for now*: it's the thick layer — a lifecycle to manage, an awkward mismatch for solo use (constraint 2), and its one unique benefit (one-command crew spawn) is sugar the lead can replicate with three `start` calls. Revisit only if dogfooding shows kickoff boilerplate genuinely hurts.
-- **Roster in the frozen system prompt** — rejected: stale by construction for late joiners/leavers (constraint 3); turn-start injection subsumes it. Two carriers for one fact would drift.
-- **Pure hub without any a2a** — rejected: the mailbox exists, is tested, and a colleague-to-colleague question is strictly cheaper than routing the same question through the lead's context.
+- **`team: {name, goal}` in project config** — rejected: epic-scoped vs. project-scoped mismatch (constraint 1).
+- **v1: no team object, workspace-wide derived roster** — rejected in round 3: the workspace is the wrong scope (unrelated missions would see each other — constraint 4), and it had no termination semantics (constraint 5). Its core survives as the *contents* rule: everything inside the container is derived, nothing is registry-duplicated.
+- **Roster in the frozen system prompt** — rejected: stale for late joiners/leavers; turn-start injection subsumes it (constraint 3).
+- **One shared team transcript** — rejected: breaks strict role alternation for local-model chat templates (§1).
+- **Unbounded auto-wake** — rejected: ping-pong between two members could burn tokens indefinitely with nobody having asked for it; hence the team budget (§3).
+- **Persistent agent identity across teams/threads** — deferred to ADR 0008; see §5.
 
 ## Consequences
 
-- Solo use is byte-identical to today (no roster section when no colleagues exist).
-- The "team feeling" emerges from usage: spawn three agents and they can see and address each other; stop two and the third is simply alone again.
-- No new files, no new verbs, no new lifecycle. The implementation surface is one function in `lib/loop.mjs` (+ a roster-fingerprint field on the thread meta for delta gating) and tests.
-- The lead's side needs nothing: the hook block already lists all agents.
+- Solo use is byte-identical to today; team-ness is opt-in per mission.
+- A team is a genuine autonomous unit: members see each other, wake each other, and declare completion — the lead supervises (hook block, `show`, budget alarms) instead of routing every handoff.
+- New surface: the team container file, `kind: "end"`, the wake budget, team-aware `start`/`show`/`stop`/`remove`, and the runner-spawn path in the event bus (publish → wake). This is deliberately more machinery than v1 — the discussion concluded the boundary and the termination semantics are worth exactly this much.
+- Known limitation to document: two members editing the same files can conflict; roles usually partition writes naturally (dev writes, reviewer reads), but nothing enforces it. The board (ADR 0004) would be the structural fix if dogfooding shows it hurts.
 
-## Validation before/after building
+## Validation before building
 
-Dogfood the smallest real crew — **dev → reviewer → test on the dashboard project** — orchestrated hub-and-spoke by the lead. Run it once *before* implementing the roster (baseline: where does mutual blindness actually hurt?) and once after. The friction log decides what, if anything, comes next (board? kickoff sugar? nothing?).
-
-## Delivery to idle colleagues (the address book's honest gap)
-
-Mailbox delivery happens at turn start — an idle agent has no next turn until something spawns it, so a question addressed to an idle colleague lies unread. Two answers were considered:
-
-- **Auto-wake** (incoming a2a mail spawns the recipient's runner): rejected — agents would burn tokens on runs the lead never initiated, bypassing the control model. This is mesh coordination through the back door.
-- **Lead-mediated wake** (chosen direction): the hook block surfaces unread a2a mail for idle recipients ("reviewer has 1 unread from dev — idle"); the lead decides whether to wake it. Hub-and-spoke consistent. The roster marks idle colleagues honestly: `reviewer — idle — replies when next started`.
-
-The address book itself is context, never tool schema: dynamic names inside the `tools[]` payload would mutate the prompt every turn and break prefix caching (ADR 0012); the roster injection appends cache-safely instead.
+Dogfood the target crew — **dev → reviewer → tester on the dashboard project** — *first* in today's hub-and-spoke form (the lead routes; baseline: where does the missing container actually hurt?), then implement, then run the same epic as a real team. The friction delta decides whether the machinery earned its place and what (board? kickoff sugar?) comes next.
 
 ## Open questions
 
-- Should the roster line include the colleague's `ctx` weight so an agent can judge how loaded a colleague is? (Lean: no — that's the lead's concern.)
-- Does `to: "*"` broadcast deserve a CLI verb for kickoffs? Caveat: broadcast mail only reaches agents at their next turn — an idle agent has no next turn until the lead sends to it, so a kickoff broadcast is weaker than it looks.
-- Roster wording for paused colleagues (`awaiting_input` — worth telling an agent that its reviewer is stuck on an approval?).
-- Should the lead-mediated wake be a one-keystroke affair (`agnz send reviewer ""` is awkward; maybe `send` with no message just wakes = drains the inbox)?
+- Wake-budget shape: count wakes (simple, model-agnostic) or tokens (precise, needs trace folding at wake time)? Lean: wakes first.
+- Does an `end` withdraw need to be explicit, or is "worked again after end" (as specced in §4) enough?
+- `agnz team start` argument syntax vs. inline spec file — bikeshed at implementation time.
+- Should the lead's hook block show intra-team traffic volume (messages exchanged) or only the end/budget counters? Lean: counters only — traffic is `show <team>` territory.
+- Mixed-model teams (different profiles per member): allowed from day one, or fenced until the swap-thrashing question is measured?
