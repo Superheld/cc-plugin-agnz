@@ -59,7 +59,7 @@ Results flow back independently of the CLI process via `messages.jsonl` + the `U
 Each turn the agent receives a system prompt composed of:
 
 1. **Sandbox framing** — cwd, tool workflow rules (Grep before Read, Read before Write — ADR 0013), messaging instructions
-2. **CLAUDE.md files** — `<cwd>/CLAUDE.md` at startup; subdirectory `CLAUDE.md` files are added as the agent accesses files in those directories
+2. **Project conventions** — `<cwd>/CLAUDE.md` at startup (or `AGENTS.md` if no CLAUDE.md exists — first hit wins, so symlinked pairs don't duplicate); subdirectory files are added as the agent accesses those directories
 3. **Tool restrictions** — which tools are allowed/denied per the agent def
 4. **Skills catalog** — names + descriptions of available skills; agent loads full content on demand via `Skill({action:"load", name:"..."})`
 5. **Agent body** — the role definition from the agent def frontmatter

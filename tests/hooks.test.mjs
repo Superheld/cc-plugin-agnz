@@ -50,7 +50,7 @@ function writeThread(id, meta, traceLines) {
   }
 }
 
-test("readThreadSpend folds turns and tokens from the trace", () => {
+test("readThreadSpend folds turns, cumulative tokens, and the last call's ctx", () => {
   writeThread("t1", { status: "idle" }, [
     { ts: 1, type: "thread_start", turn: 0 },
     { ts: 2, type: "llm_call", turn: 0, usage: { total: 120 } },
@@ -58,12 +58,14 @@ test("readThreadSpend folds turns and tokens from the trace", () => {
     { ts: 4, type: "llm_call", turn: 1, usage: { total: 140 } },
     { ts: 5, type: "thread_end", reason: "final" },
   ]);
-  assert.deepEqual(readThreadSpend(ws, "t1"), { turns: 2, tokens: 260 });
+  // lastCtx is the LAST call's total (the real context size a resume re-sends),
+  // NOT the cumulative sum — the sum re-counts the transcript every turn.
+  assert.deepEqual(readThreadSpend(ws, "t1"), { turns: 2, tokens: 260, lastCtx: 140 });
 });
 
 test("readThreadSpend is a safe zero for a thread with no trace", () => {
   writeThread("t2", { status: "running" }, null);
-  assert.deepEqual(readThreadSpend(ws, "t2"), { turns: 0, tokens: 0 });
+  assert.deepEqual(readThreadSpend(ws, "t2"), { turns: 0, tokens: 0, lastCtx: null });
 });
 
 test("readThreadMetas attaches spend and skips stopped threads", () => {
@@ -76,23 +78,24 @@ test("readThreadMetas attaches spend and skips stopped threads", () => {
   const metas = readThreadMetas(ws);
   assert.equal(metas.length, 1);
   assert.equal(metas[0].name, "dev");
-  assert.deepEqual(metas[0].spend, { turns: 1, tokens: 50 });
+  assert.deepEqual(metas[0].spend, { turns: 1, tokens: 50, lastCtx: 50 });
 });
 
 test("formatThreadsDetailed renders short-id, status, and spend", () => {
   const now = 1782065400570;
   const out = formatThreadsDetailed(
     [
-      { id: "1a2b3c4d5e6f", name: "dev", status: "running", spend: { turns: 5, tokens: 1234 } },
+      { id: "1a2b3c4d5e6f", name: "dev", status: "running", spend: { turns: 5, tokens: 91234, lastCtx: 1234 } },
       // fresh idle (updatedAt = now) so it stays in the full-format section
-      { id: "9f8e7d6c", name: null, status: "idle", updatedAt: now, spend: { turns: 0, tokens: 0 } },
+      { id: "9f8e7d6c", name: null, status: "idle", updatedAt: now, spend: { turns: 0, tokens: 0, lastCtx: null } },
     ],
     now,
   );
   // header is honest: N open, and how many of those are merely idle
   assert.match(out, /threads \(2 open · 1 idle\):/);
-  // a running thread with no timestamp omits both the spend age suffix and spend
-  assert.match(out, /dev:1a2b3c4d — running · 5 turns · 1,234 tok/);
+  // the block shows the resume-relevant ctx (last call), never the cumulative sum
+  assert.match(out, /dev:1a2b3c4d — running · 5 turns · ctx ~1k/);
+  assert.doesNotMatch(out, /91,?234/);
   // a zero-spend fresh idle thread shows the age tag but omits the spend suffix
   assert.match(out, /9f8e7d6c — idle · now$/m);
 });
@@ -113,12 +116,12 @@ test("formatThreadsDetailed renders a compact age tag from updatedAt", () => {
         name: "dev",
         status: "idle",
         updatedAt: "2026-07-20T09:00:00Z", // 3 hours earlier — still fresh (<24h)
-        spend: { turns: 2, tokens: 40 },
+        spend: { turns: 2, tokens: 40, lastCtx: 40 },
       },
     ],
     now,
   );
-  assert.match(out, /dev:1a2b3c4d — idle · 3h · 2 turns · 40 tok/);
+  assert.match(out, /dev:1a2b3c4d — idle · 3h · 2 turns · ctx 40/);
 });
 
 test("formatThreadsDetailed accepts epoch-millis timestamps (real meta format)", () => {
@@ -180,13 +183,13 @@ test("formatThreadsDetailed renders the summary as an indented second line", () 
         name: "cleanup",
         status: "idle",
         updatedAt: now, // fresh idle → full format with its summary
-        spend: { turns: 6, tokens: 100 },
+        spend: { turns: 6, tokens: 100, lastCtx: 100 },
         summary: "Deleted 5 error-state threads and their files",
       },
     ],
     now,
   );
-  assert.match(out, /cleanup:1a2b3c4d — idle · now · 6 turns · 100 tok/);
+  assert.match(out, /cleanup:1a2b3c4d — idle · now · 6 turns · ctx 100/);
   assert.match(out, /\n {6}Deleted 5 error-state threads and their files/);
 });
 
@@ -350,7 +353,7 @@ test("readThreadMetas falls back to the trace fold for a legacy (card-less) meta
     { ts: 2, type: "llm_call", turn: 0, usage: { total: 70 } },
   ]);
   const metas = readThreadMetas(ws);
-  assert.deepEqual(metas[0].spend, { turns: 1, tokens: 70 });
+  assert.deepEqual(metas[0].spend, { turns: 1, tokens: 70, lastCtx: 70 });
   assert.equal(metas[0].ctxTokens, null);
   assert.equal(metas[0].task, null);
 });
@@ -377,11 +380,21 @@ test("formatThreadsDetailed renders a sub-1000 ctx exactly, no k suffix", () => 
   assert.match(out, /dev:1a2b3c4d — running · 2 turns · ctx 500/);
 });
 
-test("formatThreadsDetailed keeps the legacy 'tok' form when ctxTokens is absent", () => {
+test("formatThreadsDetailed derives ctx from the trace's last call for card-less threads", () => {
+  // Legacy thread (no card → no ctxTokens): the trace fold's lastCtx stands in.
   const out = formatThreadsDetailed([
-    { id: "1a2b3c4d", name: "dev", status: "running", spend: { turns: 5, tokens: 1234 } },
+    { id: "1a2b3c4d", name: "dev", status: "running", spend: { turns: 5, tokens: 91234, lastCtx: 4200 } },
   ]);
-  assert.match(out, /dev:1a2b3c4d — running · 5 turns · 1,234 tok/);
+  assert.match(out, /dev:1a2b3c4d — running · 5 turns · ctx ~4k/);
+  assert.doesNotMatch(out, /tok\b/);
+});
+
+test("formatThreadsDetailed shows turns only when no ctx figure exists at all", () => {
+  // No card AND no usable trace: never invent a number, never show the sum.
+  const out = formatThreadsDetailed([
+    { id: "1a2b3c4d", name: "dev", status: "running", spend: { turns: 5, tokens: 1234, lastCtx: null } },
+  ]);
+  assert.match(out, /dev:1a2b3c4d — running · 5 turns$/m);
 });
 
 // ── ADR 0015 §4: the PreToolUse fence decision ───────────────────────────────
