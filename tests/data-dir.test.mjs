@@ -31,7 +31,7 @@ describe("resolveUserDir", () => {
       process.env.AGNZ_DATA_DIR = dir;
       assert.equal(resolveUserDir(), resolve(dir));
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   });
 

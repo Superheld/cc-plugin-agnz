@@ -38,7 +38,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  rmSync(ws, { recursive: true, force: true });
+  rmSync(ws, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 function writeThread(id, meta, traceLines) {

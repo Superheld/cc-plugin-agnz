@@ -26,7 +26,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  rmSync(cwd, { recursive: true, force: true });
+  rmSync(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 /** Sample trace for one finished thread: 2 turns, 1 tool call, 1 repair. */
