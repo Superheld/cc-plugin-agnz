@@ -8,28 +8,22 @@ chose to defer. Dated entries reflect what was true when written.
 
 ## Postponed
 
-- **Config-CLI + total write fence + ADR 0017 — postponed.** The idea: a first-class
-  config surface plus a hard fence against direct edits of agnz state. Blocked on a
-  prior decision — Bruce wants to rework *where config lives* first. Today it's spread
-  across three places with three lifetimes: profiles are user-wide
-  (`~/.claude/agnz/profiles.json`), model→profile mappings are per-workspace
-  (`workspace.json`), and agent defs live in Claude Code's standard paths
-  (`~/.claude/agents/`, `<cwd>/.claude/agents/`). Consolidate that story before
-  designing the CLI/fence on top of it, or ADR 0017 just cements the sprawl.
+- **Team vs. workflow harness — THE open direction question after 0.19.** Two competing
+  designs for multi-agent coordination, neither built:
+  - **Team container:** [ADR 0018](adr/0018-team-as-derived-state.md) v2 (Proposed,
+    2026-07-23) — ephemeral `<teamId>.team.json` with goal, members + per-team tasks,
+    wake budget, `kind: "end"` termination; per-member threads, team-scoped address
+    book injected at turn start, auto-wake within the team under a budget leash.
+  - **Workflow harness:** Bruce's counter-model from the same discussion — defined
+    who/when/what with feedback edges, gates, and termination baked into the flow
+    itself. Motivation: local agents lack the Weitblick for self-organisation — "ein
+    anarchistisches Scrum-Team könnte schneller scheitern als uns lieb ist"; a
+    workflow carries the structure the models can't. No ADR yet (offered as a sketch).
 
-- **Team awareness for sub-agents — design captured in [ADR 0018](adr/0018-team-as-derived-state.md) (Proposed, 2026-07-23); discuss + dogfood before building.** Original note (2026-07-22):
-  Agent-to-agent messaging exists mechanically (`SendMessage(to: <name>)`, mailbox
-  drain at turn start) but is invisible to the agents: no roster, no idea what
-  teammates specialise in, no discovery. The self-context fix (agent knows its own
-  name/address, deny semantics, turn budget) shipped; everything beyond that is
-  deliberately NOT built yet. Points for the discussion: (a) should inter-agent
-  messaging be its own tool or stay a `SendMessage` addressing mode; (b) where does
-  the roster come from — static injection at thread start goes stale in the frozen
-  prefix, so teammate info probably belongs in the turn-start injection alongside
-  the inbox; (c) Bruce's sketch: when an agent hits a question/task outside its own
-  goal, it should get information about its surrounding (who else exists, who owns
-  what), mail the right party, and either wait or continue — half-formed, revisit
-  together before building anything.
+  Discriminator before any code: **baseline dogfood** — run dev→reviewer→tester on
+  the dashboard project in today's hub-and-spoke form (the lead routes) and see where
+  the missing container/flow actually hurts. Bruce is thinking it over; do not build
+  either until he and the lead have converged.
 
 ## Deferred (trigger-gated)
 
@@ -39,13 +33,6 @@ chose to defer. Dated entries reflect what was true when written.
   resume-card has proven insufficient in practice. Until then the card carries the
   mission and there's nothing for a harness call to improve.
 
-## Parked (cost vs. gain)
-
-- **`systemPromptSnapshot` sidecar file — parked.** Moving the frozen prompt prefix out
-  of `meta.json` into its own sidecar would slim the meta that `show`/hooks read. Parked:
-  the migration cost (existing threads carry the snapshot inline) outweighs the small
-  per-read win now that `show` already omits the snapshot from its structural view.
-
 ## Open ADR 0015 questions
 
 - **`meta.json` Read-fence.** The PreToolUse fence blocks direct `Read` of thread
@@ -54,6 +41,12 @@ chose to defer. Dated entries reflect what was true when written.
   path the "ask, don't read" ladder would rather route through `show`.
 - **`messages.jsonl` schema-sample mode — not shipped.** ADR 0015 floated a mode that
   surfaces a schema + a sample row instead of the raw log. Understood, not built.
+- **Total write fence on agnz state — not built.** The surviving half of the old
+  "config-CLI + write fence" idea (the config half shipped as ADR 0017 in 0.18.0):
+  a `PreToolUse` fence against direct `Edit`/`Write` of files under `.claude/agnz/`,
+  routing mutations through the CLI/`/agnz:setup` instead. Today only transcript/trace
+  *reads* are fenced. Un-parks if a lead session is ever observed hand-editing state
+  files and corrupting them; until then the JSON-with-locks layer hasn't needed it.
 
 ## Accepted non-fixes (from the adversarial release review)
 
@@ -69,52 +62,32 @@ Findings the three-lens review raised and we consciously accepted rather than fi
   `agnz wait` returns is *not* excerpt-capped — collecting the full outcome is the whole
   point of waiting on a run. By design, not an oversight.
 
-## Watch
+## Closed — lessons kept
 
-- **Test-suite flake.** Three occurrences (2026-07-20: 2 tests; 2026-07-21: 1 test;
-  2026-07-21 late: 2 tests, then 1 test on the *immediately following* run — first time
-  it failed twice in a row), all in or right after the run chained directly behind a
-  `git merge`, all green within 1-2 retries, names not captured any time (the
-  names-first mistake is now three for three: even a deliberate capture attempt piped
-  through `grep '^ℹ'` and lost them). Does NOT reproduce via bare branch-switch cycles
-  (5 tried) or back-to-back runs (15+ clean). Working hypothesis unchanged:
-  I/O-load-sensitive timing (proc-lock acquisition or a child-process timeout) in the
-  post-git moment; occurrence 3 followed the largest merge yet (20+ files), which fits.
-  If it recurs: `node --test tests/*.test.mjs 2>&1 | tee /tmp/flake.log` FIRST, grep
-  afterwards. Process lesson from occurrence 3: the release chain gated on
-  `grep '^ℹ (pass|fail)'` — which exits 0 on a *match*, including "fail 2" — so a red
-  suite did not stop the pipeline. Gate release chains on the test runner's exit code
-  (`node --test ... && git merge ...`), never on a grep of its summary.
+- **Context-diet package (analysed + shipped 2026-07-23).** Measured baseline: agnz-repo
+  threads start at ~12.6k tok (~34k chars of our own CLAUDE.md in the frozen prefix);
+  dashboard threads grew 4.2k→23.6k over 30 calls — dominated by Write *arguments*
+  (23k chars: the agent carries every file it wrote as ballast), plus ~4k duplicate
+  re-reads. No duplication bugs; growth was genuine payload; slowness ~90% the dense
+  model. Shipped: (1) `visitedDirs`/`pendingDirMds` persisted on thread meta,
+  (2) `fileStamps` freshness map — stale-Write gate (Edit exempt: anchors already
+  catch staleness reactively, Bruce's call) + unchanged-full-re-read dedup,
+  (3) threshold compaction (Bruce's design, ADR 0012 amendment): steady state never
+  mutates the transcript (cache warm), one summary-reset at `compactThreshold`×
+  `contextWindow` (profile opt-in). **Rejected: (4) CLAUDE.md diet via a separate
+  `context.md`** — a second truth that drifts; the 34k is this repo's own problem,
+  not the plugin's. Durable lesson: with a prefix cache, steady-state growth is the
+  cheap case and *mutation* is the expensive one — compact rarely and radically, never
+  incrementally.
 
-  **Hunt (2026-07-22, quality pass):** deliberate reproduction attempts failed —
-  10 full-suite runs each chained directly behind a 40-file `git merge` in an
-  isolated clone (0 red), plus 20 runs of the prime-suspect file under sustained
-  `dd`+`sync` disk load with `UV_THREADPOOL_SIZE=2` (0 red). Structural analysis
-  found exactly one bounded wait on fire-and-forget disk I/O in the whole suite:
-  `waitForTrace` in `tests/loop-trace.test.mjs`, 1 s deadline, two call sites —
-  which matches every observed occurrence (1–2 tests red, green on retry,
-  I/O-load correlation; the trace append can lag behind `runThread` resolving).
-  Actions taken: deadline raised 1 s → 10 s (poll exits early when green, so the
-  ceiling is free), and `scripts/test.sh` added — tees the full log, echoes
-  failing names on red, exits with the runner's verdict — so the names-first and
-  exit-code-gating lessons are now tooling, not discipline. Watch continues: if
-  the flake recurs *despite* the raised deadline, the hypothesis is falsified
-  and the names will finally be on file.
-
-  **CLOSED (2026-07-22): root cause caught with a stack trace.** The flake
-  recurred twice in back-to-back full-suite runs and the log finally had the
-  error: `ENOTEMPTY … rmSync` thrown from a test file's `afterEach` — NOT an
-  assertion, NOT `waitForTrace` (that hypothesis is hereby falsified; the 10 s
-  deadline stays as harmless hardening). Mechanism: the loop's trace appends and
-  `publish()` calls are fire-and-forget, so `runThread` can resolve while a
-  write is still in flight; `afterEach`'s recursive `rmSync` then races it —
-  the straggler re-creates a file inside a directory `rm` has already emptied,
-  and the final `rmdir` fails ENOTEMPTY. That's why the failing test name was
-  never the same (the victim is whichever test is cleaning up) and why retries
-  were always green. Fix: every recursive cleanup `rmSync` in `tests/` now
-  passes `maxRetries: 10, retryDelay: 50` — Node re-scans the directory on
-  ENOTEMPTY retry, sweeping the straggler. Copy that option pair into the
-  `afterEach` of any NEW test file that creates a workspace dir. (Optional
-  deeper fix, unbuilt: have `runThread` drain pending trace/publish writes
-  before returning — would make traces deterministic and `waitForTrace`
-  unnecessary; only worth it if the retry fix ever proves insufficient.)
+- **Test-suite flake (2026-07-20 → 2026-07-22, CLOSED with a stack trace).** Root
+  cause: the loop's trace appends and `publish()` calls are fire-and-forget, so
+  `runThread` can resolve while a write is still in flight; a test's `afterEach`
+  recursive `rmSync` then races the straggler and dies `ENOTEMPTY` (victim test name
+  random, retry always green — which is why it evaded capture five times). Durable
+  rules: (1) every recursive cleanup `rmSync` in `tests/` passes
+  `maxRetries: 10, retryDelay: 50` — copy that pair into any NEW test file that
+  creates a workspace dir; (2) gate release chains on the test runner's **exit code**
+  (`scripts/test.sh` does this and tees the log), never on a grep of its summary.
+  Optional deeper fix, unbuilt: have `runThread` drain pending trace/publish writes
+  before returning — only worth it if the retry fix ever proves insufficient.
