@@ -67,6 +67,27 @@ Hooks have a 5 s budget and run on every prompt; a hanging LM Studio ping would 
 
 Every non-quiet line ends with the resolving verb, exactly as typed (`→ agnz interrupt dev`). The lead should never have to derive the remedy from the diagnosis — that derivation is a reasoning step per prompt, and it is the same step every time. (Precedent: the stale-idle hint already does this with `agnz show <name>`.)
 
+### 6. One vocabulary, two serializations (round 2, Bruce's sharpening)
+
+What costs the lead interpretation is not the serialization format but **shifting vocabulary**: today the same thing is `thread_id` in CLI output and `id` in the meta; `name` means the thread address in one place and the def name in another (`agent`); `start` answers `status: "started"`, which is not a thread status. The dashboard standardizes the **glossary**, and every surface uses it verbatim:
+
+| Field | Meaning | Rule |
+|---|---|---|
+| `thread_id` | the id (8-char short form in renderings, full in JSON) | never `id` |
+| `name` | the address — what `send`/`answer`/`interrupt` take | |
+| `role` | the agent def behind it (today confusingly `agent`) | |
+| `status` | the raw state, exactly the thread enum | never ad-hoc values like `"started"` — verbs answer `{status, note}` |
+| `verdict` | the judged state (§2) | |
+| `since` | durations, one rendering everywhere (`22m`, `40s`) | |
+| `evidence` | the data behind a verdict | |
+| `action` | the resolving command, typeable verbatim | |
+
+Serialization follows the consumer: **CLI verbs answer JSON** with exactly these keys (parseable, precise); **the hook block renders the same fields as a fixed line grammar** — marker, `name`, `[thread_id]`, `status/verdict`, `since`, `evidence`, `→ action`, always in that order. Lines are cheaper than JSON punctuation for a reader, and a fixed grammar is learned once ("nach drei Mal draufschauen verstanden").
+
+### 7. One channel: agnz becomes a sender in its own message log (round 2)
+
+"Jede Meldung geht durch diesen einen Kanal." Agent voices already flow through `messages.jsonl` → hook; **agnz itself is mute there**. Harness-level incidents — server unreachable on a send, a failed compaction, a runner found dead — land in CLI errors, traces, or nowhere. Fix: agnz publishes system events as `from: "agnz"` into the same log, same schema (`kind: "error" | "status"`), so there is exactly ONE event stream reaching the lead, agent and system voices in the same format. The dashboard then has precisely two inputs: the status struct (state, pull) and the unread event stream (news, push via hook) — nothing else exists.
+
 ## Not building
 
 - **A web/graphical UI.** Bruce's external dashboard project reads the JSONL files directly; this ADR is about the *lead's* textual surface only.
@@ -82,6 +103,9 @@ Every non-quiet line ends with the resolving verb, exactly as typed (`→ agnz i
 - New module + a refactor of `_lib.mjs` hook rendering and `show` onto it; the fingerprint/delta logic is kept, fed by the struct.
 
 ## Open questions
+
+- **`agent` → `role` rename** (§6) touches CLI output shapes and the hook block — mildly breaking for anything parsing today's JSON. Do it in the same release as the status model, or grandfather `agent` as an alias for one version?
+- **System-sender noise budget:** which harness events deserve the channel? Lean: only what the lead can act on (server down, compaction failed, runner died) — never routine events (compaction succeeded belongs in the trace, not the mail).
 
 - Does `info` fold into `show --health`, or stay a separate verb? Lean: keep `info` (environment) and give `show` the health flag (workspace) — different questions.
 - `done-unread` vs. the existing mail delivery: the block already injects unread parent mail; is a separate state line redundant? Lean: yes, redundant — mail injection *is* the rendering; the state exists only in the struct.
