@@ -66,6 +66,8 @@ Each turn the agent receives a system prompt composed of:
 
 The loop also carries harness-level robustness for small local models: malformed JSON tool arguments are repaired, and a tool call that leaks out as plain text in the model's native wire syntax (e.g. Mistral's `Name[ARGS]{…}` when the server's parser misses it) is deterministically recovered and executed instead of silently ending the run. Both paths are visible as `repair` events in the trace. LLM requests have **no default timeout** — local cold-loads and big-context turns are legitimately slow; set `llmTimeoutMs` per profile if you want a deadline, and use `interrupt`/`stop` for a hung run.
 
+The sub-agent's own context is managed cache-consciously: the system prompt is a frozen prefix and the transcript is append-only, so the inference server's prefix cache stays warm turn over turn. The harness also skips re-sending what the agent already has (a full re-read of an unchanged file is answered with a one-liner) and blocks stale overwrites (a `Write` to a file that changed on disk since the agent's last read must re-read first). For long sessions, declare your model's `contextWindow` in the profile: near the limit (default 90%) the agent summarizes its own session once and continues with a fresh, small context — the full history stays on disk.
+
 ## Install
 
 This repo is a plain Claude Code plugin. The canonical marketplace is [`Superheld/claude-bauchladen`](https://github.com/Superheld/claude-bauchladen):

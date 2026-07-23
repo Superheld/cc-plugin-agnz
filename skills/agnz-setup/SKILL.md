@@ -60,6 +60,8 @@ After this, any agent def using `model: sonnet`, `model: inherit`, or no model r
 | `maxTokens` | no | `null` | Max tokens per response; `null` = server default |
 | `maxTurns` | no | `20` | Max loop turns before the thread pauses |
 | `llmTimeoutMs` | no | `null` (= 10 min) | Increase for large/slow models on CPU |
+| `contextWindow` | no | `null` | The model's context window in tokens (the API doesn't expose it). Setting it enables context compaction: near the limit the agent summarizes its session and continues with a fresh context |
+| `compactThreshold` | no | `0.9` | Fraction of `contextWindow` at which compaction fires |
 
 ## Fresh project setup
 
