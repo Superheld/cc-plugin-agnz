@@ -79,6 +79,7 @@ What costs the lead interpretation is not the serialization format but **shiftin
 | `status` | the raw state, exactly the thread enum | never ad-hoc values like `"started"` — verbs answer `{status, note}` |
 | `verdict` | the judged state (§2) | |
 | `since` | durations, one rendering everywhere (`22m`, `40s`) | |
+| `last_action` | the last completed tool call: tool + target + age (`Write lib/foo.py · 12s`) | replaces today's ad-hoc `lastActivity`; always present once a thread has run — unlike `evidence`, which exists only to back a verdict |
 | `evidence` | the data behind a verdict | |
 | `action` | the resolving command, typeable verbatim | |
 
