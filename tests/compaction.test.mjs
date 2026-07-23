@@ -265,4 +265,17 @@ test("a failed summarize call degrades to no compaction and does not retry this 
   assert.equal(compactions[0].outcome, "error");
   // 4 calls total: turn, failed summarize, turn, final — no second summarize.
   assert.equal(calls.length, 4);
+
+  // ADR 0019 §7: the failure reaches the lead through the one channel — an
+  // agnz-sender error in messages.jsonl, not just a trace entry. The publish
+  // is fire-and-forget, so poll briefly instead of asserting immediately.
+  const { readAllMessages } = await import("../lib/messages-log.mjs");
+  let sys = [];
+  for (let i = 0; i < 40 && sys.length === 0; i++) {
+    sys = (await readAllMessages(projectCwd)).filter((m) => m.from === "agnz" && m.kind === "error");
+    if (sys.length === 0) await new Promise((r) => setTimeout(r, 25));
+  }
+  assert.equal(sys.length, 1, "compaction failure published as from:'agnz'");
+  assert.match(sys[0].text, /compaction failed/);
+  assert.deepEqual(sys[0].to, "parent");
 });

@@ -44,6 +44,7 @@ import { publish } from "../lib/event-bus.mjs";
 import { readTrace, aggregateTrace } from "../lib/trace-stats.mjs";
 import { PLUGIN_ROOT } from "../lib/orchestrate.mjs";
 import { loadConfig, updateConfigLayer, normaliseProfile } from "../lib/config.mjs";
+import { judgeThread } from "../lib/status.mjs";
 import { resolveUserDir, resolveProjectDir } from "../lib/data-dir.mjs";
 import { listModels } from "../lib/llm/openai-compatible.mjs";
 
@@ -181,6 +182,16 @@ async function recoverIfStale(tm, thread) {
         pending: null,
       })
       .catch(() => {});
+    // ADR 0019 §7: harness incidents go through the one channel. A dead
+    // runner was previously flipped to error in silence — visible only if
+    // the lead happened to run `show`.
+    publish(thread.cwd, {
+      from: "agnz",
+      to: "parent",
+      kind: "error",
+      urgent: false,
+      text: `[${thread.id}] runner process died (pid ${thread.runnerPid ?? "?"}) — thread '${thread.name || thread.id.slice(0, 8)}' marked error; its work up to the crash is persisted`,
+    }).catch(() => {});
     return { ...thread, status: "error" };
   }
   return thread;
@@ -626,25 +637,30 @@ async function main() {
         if (typeof flags.status === "string") threads = threads.filter((t) => t.status === flags.status);
         out(
           await Promise.all(
-            threads.map(async (t) => ({
-              thread_id: t.id,
-              name: t.name,
-              agent: t.agentDef?.name,
-              status: t.status,
-              summary:
-                t.summary ||
-                t.description ||
-                (t.agentDef?.description ? t.agentDef.description.split("\n")[0].slice(0, 140) : null),
-              updatedAt: t.updatedAt,
-              // Liveness for running threads only — everything else is summed up
-              // by its summary, and skipping the trace read keeps the common
-              // all-idle listing cheap.
-              ...(t.status === "running"
-                ? { lastActivity: lastToolActivity(await readTrace(t.cwd, t.id)) }
-                : {}),
-              // A spawned-but-not-yet-claimed run: the idle status is about to flip.
-              ...(t.pendingRun ? { pendingRun: t.pendingRun } : {}),
-            })),
+            threads.map(async (t) => {
+              // Trace only for running threads — the judge needs it for the
+              // in-flight/hung derivation; everything else judges from meta
+              // alone, keeping the common all-idle listing cheap.
+              const entries = t.status === "running" ? await readTrace(t.cwd, t.id) : [];
+              const judged = judgeThread({ thread: t, entries });
+              return {
+                thread_id: t.id,
+                name: t.name,
+                agent: t.agentDef?.name,
+                status: t.status,
+                verdict: judged.verdict,
+                ...(judged.evidence ? { evidence: judged.evidence } : {}),
+                ...(judged.action ? { action: judged.action } : {}),
+                summary:
+                  t.summary ||
+                  t.description ||
+                  (t.agentDef?.description ? t.agentDef.description.split("\n")[0].slice(0, 140) : null),
+                updatedAt: t.updatedAt,
+                ...(t.status === "running" ? { lastActivity: lastToolActivity(entries) } : {}),
+                // A spawned-but-not-yet-claimed run: the idle status is about to flip.
+                ...(t.pendingRun ? { pendingRun: t.pendingRun } : {}),
+              };
+            }),
           ),
         );
         return;
@@ -665,6 +681,11 @@ async function main() {
         const activity = lastToolActivity(entries);
         if (activity) view.thread.lastActivity = activity;
       }
+      // The judgment triple (ADR 0019): status is fact, verdict is diagnosis.
+      const judged = judgeThread({ thread, entries });
+      view.thread.verdict = judged.verdict;
+      if (judged.evidence) view.thread.evidence = judged.evidence;
+      if (judged.action) view.thread.action = judged.action;
       out(view);
       return;
     }

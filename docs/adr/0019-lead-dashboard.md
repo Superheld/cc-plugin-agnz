@@ -1,6 +1,6 @@
 # ADR 0019 — The lead dashboard: one status model, judgments instead of readings
 
-- **Status:** Proposed (discussion draft — do not implement before Bruce and the lead have converged)
+- **Status:** Accepted — phase 1 implemented (2026-07-24, after the second field incident: a thread wedged 43 min on one LLM call at 18× its own average, killed by hand). Shipped: `lib/status.mjs` (the judgment layer — `deriveInFlight`, `judgeThread`, `fmtDur`); `show` carries `verdict`/`evidence`/`action` per the glossary; the hook block renders the `hung` alert line (self-contained mirror in `scripts/hooks/_lib.mjs`: `readRunState`/`isHungRunState`); §7 partially — agnz publishes `from:"agnz"` errors for a dead runner (previously silent recovery) and a failed compaction (previously trace-only). Not yet: full `collectStatus` struct with both renderers on it, the severity-gated one-line healthy block, workspace-level preflight/server-contact lines, the `agent`→`role` rename.
 - **Date:** 2026-07-23
 - **Relates to:** ADR 0007 (parent context — this is its v2), ADR 0011 (observability — supplies the data and absorbs its §6 "workspace doctor" idea), ADR 0014/0015 (CLI + lead context discipline), ADR 0017 (config)
 
