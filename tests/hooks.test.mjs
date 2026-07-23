@@ -807,3 +807,15 @@ test("formatThreadsDetailed adds the hung alert with evidence and interrupt verb
   // the healthy thread gets no alert line
   assert.doesNotMatch(out, /interrupt healthy/);
 });
+
+test("fingerprint changes when a running thread tips hung — the tip itself is the delta", () => {
+  const MIN = 60_000;
+  const base = [{ id: "aaa", status: "running", runState: { llmInFlightMs: 2 * MIN, medianLlmMs: 2 * MIN } }];
+  const hung = [{ id: "aaa", status: "running", runState: { llmInFlightMs: 43 * MIN, medianLlmMs: 2 * MIN } }];
+  const healthyFp = computeThreadFingerprint(base);
+  const hungFp = computeThreadFingerprint(hung);
+  assert.notEqual(healthyFp, hungFp, "hung transition must re-push the block");
+  assert.match(hungFp, /aaa:running:hung/);
+  // Recovery flips it back — one push each way, silence in between.
+  assert.equal(computeThreadFingerprint(base), healthyFp);
+});
