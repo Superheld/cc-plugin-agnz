@@ -91,6 +91,32 @@ async function runSetup(rawArgs) {
     return print({ added: name, scope, file, ...profile });
   }
 
+  if (sub === "set") {
+    // set <name> <field> <value>: update one optional field on an existing
+    // profile — the only path (besides hand-editing config.json) to fields
+    // `add` doesn't take, e.g. llmTimeoutMs or contextWindow.
+    const NUMERIC = ["temperature", "maxTokens", "maxTurns", "llmTimeoutMs", "contextWindow", "compactThreshold"];
+    const STRINGY = ["baseUrl", "model", "apiKey"];
+    const [, name, field, value] = args;
+    if (!name || !field || value === undefined) {
+      return usage("setup set <name> <field> <value> [--project]");
+    }
+    if (!NUMERIC.includes(field) && !STRINGY.includes(field)) {
+      return usage(`unknown profile field '${field}' (known: ${[...STRINGY, ...NUMERIC].join(", ")})`);
+    }
+    const parsed = NUMERIC.includes(field) ? Number(value) : value;
+    if (NUMERIC.includes(field) && !Number.isFinite(parsed)) {
+      return usage(`field '${field}' expects a number, got '${value}'`);
+    }
+    const { file } = await updateConfigLayer(scope, cwd, (layer) => {
+      const cur = layer.profiles[name];
+      if (!cur) throw new Error(`no profile '${name}' in the ${scope} layer (a 'set' edits one layer — pass --project for the project override)`);
+      const profile = normaliseProfile(name, { ...cur, [field]: parsed });
+      return { ...layer, profiles: { ...layer.profiles, [name]: profile } };
+    });
+    return print({ updated: name, [field]: parsed, scope, file });
+  }
+
   if (sub === "remove") {
     const [, name] = args;
     if (!name) return usage("setup remove <name> [--project]");

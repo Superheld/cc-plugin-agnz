@@ -1,6 +1,6 @@
 # Defining an agent role
 
-Companion to [SKILL.md](SKILL.md). This covers the full `.md` + frontmatter format, the policy-merge rules, and a few example roles you can copy.
+Companion to [SKILL.md](SKILL.md). This covers the full `.md` + frontmatter format, the tool-policy model, and a few example roles you can copy.
 
 ## Where agent files live
 
@@ -58,11 +58,11 @@ and, if relevant, a bullet list of file:line references.
 |---|---|---|---|
 | `name` | yes | `[a-z][a-z0-9_-]*` | Unique within the workspace. Used in mailbox addressing and appears in logs. |
 | `description` | yes | string | How Parent Claude routes tasks to this role. Use `\|` for multi-line with `<example>` blocks (see below). **Be specific.** |
-| `model` | no | string | agnz profile name (e.g. `lmstudio-devstral`). Falls back to the active profile if absent. |
+| `model` | no | string | Resolved via the config's mapping chain: `mappings[model]` → `mappings._default` → the identifier used directly as a profile name. CC identifiers (`sonnet`, `inherit`, …) work once mapped via `/agnz:setup mapping set`. Absent = `_default`. |
 | `color` | no | string | CC-compatible visual identifier (`blue`/`cyan`/`green`/`yellow`/`magenta`/`red`). Stored for future use. |
-| `tools` | no | string array — **whitelist** | Listed tools are permanently `allow`; tools NOT listed default to `ask` (not `deny`). If absent, all tools are available with their sandbox-default policy. Profile is the upper bound — listing a tool can never promote it beyond what the profile allows. |
-| `disallowedTools` | no | string array — **blacklist** | Listed tools are denied regardless of the whitelist or profile. |
-| `skills` | no | string array | Allowlist of project-local skills the agent may load via the `Skill` tool. If absent, all skills are available. |
+| `tools` | no | string array — **whitelist** | Listed tools are `allow` (run without asking); tools NOT listed stay at the default `ask`. If absent, every tool asks. |
+| `disallowedTools` | no | string array — **blacklist** | Listed tools are `deny` — overrides the whitelist. |
+| `skills` | no | string array | Allowlist for the `Skill` tool (which searches plugin, `~/.claude/skills/`, and `<cwd>/.claude/skills/` — project wins on clash). If absent, all discovered skills are available. |
 | `temperature` | no | number | Overrides the profile's `temperature` for this role. |
 | `maxTurns` | no | positive integer | Overrides the profile's `maxTurns`. |
 
@@ -102,33 +102,26 @@ Everything after the closing `---` is the body. It is **concatenated** onto `agn
 
 Keep it in prose with concrete instructions. Avoid vague "you are helpful" language — local models are more literal than frontier models and reward precise instructions.
 
-## The tool policy model — profile is the upper bound
+## The tool policy model — the frontmatter is the single source of truth
 
-The available tools in agnz (PascalCase, matching CC naming):
+The agent def's frontmatter is the **only** place tool policy comes from (there is no profile-level or workspace-level tool configuration). The rule, in full:
 
-| Tool | Sandbox default | Description |
-|---|---|---|
-| `LS` | allow | List directory contents |
-| `Read` | allow | Read file contents |
-| `Grep` | allow | Search file contents with regex |
-| `AskUser` | allow | Pause and ask the parent a question |
-| `SendMessage` | allow | Send a message to another agent or parent |
-| `Skill` | allow | Discover and load project-local skills |
-| `Edit` | ask | Edit a file (pauses for approval) |
-| `Write` | ask | Write a file (pauses for approval) |
-| `Bash` | ask | Run a shell command (pauses for approval) |
+| Frontmatter | Effective policy |
+|---|---|
+| tool listed in `tools:` | `allow` — runs without asking |
+| tool listed in `disallowedTools:` | `deny` — always blocked (overrides the whitelist) |
+| tool mentioned in neither | `ask` — pauses for approval on every call |
+| `Skill`, `SendMessage` (special cases) | `allow` — always auto-allowed unless explicitly in `disallowedTools:` |
 
-Note: there is no `defaultPolicy()` function. The "Sandbox default" column shows the effective policy when no `tools:`/`disallowedTools:` is set in the agent def. The sandbox defaults to `ask` for any tool not explicitly listed.
+The available tools (PascalCase, matching CC naming): `LS`, `Read`, `Grep`, `Edit`, `Write`, `Bash`, `AskUser`, `SendMessage`, `Skill`.
 
-For every tool, the effective policy is `strictest(profile[T], agent[T])`, with strictness ordering `deny > ask > allow`.
+The practical consequence of the ask-everything default: **a def without a `tools:` whitelist pauses for approval on its very first `Read`.** Whitelist the read-only set (`LS`, `Read`, `Grep`) for any role that should work unattended, and keep mutating tools (`Edit`, `Write`, `Bash`) on `ask` or `deny` depending on the role's trust level.
 
-- **`tools` (whitelist): Listed tools become `allow`; unlisted tools fall back to `ask`.** Listing `Edit` in `tools` makes it permanently allowed — it cannot be promoted beyond what the profile permits. If the profile says `Edit: ask`, listing it in `tools` allows it; if the profile says `Edit: deny`, listing it in `tools` cannot unlock it.
-- **`disallowedTools` (blacklist): Always denied.** Overrides both whitelist and profile.
-- **Profile `deny` wins absolutely.** If the profile says `Bash: deny`, no agent definition can unlock it. Upgrade the profile first.
+Three tools you never need to list:
 
-### Note on `Skill` + `tools` whitelist
-
-If you use a `tools:` whitelist **and** a `skills:` list, add `Skill` to the whitelist or the sub-agent will see the skills hint in its system prompt but won't be able to call the tool. agnz auto-adds `Skill` to the effective policy when `skills:` is set, so omitting it from `tools:` is caught automatically — but being explicit is clearer.
+- `Skill` — auto-allowed (read-only, sandboxed to known skill paths) unless explicitly denied.
+- `SendMessage` — auto-allowed (it only appends to the workspace's `messages.jsonl`; messaging is the architecture's backbone) unless explicitly denied.
+- `AskUser` — not policy-gated at all: the loop intercepts it before any permission check and pauses the thread as a question for you to `agnz answer`.
 
 ## Example roles
 
@@ -202,7 +195,7 @@ error message. Do not attempt to fix failures — that's not
 your job; just report.
 ```
 
-Note: `Bash` has policy `ask` by default so the first run will pause for approval. Approve with `persist: true` to unblock for the rest of the thread.
+Note: `Bash` has policy `ask` by default so the first run will pause for approval. Resolve with `agnz approve <id> allow --persist` to remember that exact command for the thread (without `--persist` the approval is one-time and the same command asks again).
 
 ## Snapshot-on-spawn — what that means for you
 
