@@ -103,6 +103,71 @@ test("a subdir CLAUDE.md is injected only once even across repeated visits", asy
   assert.equal(ctxMsgs.length, 1);
 });
 
+test("a subdir CLAUDE.md is not re-injected on a later run (visitedDirs persisted)", async () => {
+  const threadMgr = createThreadManager();
+  const thread = await threadMgr.createThread({ cwd: projectCwd, name: "dev", agentDef: { name: "dev", tools: ["Read"] } });
+  const sandbox = createSandbox({ root: projectCwd, policy: { Read: "allow" } });
+  const registry = createRegistry();
+  const profile = { baseUrl: "http://fake", model: "fake", name: "p" };
+
+  // Run 1 visits sub/ and finishes. Run 2 (a fresh send — in production a
+  // fresh runner process) visits sub/ again. Before visitedDirs lived on the
+  // meta, the process-local guard was gone by run 2 and the CLAUDE.md was
+  // injected a second time.
+  await runThread({
+    thread, threadMgr, sandbox, registry, profile,
+    chat: fakeChat([toolCall("c1", "Read", { path: "sub/data.txt" }), finalMessage("done")]),
+    userMessage: "read it",
+  });
+  const thread2 = await threadMgr.getThread(thread.id);
+  await runThread({
+    thread: thread2, threadMgr, sandbox, registry, profile,
+    chat: fakeChat([toolCall("c2", "Read", { path: "sub/data.txt" }), finalMessage("done again")]),
+    userMessage: "read it again",
+  });
+
+  const history = await threadMgr.readMessages(thread.id);
+  const ctxMsgs = history.filter((m) => m.role === "user" && /SUBDIR RULES/.test(m.content || ""));
+  assert.equal(ctxMsgs.length, 1, "subdir CLAUDE.md injected exactly once across runs");
+});
+
+test("a queued-but-undelivered subdir CLAUDE.md survives a pause and injects after resume", async () => {
+  const threadMgr = createThreadManager();
+  const thread = await threadMgr.createThread({ cwd: projectCwd, name: "dev", agentDef: { name: "dev", tools: ["Read"] } });
+  // Edit is not in tools → ask → the run pauses right after the sub/ visit,
+  // BEFORE the next turn boundary would drain the queue.
+  const sandbox = createSandbox({ root: projectCwd, policy: { Read: "allow", Edit: "ask" } });
+  const registry = createRegistry();
+  const profile = { baseUrl: "http://fake", model: "fake", name: "p" };
+
+  const outcome = await runThread({
+    thread, threadMgr, sandbox, registry, profile,
+    chat: fakeChat([
+      { message: { role: "assistant", content: null, tool_calls: [
+        { id: "c1", type: "function", function: { name: "Read", arguments: JSON.stringify({ path: "sub/data.txt" }) } },
+        { id: "c2", type: "function", function: { name: "Edit", arguments: JSON.stringify({ path: "sub/data.txt", old_string: "payload", new_string: "changed" }) } },
+      ] } },
+      finalMessage("done"),
+    ]),
+    userMessage: "read then edit",
+  });
+  assert.equal(outcome.status, "awaiting_input");
+
+  // Resume in a "fresh process": re-load the thread from disk and deny the edit.
+  const resumed = await threadMgr.getThread(thread.id);
+  assert.deepEqual(resumed.pendingDirMds, [join(projectCwd, "sub")], "queue persisted across the pause");
+  await runThread({
+    thread: resumed, threadMgr, sandbox, registry, profile,
+    chat: fakeChat([finalMessage("ok")]),
+    userMessage: null,
+    resumeInput: { toolCallId: "c2", decision: "deny" },
+  });
+
+  const history = await threadMgr.readMessages(thread.id);
+  const ctxMsgs = history.filter((m) => m.role === "user" && /SUBDIR RULES/.test(m.content || ""));
+  assert.equal(ctxMsgs.length, 1, "queued CLAUDE.md delivered exactly once after resume");
+});
+
 test("AGENTS.md stands in when a directory has no CLAUDE.md", async () => {
   const threadMgr = createThreadManager();
   // cwd: AGENTS.md only. sub/: replace the fixture CLAUDE.md with AGENTS.md.
