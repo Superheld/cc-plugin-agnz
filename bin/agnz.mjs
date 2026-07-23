@@ -11,6 +11,8 @@
 //   agnz stop   <id|name>             (archive: hide from list, keep transcript)
 //   agnz remove <id|name> | --status stopped|error   (delete files permanently)
 //   agnz show   [<id|name>]           (no target: list all threads; --status <s> filters)
+//   agnz config <sub> [...]           (profiles + mappings: list|add|set|remove|use|test|mapping; --project)
+//   agnz info                         (version, config layout, effective profiles/mappings)
 //
 // Every verb prints a JSON object (or array) to stdout so the parent can
 // parse the outcome from a Bash call. Errors print {"error": "..."} and exit 1.
@@ -41,6 +43,9 @@ import { createSandbox } from "../lib/sandbox.mjs";
 import { publish } from "../lib/event-bus.mjs";
 import { readTrace, aggregateTrace } from "../lib/trace-stats.mjs";
 import { PLUGIN_ROOT } from "../lib/orchestrate.mjs";
+import { loadConfig, updateConfigLayer, normaliseProfile } from "../lib/config.mjs";
+import { resolveUserDir, resolveProjectDir } from "../lib/data-dir.mjs";
+import { listModels } from "../lib/llm/openai-compatible.mjs";
 
 const RUNNER = resolve(PLUGIN_ROOT, "lib", "runner.mjs");
 
@@ -56,7 +61,7 @@ function fail(message) {
 // ---- minimal arg parser ----
 // Value-flags always consume the next token (even one starting with "--",
 // e.g. an --inline "---\n..." frontmatter block). Boolean flags never do.
-const BOOLEAN_FLAGS = new Set(["wait", "persist", "all", "new"]);
+const BOOLEAN_FLAGS = new Set(["wait", "persist", "all", "new", "project"]);
 function parseArgs(argv) {
   const positionals = [];
   const flags = {};
@@ -664,8 +669,202 @@ async function main() {
       return;
     }
 
+    // Config management (ADR 0017), folded in from the retired setup
+    // companion script so the lead and the /agnz:setup skill drive the SAME
+    // interface as everything else — one CLI, no side-channel scripts.
+    // Write sub-commands target the user layer; --project writes the
+    // project override instead.
+    case "config": {
+      const scope = flags.project ? "project" : "user";
+      const sub = positionals[0] || "list";
+
+      if (sub === "list") {
+        const { profiles, mappings } = await loadConfig(cwd);
+        out({
+          profiles: Object.values(profiles),
+          mappings: Object.fromEntries(
+            Object.entries(mappings).map(([m, v]) => [m, `${v.profile} (${v.origin})`]),
+          ),
+        });
+        return;
+      }
+
+      if (sub === "add") {
+        const [, name, baseUrl, model, apiKey] = positionals;
+        if (!name || !baseUrl || !model) fail("config add <name> <baseUrl> <model> [apiKey] [--project]");
+        let profile;
+        try {
+          profile = normaliseProfile(name, { baseUrl, model, apiKey: apiKey || null });
+        } catch (err) {
+          fail(err.message);
+        }
+        const { file } = await updateConfigLayer(scope, cwd, (layer) => {
+          const next = { ...layer, profiles: { ...layer.profiles, [name]: profile } };
+          // The first profile of a fresh layer becomes the fallback mapping,
+          // so a new setup works without a separate `mapping set _default`.
+          if (Object.keys(layer.profiles).length === 0 && !layer.mappings._default) {
+            next.mappings = { ...layer.mappings, _default: name };
+          }
+          return next;
+        });
+        out({ added: name, scope, file, ...profile });
+        return;
+      }
+
+      if (sub === "set") {
+        const NUMERIC = ["temperature", "maxTokens", "maxTurns", "llmTimeoutMs", "contextWindow", "compactThreshold"];
+        const STRINGY = ["baseUrl", "model", "apiKey"];
+        const [, name, field, value] = positionals;
+        if (!name || !field || value === undefined) fail("config set <name> <field> <value> [--project]");
+        if (!NUMERIC.includes(field) && !STRINGY.includes(field)) {
+          fail(`unknown profile field '${field}' (known: ${[...STRINGY, ...NUMERIC].join(", ")})`);
+        }
+        const parsed = NUMERIC.includes(field) ? Number(value) : value;
+        if (NUMERIC.includes(field) && !Number.isFinite(parsed)) {
+          fail(`field '${field}' expects a number, got '${value}'`);
+        }
+        try {
+          const { file } = await updateConfigLayer(scope, cwd, (layer) => {
+            const cur = layer.profiles[name];
+            if (!cur) {
+              throw new Error(`no profile '${name}' in the ${scope} layer ('set' edits one layer — pass --project for the project override)`);
+            }
+            const profile = normaliseProfile(name, { ...cur, [field]: parsed });
+            return { ...layer, profiles: { ...layer.profiles, [name]: profile } };
+          });
+          out({ updated: name, [field]: parsed, scope, file });
+        } catch (err) {
+          fail(err.message);
+        }
+        return;
+      }
+
+      if (sub === "remove") {
+        const [, name] = positionals;
+        if (!name) fail("config remove <name> [--project]");
+        try {
+          const { file } = await updateConfigLayer(scope, cwd, (layer) => {
+            if (!layer.profiles[name]) throw new Error(`no profile '${name}' in the ${scope} layer`);
+            const profiles = { ...layer.profiles };
+            delete profiles[name];
+            return { ...layer, profiles };
+          });
+          out({ removed: name, scope, file });
+        } catch (err) {
+          fail(err.message);
+        }
+        return;
+      }
+
+      if (sub === "use") {
+        const [, name] = positionals;
+        if (!name) fail("config use <name> [--project]");
+        const { profiles } = await loadConfig(cwd);
+        if (!profiles[name]) fail(`no such profile '${name}' in the effective config`);
+        await updateConfigLayer(scope, cwd, (layer) => ({
+          ...layer,
+          mappings: { ...layer.mappings, _default: name },
+        }));
+        out({ _default: name, scope });
+        return;
+      }
+
+      if (sub === "test") {
+        const [, name] = positionals;
+        try {
+          const { profiles, mappings } = await loadConfig(cwd);
+          const target = name || mappings._default?.profile;
+          const p = target ? profiles[target] : null;
+          if (!p) throw new Error(`no such profile '${target || "(default)"}'`);
+          const models = await listModels({ baseUrl: p.baseUrl, apiKey: p.apiKey });
+          out({
+            ok: true,
+            name: p.name,
+            baseUrl: p.baseUrl,
+            models,
+            seesConfiguredModel: Boolean(p.model && models.includes(p.model)),
+          });
+        } catch (err) {
+          fail(err.message);
+        }
+        return;
+      }
+
+      if (sub === "mapping") {
+        const msub = positionals[1] || "list";
+        if (msub === "list") {
+          const { mappings } = await loadConfig(cwd);
+          out(
+            Object.fromEntries(
+              Object.entries(mappings).map(([m, v]) => [m, `${v.profile} (${v.origin})`]),
+            ),
+          );
+          return;
+        }
+        if (msub === "set") {
+          const [, , model, profile] = positionals;
+          if (!model || !profile) fail("config mapping set <model> <profile> [--project]");
+          await updateConfigLayer(scope, cwd, (layer) => ({
+            ...layer,
+            mappings: { ...layer.mappings, [model]: profile },
+          }));
+          out({ mapped: { [model]: profile }, scope });
+          return;
+        }
+        if (msub === "remove") {
+          const [, , model] = positionals;
+          if (!model) fail("config mapping remove <model> [--project]");
+          await updateConfigLayer(scope, cwd, (layer) => {
+            const mappings = { ...layer.mappings };
+            delete mappings[model];
+            return { ...layer, mappings };
+          });
+          out({ removedMapping: model, scope });
+          return;
+        }
+        fail(`unknown mapping sub-command '${msub}'. Use: list | set | remove`);
+      }
+
+      fail(`unknown config sub-command '${sub}'. Use: list | add | set | remove | use | test | mapping`);
+      return;
+    }
+
+    // Environment overview: version, config layout, effective profiles and
+    // mappings with origins, per-project counts. The one place that renders
+    // the whole model-resolution picture.
+    case "info": {
+      let version = "unknown";
+      try {
+        version = JSON.parse(
+          await (await import("node:fs/promises")).readFile(resolve(PLUGIN_ROOT, ".claude-plugin", "plugin.json"), "utf8"),
+        ).version || "unknown";
+      } catch {}
+
+      const view = {
+        version,
+        cwd,
+        userConfig: resolve(resolveUserDir(), "config.json"),
+        projectConfig: resolve(resolveProjectDir(cwd), "config.json"),
+      };
+      try {
+        const { profiles, mappings } = await loadConfig(cwd);
+        view.profiles = Object.values(profiles).map(
+          (p) => `${p.name} → ${p.baseUrl} · ${p.model} [${p.origin}]`,
+        );
+        view.mappings = Object.entries(mappings).map(
+          ([m, v]) => `${m} → ${v.profile} [${v.origin}]`,
+        );
+      } catch (err) {
+        view.configError = err.message;
+      }
+      const threads = await tm.reconcileWorkspace(cwd);
+      view.threads = threads.length;
+      out(view);
+      return;
+    }
+
     default:
-      fail(`unknown verb '${verb ?? ""}'. Use: start | send | approve | answer | wait | stop | remove | interrupt | show`);
+      fail(`unknown verb '${verb ?? ""}'. Use: start | send | approve | answer | wait | stop | remove | interrupt | show | config | info`);
   }
 }
 

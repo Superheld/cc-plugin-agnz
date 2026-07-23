@@ -100,9 +100,9 @@ One schema, two layers, project wins per entry:
 Run `/agnz:setup add` for interactive setup, or pass the fields directly. LM Studio (default endpoint `http://localhost:1234/v1`) and Ollama examples:
 
 ```bash
-node ${CLAUDE_PLUGIN_ROOT}/skills/agnz-setup/scripts/companion.mjs setup add \
+agnz config add \
   lmstudio http://localhost:1234/v1 mistralai/devstral-small-2-2512
-node ${CLAUDE_PLUGIN_ROOT}/skills/agnz-setup/scripts/companion.mjs setup add \
+agnz config add \
   ollama http://192.168.1.10:11434/v1 devstral-2:96k
 ```
 
