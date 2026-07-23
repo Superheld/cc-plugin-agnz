@@ -17,6 +17,8 @@ import {
   readThreadSpend,
   readThreadMetas,
   readLastActivity,
+  readRunState,
+  isHungRunState,
   formatThreadsDetailed,
   atomicWriteJson,
   readWsFingerprint,
@@ -751,4 +753,57 @@ test("isFencedTranscriptGrep normalizes a relative/dot-segment path against cwd"
     isFencedTranscriptGrep("Grep", { path: ".claude/agnz/threads/x.jsonl", "-A": 5 }, cwd),
     false,
   );
+});
+
+// ── hung detection (ADR 0019): readRunState + the block's alert line ─────────
+
+test("readRunState derives in-flight LLM call and median from the tail", () => {
+  const MIN = 60_000;
+  const NOW = 2_000_000_000_000;
+  writeThread("t1", { status: "running" }, [
+    { ts: NOW - 30 * MIN, type: "turn_start", turn: 0 },
+    { ts: NOW - 28 * MIN, type: "llm_call", turn: 0, latencyMs: 2 * MIN },
+    { ts: NOW - 27 * MIN, type: "tool_call", turn: 0, name: "Read", target: "a.py", outcome: "ok" },
+    { ts: NOW - 26 * MIN, type: "turn_start", turn: 1 },
+    { ts: NOW - 23 * MIN, type: "llm_call", turn: 1, latencyMs: 3 * MIN },
+    { ts: NOW - 22 * MIN, type: "turn_start", turn: 2 }, // never returned
+  ]);
+  const rs = readRunState(ws, "t1", NOW);
+  assert.equal(rs.llmInFlightMs, 22 * MIN);
+  assert.equal(rs.medianLlmMs, 2 * MIN);
+  assert.equal(rs.lastAction.name, "Read");
+});
+
+test("isHungRunState: 10x median (with 10m floor) decides", () => {
+  const MIN = 60_000;
+  assert.equal(isHungRunState({ llmInFlightMs: 22 * MIN, medianLlmMs: 2 * MIN }), true);
+  assert.equal(isHungRunState({ llmInFlightMs: 15 * MIN, medianLlmMs: 2 * MIN }), false); // < 10x
+  assert.equal(isHungRunState({ llmInFlightMs: 11 * MIN, medianLlmMs: null }), true); // floor only
+  assert.equal(isHungRunState({ llmInFlightMs: 9 * MIN, medianLlmMs: null }), false);
+  assert.equal(isHungRunState({ llmInFlightMs: null, medianLlmMs: 2 * MIN }), false);
+});
+
+test("formatThreadsDetailed adds the hung alert with evidence and interrupt verb", () => {
+  const MIN = 60_000;
+  const now = 1782065400570;
+  const out = formatThreadsDetailed(
+    [
+      {
+        id: "e626e9e0aaaa", name: "dash-transcript", status: "running", updatedAt: now,
+        spend: { turns: 32, tokens: 0, lastCtx: 21000 },
+        lastActivity: { name: "Edit", target: "tests/test_transcript.py", ts: now - 43 * MIN, outcome: "ok" },
+        runState: { lastAction: null, llmInFlightMs: 43 * MIN, medianLlmMs: 2.4 * MIN },
+      },
+      {
+        id: "bbbb0000cccc", name: "healthy", status: "running", updatedAt: now,
+        spend: { turns: 2, tokens: 0, lastCtx: 5000 },
+        lastActivity: { name: "Read", target: "a.py", ts: now - 10_000, outcome: "ok" },
+        runState: { lastAction: null, llmInFlightMs: 30_000, medianLlmMs: 2 * MIN },
+      },
+    ],
+    now,
+  );
+  assert.match(out, /⚠ hung: LLM call running 43m \(median 2m\) → agnz interrupt dash-transcript/);
+  // the healthy thread gets no alert line
+  assert.doesNotMatch(out, /interrupt healthy/);
 });
