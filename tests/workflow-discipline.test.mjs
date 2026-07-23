@@ -136,3 +136,136 @@ test("a sliced Read of a large file is allowed", async () => {
   assert.doesNotMatch(res.content, /Workflow:/);
   assert.match(res.content, /line 10/);
 });
+
+// ---- context-diet 2/3: freshness stamps -------------------------------------
+// A step in `sideChat` may carry { before: fn } — run just before the step is
+// returned, to simulate an external change between the agent's turns.
+function sideChat(steps) {
+  let i = 0;
+  return async () => {
+    const step = steps[Math.min(i, steps.length - 1)];
+    i += 1;
+    if (step.before) step.before();
+    return { message: step.message, finishReason: "stop", usage: null, raw: {} };
+  };
+}
+
+test("Write to a file changed on disk since the read is blocked as stale", async () => {
+  writeFileSync(join(projectCwd, "shared.txt"), "v1");
+  const threadMgr = createThreadManager();
+  const thread = await threadMgr.createThread({ cwd: projectCwd, name: "dev", agentDef: { name: "dev", tools: ["Read", "Write"] } });
+  const { sandbox, registry, profile } = setup({ Read: "allow", Write: "allow" });
+
+  const chat = sideChat([
+    toolCall("r1", "Read", { path: "shared.txt" }),
+    {
+      ...toolCall("w1", "Write", { path: "shared.txt", content: "agent version", overwrite: true }),
+      before: () => writeFileSync(join(projectCwd, "shared.txt"), "v2 — changed externally"),
+    },
+    finalMessage("ok"),
+  ]);
+  await runThread({ thread, threadMgr, sandbox, registry, profile, chat, userMessage: "update it" });
+
+  // The external version must survive; the agent got the staleness correction.
+  assert.match(readFileSync(join(projectCwd, "shared.txt"), "utf8"), /changed externally/);
+  const history = await threadMgr.readMessages(thread.id);
+  assert.match(lastToolResult(history, "w1").content, /changed on disk since you last read/);
+});
+
+test("re-reading the changed file unblocks the Write", async () => {
+  writeFileSync(join(projectCwd, "shared.txt"), "v1");
+  const threadMgr = createThreadManager();
+  const thread = await threadMgr.createThread({ cwd: projectCwd, name: "dev", agentDef: { name: "dev", tools: ["Read", "Write"] } });
+  const { sandbox, registry, profile } = setup({ Read: "allow", Write: "allow" });
+
+  const chat = sideChat([
+    toolCall("r1", "Read", { path: "shared.txt" }),
+    {
+      ...toolCall("r2", "Read", { path: "shared.txt" }),
+      before: () => writeFileSync(join(projectCwd, "shared.txt"), "v2 external"),
+    },
+    toolCall("w1", "Write", { path: "shared.txt", content: "merged version", overwrite: true }),
+    finalMessage("done"),
+  ]);
+  await runThread({ thread, threadMgr, sandbox, registry, profile, chat, userMessage: "update it" });
+
+  assert.equal(readFileSync(join(projectCwd, "shared.txt"), "utf8"), "merged version");
+});
+
+test("the agent's own Edit refreshes the stamp — a following Write is not stale", async () => {
+  writeFileSync(join(projectCwd, "own.txt"), "alpha beta");
+  const threadMgr = createThreadManager();
+  const thread = await threadMgr.createThread({ cwd: projectCwd, name: "dev", agentDef: { name: "dev", tools: ["Read", "Edit", "Write"] } });
+  const { sandbox, registry, profile } = setup({ Read: "allow", Edit: "allow", Write: "allow" });
+
+  const chat = fakeChat([
+    toolCall("r1", "Read", { path: "own.txt" }),
+    toolCall("e1", "Edit", { path: "own.txt", old_string: "alpha", new_string: "gamma" }),
+    toolCall("w1", "Write", { path: "own.txt", content: "final", overwrite: true }),
+    finalMessage("done"),
+  ]);
+  await runThread({ thread, threadMgr, sandbox, registry, profile, chat, userMessage: "edit then write" });
+
+  const history = await threadMgr.readMessages(thread.id);
+  assert.doesNotMatch(lastToolResult(history, "w1").content, /Workflow:/);
+  assert.equal(readFileSync(join(projectCwd, "own.txt"), "utf8"), "final");
+});
+
+test("a full re-read of an unchanged file is answered without re-sending content", async () => {
+  writeFileSync(join(projectCwd, "stable.txt"), "the payload line");
+  const threadMgr = createThreadManager();
+  const thread = await threadMgr.createThread({ cwd: projectCwd, name: "dev", agentDef: { name: "dev", tools: ["Read"] } });
+  const { sandbox, registry, profile } = setup({ Read: "allow" });
+
+  const chat = fakeChat([
+    toolCall("r1", "Read", { path: "stable.txt" }),
+    toolCall("r2", "Read", { path: "stable.txt" }),
+    finalMessage("ok"),
+  ]);
+  await runThread({ thread, threadMgr, sandbox, registry, profile, chat, userMessage: "read twice" });
+
+  const history = await threadMgr.readMessages(thread.id);
+  assert.match(lastToolResult(history, "r1").content, /the payload line/);
+  const second = lastToolResult(history, "r2");
+  assert.match(second.content, /unchanged since your last read/);
+  assert.doesNotMatch(second.content, /the payload line/);
+});
+
+test("a slice read does not arm the dedup — a later full read delivers content", async () => {
+  writeFileSync(join(projectCwd, "sliced.txt"), "line one\nline two\nline three");
+  const threadMgr = createThreadManager();
+  const thread = await threadMgr.createThread({ cwd: projectCwd, name: "dev", agentDef: { name: "dev", tools: ["Read"] } });
+  const { sandbox, registry, profile } = setup({ Read: "allow" });
+
+  const chat = fakeChat([
+    toolCall("r1", "Read", { path: "sliced.txt", start_line: 1, end_line: 1 }),
+    toolCall("r2", "Read", { path: "sliced.txt" }),
+    finalMessage("ok"),
+  ]);
+  await runThread({ thread, threadMgr, sandbox, registry, profile, chat, userMessage: "slice then full" });
+
+  const history = await threadMgr.readMessages(thread.id);
+  const second = lastToolResult(history, "r2");
+  assert.doesNotMatch(second.content, /unchanged since your last read/);
+  assert.match(second.content, /line three/);
+});
+
+test("a changed file is re-read normally, not deduped", async () => {
+  writeFileSync(join(projectCwd, "moving.txt"), "old content");
+  const threadMgr = createThreadManager();
+  const thread = await threadMgr.createThread({ cwd: projectCwd, name: "dev", agentDef: { name: "dev", tools: ["Read"] } });
+  const { sandbox, registry, profile } = setup({ Read: "allow" });
+
+  const chat = sideChat([
+    toolCall("r1", "Read", { path: "moving.txt" }),
+    {
+      ...toolCall("r2", "Read", { path: "moving.txt" }),
+      before: () => writeFileSync(join(projectCwd, "moving.txt"), "new content here"),
+    },
+    finalMessage("ok"),
+  ]);
+  await runThread({ thread, threadMgr, sandbox, registry, profile, chat, userMessage: "read, change, read" });
+
+  const history = await threadMgr.readMessages(thread.id);
+  assert.match(lastToolResult(history, "r2").content, /new content here/);
+});
