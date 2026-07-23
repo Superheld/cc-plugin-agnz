@@ -183,12 +183,25 @@ export function writeWsFingerprint(ws, fingerprint) {
 }
 
 /**
- * The fingerprint of a thread set: sorted "id:status" pairs joined by ",".
+ * The fingerprint of a thread set: sorted "id:status" pairs joined by ",",
+ * with ":hung" appended while a running thread's LLM call is judged hung.
  * Order-independent (sorted) so the same set in a different array order yields
  * the same string — the hook keys "did the visible state change" off this.
+ *
+ * The hung marker matters because hung is a VERDICT, not a status: a thread
+ * tipping from healthy-running to hung changes nothing in `id:status` and
+ * writes no mail, so without it the alert line would only ever ride along on
+ * unrelated deltas (Bruce's catch, 2026-07-24). With it, the tip itself is
+ * the delta: one push when it hangs, one when it recovers, silence between.
  */
 export function computeThreadFingerprint(threads) {
-  return threads.map((t) => `${t.id}:${t.status}`).sort().join(",");
+  return threads
+    .map((t) => {
+      const hung = t.status === "running" && t.runState && isHungRunState(t.runState);
+      return `${t.id}:${t.status}${hung ? ":hung" : ""}`;
+    })
+    .sort()
+    .join(",");
 }
 
 /**
