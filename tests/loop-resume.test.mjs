@@ -191,3 +191,73 @@ test("a run stamps a live 'working:' summary that replaces the previous segment'
   const after = await threadMgr.getThread(thread.id);
   assert.notEqual(after.summary, midRunSummary, "the finish stamp overwrites the working marker");
 });
+
+// ── --persist gate (regression: flag was a silent no-op after 137167a) ───────
+
+test("Bash approve WITHOUT persist stays one-time — the same command asks again", async () => {
+  const threadMgr = createThreadManager();
+  const thread = await threadMgr.createThread({ cwd: projectCwd, name: "dev", agentDef: { name: "dev" } });
+  const chat = fakeChat([
+    toolCall("c1", "Bash", { command: "echo hi" }),
+    toolCall("c2", "Bash", { command: "echo hi" }),
+    finalMessage("done"),
+  ]);
+  const { sandbox, registry, profile } = makeThread(threadMgr, { Bash: "ask" }, chat);
+
+  const paused = await runThread({ thread, threadMgr, sandbox, registry, profile, chat, userMessage: "run it" });
+  assert.equal(paused.pending.kind, "approval");
+
+  let resumed = await threadMgr.getThread(thread.id);
+  const second = await runThread({
+    thread: resumed, threadMgr, sandbox, registry, profile, chat,
+    resumeInput: { toolCallId: resumed.pending.toolCallId, decision: "allow" },
+  });
+
+  // Nothing recorded → the SAME command pauses again on the next call.
+  const meta = await threadMgr.getThread(thread.id);
+  assert.deepEqual(meta.sessionCommands, { sessionAllow: [], sessionDeny: [] });
+  assert.equal(second.status, "awaiting_input");
+  assert.equal(second.pending.name, "Bash");
+});
+
+test("Bash approve WITH persist records the command — it runs silently next time", async () => {
+  const threadMgr = createThreadManager();
+  const thread = await threadMgr.createThread({ cwd: projectCwd, name: "dev", agentDef: { name: "dev" } });
+  const chat = fakeChat([
+    toolCall("c1", "Bash", { command: "echo hi" }),
+    toolCall("c2", "Bash", { command: "echo hi" }),
+    finalMessage("done"),
+  ]);
+  const { sandbox, registry, profile } = makeThread(threadMgr, { Bash: "ask" }, chat);
+
+  await runThread({ thread, threadMgr, sandbox, registry, profile, chat, userMessage: "run it" });
+  let resumed = await threadMgr.getThread(thread.id);
+  const done = await runThread({
+    thread: resumed, threadMgr, sandbox, registry, profile, chat,
+    resumeInput: { toolCallId: resumed.pending.toolCallId, decision: "allow", persist: true },
+  });
+
+  const meta = await threadMgr.getThread(thread.id);
+  assert.deepEqual(meta.sessionCommands.sessionAllow, ["echo hi"]);
+  assert.equal(done.status, "final", "second identical command ran without a new pause");
+});
+
+test("non-Bash approve WITH persist upgrades the tool for the rest of the run", async () => {
+  const threadMgr = createThreadManager();
+  const thread = await threadMgr.createThread({ cwd: projectCwd, name: "dev", agentDef: { name: "dev" } });
+  const chat = fakeChat([
+    toolCall("c1", "Write", { path: "a.txt", content: "one" }),
+    toolCall("c2", "Write", { path: "b.txt", content: "two" }),
+    finalMessage("done"),
+  ]);
+  const { sandbox, registry, profile } = makeThread(threadMgr, {}, chat); // Write -> ask
+
+  await runThread({ thread, threadMgr, sandbox, registry, profile, chat, userMessage: "write files" });
+  const resumed = await threadMgr.getThread(thread.id);
+  const done = await runThread({
+    thread: resumed, threadMgr, sandbox, registry, profile, chat,
+    resumeInput: { toolCallId: resumed.pending.toolCallId, decision: "allow", persist: true },
+  });
+  assert.equal(done.status, "final", "second Write ran without pausing");
+  assert.equal(readFileSync(join(projectCwd, "b.txt"), "utf8"), "two");
+});

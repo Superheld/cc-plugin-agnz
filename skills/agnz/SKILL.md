@@ -1,8 +1,8 @@
 ---
 name: agnz
-version: 0.4.0
+version: 0.5.0
 user-invocable: false
-description: "This skill should be used when the user asks to 'use agnz', 'delegate this to an agent', 'spawn an agent', 'resume a thread', 'continue with the agent', 'create an agent definition', 'write an agent file', 'define a role for the sub-agent', when agents should communicate or hand off work to each other, or when a task involves reading many files, bulk grep sweeps, or mechanical edits across multiple files where a local model can do the work. Also load when an agnz thread is paused and needs resolution via `agnz approve` or `agnz answer`, or when the user asks about running two agents in parallel."
+description: "This skill should be used when the user asks to 'use agnz', 'delegate this to an agent', 'run this on the local model', 'spawn an agent', 'resume a thread', 'continue with the agent', 'create an agent definition', 'write an agent file', 'define a role for the sub-agent', mentions delegating to LM Studio or Ollama, when agents should communicate or hand off work to each other, or when a task involves reading many files, bulk grep sweeps, or mechanical edits across multiple files where a local model can do the work. Also load when an agnz thread is paused and needs resolution via `agnz approve` or `agnz answer`, or when the user asks about running two agents in parallel."
 ---
 
 # agnz agents
@@ -35,14 +35,15 @@ Avoid delegation for work needing deep reasoning — local models are limited.
 |---|---|
 | `start <name> ["task"] --agent <def>` | Create a thread. `--inline "<frontmatter>"` instead of `--agent` for an ad-hoc role. Without a task it starts idle. |
 | `send <name\|id> "message"` | Send a task. **Reuses** the existing live thread of that name (resume), else needs an id. |
-| `approve <id> allow\|deny [--persist]` | Resolve an approval pause (no tool_call_id needed — the thread's pending call is used). |
-| `answer <id> "answer text"` | Resolve an `AskUser` question pause. |
-| `interrupt <id> ["directive"]` | Hard interrupt a runaway/working agent: aborts the current step, leaves it resumable, optionally queues a directive. |
-| `stop <id>` | End a thread (kills its runner; transcript persists). |
+| `approve <id\|name> allow\|deny [--persist]` | Resolve an approval pause (no tool_call_id needed — the thread's pending call is used). Without `--persist` the approval is one-time; with it, a Bash command is remembered for the thread / another tool for the rest of the run. |
+| `answer <id\|name> "answer text"` | Resolve an `AskUser` question pause. |
+| `interrupt <id\|name> ["directive"]` | Hard interrupt a runaway/working agent: aborts the current step, leaves it resumable, optionally queues a directive. |
+| `stop <id\|name>` | End and archive a thread (kills its runner; transcript persists on disk). |
+| `remove <id\|name>` / `remove --status stopped\|error` | Delete a thread permanently — meta, transcript, trace, index entry. Live threads must be stopped first. |
 | `show [<id\|name>] [--status <s>]` | The one inspection verb. No target: list all threads in this workspace. With a target: lean structural view — status, pending, spend, trace stats, no raw transcript. |
 | `wait <id\|name> [--timeout <s>]` | Poll a detached run until it leaves `running`; prints the outcome (default timeout 300s). |
 
-Runs are always detached — there is no `--wait` flag any more. To collect a result in the same call (e.g. after starting several agents in parallel), poll with `agnz wait`: it watches the thread and prints the outcome once it leaves `running`, `content` included. On timeout it prints `{..., timeout:true}` plus `lastActivity` (the agent's most recent tool call — seconds old means alive, minutes old means look closer) and exits 0 — the runner keeps working underneath; call `wait` again or let the hook deliver the result later. Calling `wait` on a thread that's already finished just returns the outcome (collect mode). For long runs, launch `agnz wait` as a **background** Bash task (Claude Code: `run_in_background`) — the harness wakes you when it exits, so an agent finishing becomes an event instead of something to poll.
+Runs are always detached — there is no `--wait` flag any more. To collect a result in the same call, poll with `agnz wait`; for long runs, launch it as a **background** Bash task (Claude Code: `run_in_background`) so the harness wakes you when the agent finishes. Timeout semantics, the `lastActivity` liveness signal, and collect mode are covered in `references/lifecycle.md`.
 
 ## Resume, don't recreate
 
@@ -89,7 +90,7 @@ Non-blocking peek without the CLI: read `<cwd>/.claude/agnz/threads/<id>.meta.js
 |---|---|---|
 | `name` | yes | `[a-z][a-z0-9_-]*`. The mailbox address. |
 | `description` | yes | How you pick this role. Prose or `>` block. |
-| `model` | no | profile name or `inherit`/`sonnet`/`haiku`/`opus` (mapped via workspace). |
+| `model` | no | profile name or `inherit`/`sonnet`/`haiku`/`opus` (mapped via the two-layer `config.json` — `/agnz:setup mapping`). |
 | `tools` | no | JSON array whitelist → `allow`; others default to `ask`. |
 | `disallowedTools` | no | JSON array blacklist → `deny` (overrides whitelist). |
 | `skills` | no | JSON array allowlist for the `Skill` tool (default: all skills). |
@@ -113,5 +114,3 @@ agnz start billing "…" --agent researcher
 - **`references/defining.md`** — full frontmatter spec and tool-policy model.
 - **`references/lifecycle.md`** — background execution and team messaging in depth.
 - **`references/orchestration.md`** — when to delegate, thread reuse, outcomes.
-
-> The reference files (`references/lifecycle.md`, `references/orchestration.md`, `references/defining.md`) cover the CLI lifecycle, orchestration, and frontmatter in depth.

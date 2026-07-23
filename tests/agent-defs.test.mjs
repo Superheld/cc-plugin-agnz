@@ -93,3 +93,32 @@ test("sequence fields still parse alongside a block-scalar description", () => {
   assert.equal(def.description, "Folded text.");
   assert.deepEqual(def.tools, ["Read", "Grep"]);
 });
+
+// ── buildToolPolicy: the full policy matrix (previously untested) ────────────
+
+test("buildToolPolicy: ask-everything default, whitelist→allow, deny overrides", async () => {
+  const { buildToolPolicy } = await import("../lib/agent-defs.mjs");
+  const ALL = ["LS", "Read", "Grep", "Edit", "Write", "Bash", "AskUser", "SendMessage", "Skill"];
+
+  // No frontmatter config: everything asks except the two auto-allows.
+  const bare = buildToolPolicy({}, ALL);
+  assert.equal(bare.Read, "ask");
+  assert.equal(bare.Bash, "ask");
+  assert.equal(bare.Skill, "allow");
+  assert.equal(bare.SendMessage, "allow");
+
+  // Whitelist → allow; unlisted stays ask; disallowed → deny even if whitelisted.
+  const mixed = buildToolPolicy(
+    { tools: ["Read", "Edit"], disallowedTools: ["Edit", "Bash"] },
+    ALL,
+  );
+  assert.equal(mixed.Read, "allow");
+  assert.equal(mixed.Edit, "deny", "disallowedTools beats tools");
+  assert.equal(mixed.Bash, "deny");
+  assert.equal(mixed.Write, "ask");
+
+  // Explicit deny beats both auto-allows.
+  const denied = buildToolPolicy({ disallowedTools: ["Skill", "SendMessage"] }, ALL);
+  assert.equal(denied.Skill, "deny");
+  assert.equal(denied.SendMessage, "deny");
+});

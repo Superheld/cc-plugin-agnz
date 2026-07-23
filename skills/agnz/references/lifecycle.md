@@ -62,7 +62,7 @@ Resolve an `awaiting_input` / approval pause. No `tool_call_id` needed — the t
 agnz approve abc allow --persist
 ```
 
-`--persist` upgrades that tool to `allow` for the rest of this run, so you stop being paged for every `Edit`.
+Without `--persist` the approval resolves exactly this one call — the same tool (or the same Bash command) asks again next time. With `--persist`, a Bash command is remembered for the thread (also across later runs), any other tool is upgraded to `allow` for the rest of this run — so you stop being paged for every `Edit`.
 
 ### `answer`
 
@@ -110,7 +110,7 @@ All thread-addressing verbs (`send`, `wait`, `approve`, `answer`, `stop`, `remov
 ### `show` — the one inspection verb
 
 ```bash
-agnz show                 # no target: all threads — name, status, summary, spend
+agnz show                 # no target: all threads — name, status, summary, last activity
 agnz show abc1            # one thread: lean structural view — status, pending, spend, trace stats
 ```
 
@@ -186,5 +186,5 @@ Each sub-agent **drains its inbox at the top of every turn** — messages addres
 
 - **No streaming.** Outcomes are single events; intermediate tool calls are invisible until the agent pauses or finishes. `agnz wait` blocks on the *outcome*, not on intermediate steps — you still don't see tool calls as they happen.
 - **No daemon.** Nothing runs between runs; state lives in files.
-- **`Bash` is gated.** Policy ships as `ask`; the first call pauses for approval. `agnz approve <id> allow --persist` unlocks it for the run. Note: Bash is **not** path-confined — it is the sandbox escape hatch, gated only by approval (ADR 0003).
+- **`Bash` is gated.** Policy ships as `ask`; the first call pauses for approval. `agnz approve <id> allow --persist` remembers that exact command for the thread; without `--persist` the approval is one-time. Note: Bash is **not** path-confined — it is the sandbox escape hatch, gated only by approval (ADR 0003).
 - **No runtime reload of agent definitions.** A running thread keeps its snapshot; `start` a new thread to pick up edits.
