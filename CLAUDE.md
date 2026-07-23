@@ -135,6 +135,7 @@ Note: there is no memory preamble. The thread's context is exactly `system promp
 | `disallowedTools: [Edit]` | `deny` — always blocked |
 | not mentioned | `ask` — approval required |
 | Skill (any config) | `allow` — always auto-allowed unless explicitly denied |
+| SendMessage (any config) | `allow` — always auto-allowed unless explicitly denied (ADR 0002: it only appends to `messages.jsonl`; previously it defaulted to `ask`, so every agent message paused for approval — found in the 2026-07-23 skill review) |
 
 No profile `defaultPolicy`, no workspace lists. `buildToolPolicy(agentDef, availableTools)` in `agent-defs.mjs` is the only place this is computed, at thread-creation time.
 

@@ -33,7 +33,7 @@ Only `start` a new thread when the task or role is genuinely different. Threads 
 - One or two tool calls is all it takes — spawning has overhead
 - The task needs real-time judgment or user interaction mid-way
 - The full reasoning chain needs to stay in parent context
-- No profile is configured (`~/.claude/agnz/profiles.json` missing or empty)
+- No profile is configured (`~/.claude/agnz/config.json` missing or without profiles — check `/agnz:setup info`)
 
 ## Picking an agent
 
@@ -55,7 +55,7 @@ Write the task you pass to `agnz start`/`send` as if briefing a capable colleagu
 
 Every run is detached: the final answer arrives via the message hook at your next prompt, or collect it directly with `agnz wait <id>` — it blocks on the thread until it leaves `running` and returns `content` when `status: "idle"` (a finished run is `idle`, not a distinct "final" status). `agnz show <id>` peeks any time without blocking.
 
-If `status: "max_turns"`, the work so far is persisted — `agnz send <id> "continue"` to resume. To see what was done before resuming, `agnz show <id>` (capped recent-message excerpts) or ask the thread (`agnz send <id> "summarize progress so far before continuing"`) — the raw transcript file is fenced against direct `Read`.
+A thread that hits its turn limit also ends `idle` — the summary (and the parent mail) says "reached turn limit (N)"; there is no separate status for it. The work so far is persisted — `agnz send <id> "continue"` to resume. To see what was done before resuming, `agnz show <id>` (capped recent-message excerpts) or ask the thread (`agnz send <id> "summarize progress so far before continuing"`) — the raw transcript file is fenced against direct `Read`.
 
 ## Handling pauses
 
