@@ -33,6 +33,27 @@ chose to defer. Dated entries reflect what was true when written.
 
 ## Deferred (trigger-gated)
 
+- **Context-diet package (analysed 2026-07-23, deliberately not built — Bruce wants to
+  fully understand first; verdict was "sieht eigentlich gut aus").** Measured findings:
+  agnz-repo threads start at ~12.6k tok baseline (**~34k chars of our own CLAUDE.md**
+  in the frozen prefix — module map + ADR section dominate); dashboard threads start
+  lean (~4.2k) but grew to 23.6k over 30 calls — composition: ~29k chars tool results,
+  **~31k chars tool-call arguments (Write alone 23k — the agent carries its own written
+  files as ballast)**, plus ~4k chars duplicate re-reads of unchanged fixtures during
+  debugging. No literal duplication bugs found; growth is genuine payload. Slowness is
+  ~90% the dense model (devstral-2 ~2 tok/s vs nemotron-MoE ~20 — Bruce keeps devstral
+  for now). Candidate fixes, in order: (1) persist `visitedDirs` to thread meta — the
+  once-per-dir CLAUDE.md guard is process-local and reset per run, so a resume can
+  re-inject a subdir file (latent, zero real occurrences yet); (2) freshness map:
+  `knownFiles` from path-list to `{path: {mtime, size}}` — enables "file changed,
+  re-read first" blocks, skips needless re-reads, and lets a full re-read of an
+  unchanged file answer "unchanged since your last read" (slice-aware only!);
+  (3) ADR 0012 phase 2 batch compaction — stub out old tool results AND Write/Edit
+  arguments (the ADR doesn't know that target yet), compact in rare batches at a ctx
+  threshold so the KV-cache invalidation (unavoidable when shrinking a sequence) is
+  paid once per batch, not per turn; (4) CLAUDE.md diet for sub-agents: dedicated
+  `<cwd>/.claude/agnz/context.md` override + size cap with elision note as fallback.
+
 - **ADR 0016 — harness calls — deferred.** Letting the loop reach for a local utility
   model for mechanical sub-steps. Un-parks when all three hold: a local utility model
   is actually installed, a `_utility` profile mapping exists, and the mechanical
