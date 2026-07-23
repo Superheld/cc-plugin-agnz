@@ -20,6 +20,7 @@ import { runThread } from "../lib/loop.mjs";
 import {
   shouldCompact,
   renderCompactionInput,
+  renderRecentTail,
   buildCompactionMarker,
   COMPACTION_PROMPT,
 } from "../lib/compaction.mjs";
@@ -122,6 +123,24 @@ test("buildCompactionMarker is a user message flagged _compact", () => {
   assert.match(marker.content, /Context compacted/);
   assert.match(marker.content, /THE SUMMARY/);
   assert.match(marker.content, /Read them again/);
+  assert.doesNotMatch(marker.content, /last exchanges/, "no tail section without a tail");
+});
+
+test("the recent tail rides inside the marker as text, capped", () => {
+  const tail = renderRecentTail([
+    { role: "user", content: "way earlier — must not appear" },
+    { role: "assistant", content: "working on step 4" },
+    { role: "tool", tool_call_id: "t1", content: "z".repeat(5000) },
+    { role: "assistant", content: "step 4 done, starting step 5" },
+  ]);
+  assert.equal(tail.includes("way earlier"), false, "only the last three messages");
+  assert.match(tail, /working on step 4/);
+  assert.match(tail, /starting step 5/);
+  assert.match(tail, /\[\+\d+ more chars\]/, "huge tool result capped");
+
+  const marker = buildCompactionMarker("SUM", tail);
+  assert.match(marker.content, /last exchanges just before the compaction/);
+  assert.match(marker.content, /starting step 5/);
 });
 
 // ---- integration: the loop compacts at the threshold ------------------------
@@ -160,6 +179,10 @@ test("crossing the window threshold summarizes, marks, resets, and restarts the 
   const markers = history.filter((m) => m._compact);
   assert.equal(markers.length, 1);
   assert.match(markers[0].content, /SUMMARY: read data\.txt/);
+  // Continuity: the last exchanges (the Read call + its result) ride inside
+  // the marker as text — not as separate messages.
+  assert.match(markers[0].content, /last exchanges just before the compaction/);
+  assert.match(markers[0].content, /the payload/);
   const meta = await threadMgr.getThread(thread.id);
   assert.deepEqual(meta.knownFiles, []);
   assert.deepEqual(meta.fileStamps, {});
@@ -204,7 +227,10 @@ test("a resumed thread near the window compacts before its first LLM call (card 
   // First chat call is the summarizer, second is the (compacted) agent turn.
   assert.equal(calls[0].messages[0].content, COMPACTION_PROMPT);
   const agentCall = calls[1];
-  assert.equal(agentCall.messages.some((m) => /old answer/.test(m.content || "")), false);
+  // The old history is off the wire as MESSAGES (system + marker only); its
+  // last exchanges may legitimately appear as text inside the marker.
+  assert.equal(agentCall.messages.length, 2);
+  assert.equal(agentCall.messages.filter((m) => m.role === "assistant").length, 0);
   assert.match(agentCall.messages[1].content, /Context compacted/);
 });
 
