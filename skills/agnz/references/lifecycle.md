@@ -40,7 +40,7 @@ agnz wait researcher-1 --timeout 120
 → {"thread_id":"abc…","status":"idle","content":"…"}
 ```
 
-Default timeout is 300s. On timeout it prints `{..., timeout:true}` plus an `activity` field — the phase-labelled liveness triple `{phase, since, last_action}`. `phase: "generating"` with a growing `since` means the model is mid-generation (slow local inference is normal — a frozen `last_action` alone does NOT mean the run is dead); `phase: "tool"` means it is between tool work. Minutes of `generating` far past the thread's usual pace mean "look closer" (`agnz show` renders the hung verdict, `interrupt` if it ran amok). The underlying detached runner is untouched either way; call `wait` again, or just let the `UserPromptSubmit` hook deliver the result at your next prompt. Calling `wait` on a thread that's already left `running` (idle, awaiting_input, stopped, error) returns its outcome immediately — a **collect** call, useful right after you already know the run finished.
+Default timeout is 300s. On timeout it prints `{..., timeout:true}` and nothing more — slow local inference is normal, and a timeout is not evidence of a problem. The underlying detached runner is untouched either way; call `wait` again, or just let the `UserPromptSubmit` hook deliver the result at your next prompt. Calling `wait` on a thread that's already left `running` (idle, awaiting_input, stopped, error) returns its outcome immediately — a **collect** call, useful right after you already know the run finished.
 
 This is what replaces `--wait`: start several agents detached, do your own work, then collect each with `wait` — parallel instead of serial.
 
@@ -52,7 +52,7 @@ agnz wait auth
 agnz wait billing
 ```
 
-**Long runs: put `wait` in the background.** If your harness's Bash tool supports background execution (Claude Code: `run_in_background`), run `agnz wait <id> --timeout 600` as a background task and go on with other work — the harness notifies you the moment the wait exits, i.e. when the agent finishes, pauses, or the timeout fires. That turns "agent finished" into an event you're woken up for instead of a state you have to remember to poll, and it costs nothing while you're busy elsewhere. On a `timeout:true` notification, check `activity` (`phase`/`since`/`last_action`) and decide: re-arm another background `wait`, or intervene.
+**Long runs: put `wait` in the background.** If your harness's Bash tool supports background execution (Claude Code: `run_in_background`), run `agnz wait <id> --timeout 600` as a background task and go on with other work — the harness notifies you the moment the wait exits, i.e. when the agent finishes, pauses, or the timeout fires. That turns "agent finished" into an event you're woken up for instead of a state you have to remember to poll, and it costs nothing while you're busy elsewhere. On a `timeout:true` notification, decide: re-arm another background `wait`, or leave it to the message hook. If a thread is genuinely stuck, the workspace block tells you unprompted — you do not have to go looking.
 
 ### `approve`
 
@@ -110,21 +110,13 @@ All thread-addressing verbs (`send`, `wait`, `approve`, `answer`, `stop`, `remov
 ### `show` — the one inspection verb
 
 ```bash
-agnz show                 # no target: all threads — name, role, status, verdict, summary, activity
-agnz show abc1            # one thread: lean structural view — status, pending, spend, trace stats, filesTouched
+agnz show                 # no target: all threads — id, name, role, status, summary
+agnz show abc1            # one thread: status, pending, summary, error
 ```
 
-With a target, `show` returns structural state only: the agent def collapses to `role` (the def name — its body and tool lists never reach your context), `recent` carries the last agent-side turns (your own user-role directives are filtered out), and each excerpt is capped at ~500 chars with an elision marker reporting the original size — a routine status check can never forward a full tool result. It also folds in the thread's trace stats (turns/tokens/latency/tool outcomes) and `filesTouched` — the per-path list of the thread's successful Write/Edit calls, i.e. where to point `git diff` when you review the work.
+With a target, `show` returns only what the action verbs need: `status`, `pending` (so you can `answer` or `approve`), the thread's own `summary` — its final report line — and `error`. It carries **no** spend, trace stats, `filesTouched`, liveness or recent turns. That is deliberate (ADR 0019 amendment): every one of those invited you to watch a thread instead of running it, and watching is exactly what your context window is meant to be spared. The trace files still exist for external tooling.
 
-Without a target it lists the workspace (`--status <s>` filters) and opportunistically recovers threads whose runner died (a crash leaves no daemon to clean up) by marking them `error`. Each entry carries the judged `verdict` (ADR 0019): a healthy `working` thread stays quiet, while a `hung` LLM call or a `turn-limit` finish comes with `evidence` and the resolving command in `action`. Deeper analysis — per-model comparisons, cost breakdowns — is log territory (`<id>.trace.jsonl`), not a CLI concern.
-
-### `mailbox` — peek the message log
-
-```bash
-agnz mailbox --from dev --kind handoff --limit 10
-```
-
-Read-only view into `messages.jsonl` — for what the hook does NOT deliver: agent-to-agent traffic between your team members, or re-reading mail you already consumed. Never touches your delivery cursor. Text capped like every lean surface; `--to` matches array recipients.
+Without a target it lists the workspace (`--status <s>` filters) and opportunistically recovers threads whose runner died (a crash leaves no daemon to clean up) by marking them `error`. Each entry is id, name, role, status and summary — no verdicts, no trace read. A genuinely stuck thread reaches you through the workspace block instead, unprompted. Deeper analysis is log territory (`<id>.trace.jsonl`) and dashboard territory, not a CLI concern.
 
 ## How results arrive
 
@@ -146,8 +138,8 @@ For a status peek any time: `agnz show <id>`. To actually block for an outcome i
 
 The thread already carries its own context; reading its transcript costs *your* context, asking it a question costs *its* (local) tokens. Escalate in this order, cheapest first:
 
-1. **The workspace summary block** — the `UserPromptSubmit` hook injection (ADR 0007). Free, already in your context, and often enough to see status and rough spend across every open thread.
-2. **`agnz show <id>`** — the lean structural view above. One call, capped size, covers status/pending/spend/trace stats.
+1. **The workspace summary block** — the `UserPromptSubmit` hook injection (ADR 0007). Free, already in your context, and usually enough: it names every open thread, its status, and its own last report line.
+2. **`agnz show <id>`** — status, pending, summary. One call, for when you need the full text of a pending question.
 3. **Ask the thread directly** — `agnz send <name> "clarifying question"`. The thread has full context already; a targeted question is cheaper than pulling its history into yours.
 
 Reading `<id>.jsonl`/`<id>.trace.jsonl` directly with `Read` is not a rung on this ladder for routine use, and a `PreToolUse` hook blocks it outright — a single transcript line can carry up to 512 KiB of verbatim tool output, the exact context this plugin exists to keep out of yours. `Grep` against those files still works (matches only, so it's cheap), and `meta.json` is still directly readable for a fast peek at `pending`.
@@ -175,9 +167,9 @@ Both finish in roughly max(A, B) wall time, not A+B. Nothing stays resident betw
 
 Sub-agents address each other by the `name` they were started with, via their always-allowed `SendMessage` tool. Messages land in `<cwd>/.claude/agnz/messages.jsonl`.
 
-```
-SendMessage({ to: "writer", kind: "handoff", text: "Investigation complete. Key files: lib/auth.js", urgent: false })
-```
+A sub-agent sends one with its `SendMessage` tool, giving the recipient name, a `kind` from the table below, and the text.
+
+> Never write a tool call out as code in project docs or agent instructions: a local model reproduces the prose form verbatim instead of emitting a real call, and the run then ends mid-task. Name the tool and its parameters instead.
 
 | Kind | Purpose |
 |---|---|
