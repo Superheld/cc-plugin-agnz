@@ -112,3 +112,77 @@ Serialization follows the consumer: **CLI verbs answer JSON** with exactly these
 - `done-unread` vs. the existing mail delivery: the block already injects unread parent mail; is a separate state line redundant? Lean: yes, redundant — mail injection *is* the rendering; the state exists only in the struct.
 - Should `slow` render at all, or only `hung`? Every rendered warning costs attention; `slow` may be noise at 2 tok/s. Lean: render `slow` only when the thread ALSO shows no tool progress (compound signal).
 - Median needs ≥ N samples; cold threads (first call) have none. Fallback: workspace-wide median per model, else absolute floor (e.g. 15 min) only.
+
+---
+
+## Amendment 2026-07-25 — the dashboard is cut back to a work surface
+
+**Status of the original decision: partially reversed.** Phase 1 shipped, was
+dogfooded on the dashboard project, and the field verdict is that it solved the
+wrong problem well.
+
+### What the field showed
+
+Analysing 22 threads and 35 messages of real traffic:
+
+- The lead sent **one message per thread** (24 sends / 22 threads). It was not
+  over-instructing.
+- What it *did* do was read. Every surface built here — the spend line, the
+  liveness triple, the verdict/evidence/action triple, `show`'s trace fold,
+  `filesTouched`, `recent`, the `mailbox` verb — gave it something to look at,
+  on every prompt, whether or not anything was wrong.
+- **0 of 35 messages were agent-to-agent**, so the catch-up surface those verbs
+  existed for had never once been needed.
+
+The failure mode this ADR set out to fix (a lead deriving liveness by hand
+across prompts) was real. The cure turned the lead into an analyst: it now had
+a dashboard, and a dashboard is read continuously by anyone holding it.
+
+### The rule that replaces it
+
+The lead's job is **assign, answer, stop, remove**, plus knowing who is running.
+A surface earns its place only by serving one of those. Nothing analytical:
+no spend, no tracing, no logging, no search.
+
+The distinction that keeps this coherent is **push versus pull**, not
+"telemetry versus no telemetry":
+
+- Telemetry stays as *input*. `lib/status.mjs` still folds traces, the hung
+  judgment still calibrates against a thread's own median, `trace.jsonl` is
+  still written in full.
+- Telemetry stops being *output*. The lead sees a conclusion only when the
+  conclusion is an exception, and only unbidden.
+
+The hung alert therefore survives in the hook block — it is an exception
+arriving on its own, which is the only shape of information that surface should
+carry. Everything else in the per-thread line is gone.
+
+### What was removed
+
+| Surface | Fate |
+|---|---|
+| Hook line: `· N turns · ctx ~Xk` | removed |
+| Hook line: `· last: <tool> <target>` / `· generating Ns` | removed |
+| Hook line: hung alert | **kept** — the one exception |
+| `show <id>`: `stats`, `card`, `filesTouched`, `recent`, `activity`, verdict triple | removed |
+| `show <id>`: `status`, `pending`, `summary`, `error`, `pendingRun` | kept — the action verbs need them |
+| `show` (list): verdict/evidence/action, activity | removed; no trace read at all now |
+| `wait`: the `activity` triple on timeout | removed |
+| `mailbox` verb | removed entirely |
+
+`lib/status.mjs` and `lib/trace-stats.mjs` remain as libraries. The analysis
+they support belongs on a surface opened deliberately — Bruce's dashboard
+project already reads `messages.jsonl` and the trace files directly, and costs
+the parent's context nothing.
+
+### Consequence for ADR 0018 (teams)
+
+The mailbox verb existed largely to let the lead catch up on agent-to-agent
+traffic. With A2A unused in practice and teams out of focus, that need
+disappears rather than being solved. Agent-to-agent messaging is not removed
+from the plumbing (event bus, `messages.jsonl`, the inbox drain all stay), but
+it gains no lead-facing surface, and ADR 0018 should not be built on the
+assumption that one exists.
+
+`tests/lead-surface.test.mjs` pins every removal as an absence, so re-adding
+any of them has to argue with a red test first.
