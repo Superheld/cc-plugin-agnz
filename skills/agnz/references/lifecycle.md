@@ -167,9 +167,17 @@ Both finish in roughly max(A, B) wall time, not A+B. Nothing stays resident betw
 
 Sub-agents address each other by the `name` they were started with, via their always-allowed `SendMessage` tool. Messages land in `<cwd>/.claude/agnz/messages.jsonl`.
 
-A sub-agent sends one with its `SendMessage` tool, giving the recipient name, a `kind` from the table below, and the text.
+```
+SendMessage({ to: "writer", kind: "handoff", text: "Investigation complete. Key files: lib/auth.js", urgent: false })
+```
 
-> Never write a tool call out as code in project docs or agent instructions: a local model reproduces the prose form verbatim instead of emitting a real call, and the run then ends mid-task. Name the tool and its parameters instead.
+> **When you write project docs, do not do this.** This skill carries
+> `audience: lead`, so no sub-agent can load it and the shape above is safe to
+> show you here. A written-out call in a place a sub-agent DOES read — a
+> project `CLAUDE.md`, an agent def, a task you `send` — gets reproduced as
+> prose instead of emitted as a real call, and the run ends mid-task reporting
+> the call text as its answer. Three runs died that way. Name the tool and its
+> parameters instead.
 
 | Kind | Purpose |
 |---|---|

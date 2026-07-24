@@ -3,6 +3,7 @@ name: agnz
 version: 0.5.0
 user-invocable: false
 description: "This skill should be used when the user asks to 'use agnz', 'delegate this to an agent', 'run this on the local model', 'spawn an agent', 'resume a thread', 'continue with the agent', 'create an agent definition', 'write an agent file', 'define a role for the sub-agent', mentions delegating to LM Studio or Ollama, when agents should communicate or hand off work to each other, or when a task involves reading many files, bulk grep sweeps, or mechanical edits across multiple files where a local model can do the work. Also load when an agnz thread is paused and needs resolution via `agnz approve` or `agnz answer`, or when the user asks about running two agents in parallel."
+audience: lead
 ---
 
 # agnz agents

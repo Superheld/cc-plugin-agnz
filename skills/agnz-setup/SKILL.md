@@ -4,6 +4,7 @@ description: Configure and inspect the agnz plugin — profiles, model→profile
 argument-hint: "list | add <name> | set <name> <field> <value> | remove <name> | use <name> | test [name] | mapping list|set|remove | info — write commands take --project"
 allowed-tools: Bash(agnz:*), AskUserQuestion
 model: haiku
+audience: lead
 ---
 
 Configuration and status for the **agnz** plugin. Three things live here:
