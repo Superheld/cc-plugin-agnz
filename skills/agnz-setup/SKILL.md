@@ -2,7 +2,7 @@
 name: agnz-setup
 description: Configure and inspect the agnz plugin — profiles, model→profile mappings, and current status. This skill should be used when the user asks to "add a profile", "set up agnz", "configure lmstudio", "show agnz status", "what profiles exist", "map sonnet to a local model", or anything about agnz configuration and setup.
 argument-hint: "list | add <name> | set <name> <field> <value> | remove <name> | use <name> | test [name] | mapping list|set|remove | info — write commands take --project"
-allowed-tools: Bash(node:*), AskUserQuestion
+allowed-tools: Bash(agnz:*), AskUserQuestion
 model: haiku
 ---
 
@@ -88,10 +88,10 @@ The user invoked `/agnz:setup $ARGUMENTS`.
 
 1. Parse `$ARGUMENTS` into a sub-command and positional args.
 2. If no sub-command is given, default to `list`.
-3. For `add`: collect missing fields via `AskUserQuestion` — **profile name**, **baseUrl**, **model**, optionally **apiKey**. Optional fields beyond those (e.g. `llmTimeoutMs`, `contextWindow`) are applied afterwards with `setup set <name> <field> <value>` — `add` itself does not take them.
-4. For `info`: run `node ${CLAUDE_PLUGIN_ROOT}/skills/agnz-setup/scripts/companion.mjs info`
-5. For all other sub-commands: run `node ${CLAUDE_PLUGIN_ROOT}/skills/agnz-setup/scripts/companion.mjs setup <subcommand> [args...]` — for `add`, the positional shape is `setup add <name> <baseUrl> <model> [apiKey] [--project]`
-6. Print the companion's output verbatim.
+3. For `add`: collect missing fields via `AskUserQuestion` — **profile name**, **baseUrl**, **model**, optionally **apiKey**. Optional fields beyond those (e.g. `llmTimeoutMs`, `contextWindow`) are applied afterwards with `agnz config set <name> <field> <value>` — `add` itself does not take them.
+4. For `info`: run `agnz info`
+5. For all other sub-commands: run `agnz config <subcommand> [args...]` (the `agnz` CLI is on your PATH while the plugin is enabled) — for `add`, the positional shape is `agnz config add <name> <baseUrl> <model> [apiKey] [--project]`
+6. Print the CLI's JSON output verbatim.
 
 Do **not** run in the background — finishes in milliseconds.
 

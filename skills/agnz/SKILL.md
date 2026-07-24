@@ -40,10 +40,11 @@ Avoid delegation for work needing deep reasoning — local models are limited.
 | `interrupt <id\|name> ["directive"]` | Hard interrupt a runaway/working agent: aborts the current step, leaves it resumable, optionally queues a directive. |
 | `stop <id\|name>` | End and archive a thread (kills its runner; transcript persists on disk). |
 | `remove <id\|name>` / `remove --status stopped\|error` | Delete a thread permanently — meta, transcript, trace, index entry. Live threads must be stopped first. |
-| `show [<id\|name>] [--status <s>]` | The one inspection verb. No target: list all threads in this workspace. With a target: lean structural view — status, pending, spend, trace stats, no raw transcript. |
-| `wait <id\|name> [--timeout <s>]` | Poll a detached run until it leaves `running`; prints the outcome (default timeout 300s). |
+| `show [<id\|name>] [--status <s>]` | The one inspection verb. No target: list all threads with judged `verdict`s. With a target: lean structural view — status, pending, spend, trace stats, `filesTouched`, no raw transcript. |
+| `wait <id\|name> [--timeout <s>]` | Poll a detached run until it leaves `running`; prints the outcome (default timeout 300s; on timeout the phase-labelled `activity` triple tells generating from hung). |
+| `mailbox [--from x] [--to x] [--kind k] [--limit n]` | Read-only peek into the message log — agent-to-agent traffic, consumed mail. Never advances your cursor. |
 
-Runs are always detached — there is no `--wait` flag any more. To collect a result in the same call, poll with `agnz wait`; for long runs, launch it as a **background** Bash task (Claude Code: `run_in_background`) so the harness wakes you when the agent finishes. Timeout semantics, the `lastActivity` liveness signal, and collect mode are covered in `references/lifecycle.md`.
+Runs are always detached — there is no `--wait` flag any more. To collect a result in the same call, poll with `agnz wait`; for long runs, launch it as a **background** Bash task (Claude Code: `run_in_background`) so the harness wakes you when the agent finishes. Timeout semantics, the phase-labelled `activity` liveness signal, and collect mode are covered in `references/lifecycle.md`.
 
 ## Resume, don't recreate
 

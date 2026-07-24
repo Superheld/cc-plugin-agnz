@@ -183,12 +183,25 @@ export function writeWsFingerprint(ws, fingerprint) {
 }
 
 /**
- * The fingerprint of a thread set: sorted "id:status" pairs joined by ",".
+ * The fingerprint of a thread set: sorted "id:status" pairs joined by ",",
+ * with ":hung" appended while a running thread's LLM call is judged hung.
  * Order-independent (sorted) so the same set in a different array order yields
  * the same string — the hook keys "did the visible state change" off this.
+ *
+ * The hung marker matters because hung is a VERDICT, not a status: a thread
+ * tipping from healthy-running to hung changes nothing in `id:status` and
+ * writes no mail, so without it the alert line would only ever ride along on
+ * unrelated deltas (Bruce's catch, 2026-07-24). With it, the tip itself is
+ * the delta: one push when it hangs, one when it recovers, silence between.
  */
 export function computeThreadFingerprint(threads) {
-  return threads.map((t) => `${t.id}:${t.status}`).sort().join(",");
+  return threads
+    .map((t) => {
+      const hung = t.status === "running" && t.runState && isHungRunState(t.runState);
+      return `${t.id}:${t.status}${hung ? ":hung" : ""}`;
+    })
+    .sort()
+    .join(",");
 }
 
 /**
@@ -528,14 +541,34 @@ export function readThreadSpend(wsDir, threadId) {
  * no tool_call in the tail window → null.
  */
 export function readLastActivity(wsDir, threadId) {
+  return readRunState(wsDir, threadId).lastAction;
+}
+
+// Hung detection (ADR 0019 §2, mirrors lib/status.mjs which the hooks must
+// not import): an in-flight LLM call is judged hung at 10× the thread's
+// median call latency, floored at 10 minutes (cold threads: floor only).
+// Field incidents: 43 min at ~2.4 min median, 22 min similar — both far past.
+const HUNG_FLOOR_MS = 10 * 60 * 1000;
+const HUNG_MEDIAN_FACTOR = 10;
+
+/**
+ * One tail read (last 8 KiB of the trace), three signals:
+ *   lastAction    — the last completed tool call {name, target, ts, outcome}
+ *   llmInFlightMs — a trailing turn_start/thread_start without a following
+ *                   llm_call IS an in-flight LLM call, in flight since its ts
+ *   medianLlmMs   — median of the completed llm_call latencies in the tail
+ * All fields null when unavailable. `now` injectable for tests.
+ */
+export function readRunState(wsDir, threadId, now = Date.now()) {
+  const none = { lastAction: null, llmInFlightMs: null, medianLlmMs: null };
   const path = join(wsDir, "threads", `${threadId}.trace.jsonl`);
   let size;
   try {
     size = statSync(path).size;
   } catch {
-    return null;
+    return none;
   }
-  if (size === 0) return null;
+  if (size === 0) return none;
   const TAIL_BYTES = 8192;
   const start = Math.max(0, size - TAIL_BYTES);
   let raw;
@@ -550,26 +583,47 @@ export function readLastActivity(wsDir, threadId) {
     }
     raw = buf.toString("utf8");
   } catch {
-    return null;
+    return none;
   }
-  const lines = raw.split("\n").filter(Boolean);
-  for (let i = lines.length - 1; i >= 0; i--) {
+  let lastAction = null;
+  let pendingStartTs = null;
+  const latencies = [];
+  for (const line of raw.split("\n")) {
+    if (!line) continue;
     let e;
     try {
-      e = JSON.parse(lines[i]);
+      e = JSON.parse(line);
     } catch {
-      continue; // partial or garbled line — keep scanning backwards
+      continue; // partial or garbled line (tail may cut mid-line)
     }
-    if (e && e.type === "tool_call" && typeof e.name === "string") {
-      return {
+    if (!e || typeof e.type !== "string") continue;
+    if (e.type === "tool_call" && typeof e.name === "string") {
+      lastAction = {
         name: e.name,
         target: typeof e.target === "string" ? e.target : null,
         ts: typeof e.ts === "number" ? e.ts : null,
         outcome: typeof e.outcome === "string" ? e.outcome : null,
       };
+    } else if (e.type === "turn_start" || e.type === "thread_start") {
+      pendingStartTs = typeof e.ts === "number" ? e.ts : null;
+    } else if (e.type === "llm_call") {
+      pendingStartTs = null;
+      if (typeof e.latencyMs === "number") latencies.push(e.latencyMs);
     }
   }
-  return null;
+  latencies.sort((a, b) => a - b);
+  return {
+    lastAction,
+    llmInFlightMs: pendingStartTs != null ? Math.max(0, now - pendingStartTs) : null,
+    medianLlmMs: latencies.length ? latencies[Math.floor((latencies.length - 1) / 2)] : null,
+  };
+}
+
+/** Is this run state a hung LLM call? Pure, so the threshold is testable. */
+export function isHungRunState({ llmInFlightMs, medianLlmMs }) {
+  if (llmInFlightMs == null) return false;
+  const hungAt = Math.max(HUNG_FLOOR_MS, medianLlmMs != null ? HUNG_MEDIAN_FACTOR * medianLlmMs : 0);
+  return llmInFlightMs >= hungAt;
 }
 
 /**
@@ -616,7 +670,10 @@ export function readThreadMetas(wsDir, { withSpend = true } = {}) {
         // Liveness signal, only for threads that are actually running — for
         // everything else the card/summary already says what happened, and
         // skipping the read keeps the common (all-idle) case at zero extra IO.
-        const lastActivity = meta.status === "running" ? readLastActivity(wsDir, meta.id) : null;
+        // One tail read yields both the last action and the in-flight state
+        // for the hung verdict (ADR 0019).
+        const runState = meta.status === "running" ? readRunState(wsDir, meta.id) : null;
+        const lastActivity = runState ? runState.lastAction : null;
         return [{
           id: meta.id,
           name: meta.name || null,
@@ -636,6 +693,7 @@ export function readThreadMetas(wsDir, { withSpend = true } = {}) {
           task,
           spend,
           lastActivity,
+          runState,
         }];
       } catch { return []; }
     });
@@ -769,23 +827,46 @@ export function formatThreadsDetailed(threads, now = Date.now()) {
     } else if (s.turns) {
       spend = ` · ${s.turns} turns`;
     }
-    // Liveness for running threads: the last tool call from the trace tail.
-    // "last: Write lib/foo.mjs (12s ago)" answers "is it still working?"
-    // without anyone opening a transcript.
+    // Liveness for running threads: the last tool call from the trace tail,
+    // plus the phase label. "last:" alone freezes during a long LLM
+    // generation — a 2-minute CPU generation and a hung runner looked
+    // identical (field lesson, cost a night of PID-watching). "· generating
+    // 84s" disambiguates; past the hung threshold the alert line below takes
+    // over instead.
     let activity = "";
-    if (t.status === "running" && t.lastActivity && t.lastActivity.name) {
-      const a = t.lastActivity;
-      const what = a.target ? `${a.name} ${String(a.target).slice(0, 60)}` : a.name;
-      const ago = a.ts != null ? ` (${formatAgoFine(now - a.ts)} ago)` : "";
-      activity = ` · last: ${what}${ago}`;
+    if (t.status === "running") {
+      if (t.lastActivity && t.lastActivity.name) {
+        const a = t.lastActivity;
+        const what = a.target ? `${a.name} ${String(a.target).slice(0, 60)}` : a.name;
+        const ago = a.ts != null ? ` (${formatAgoFine(now - a.ts)} ago)` : "";
+        activity = ` · last: ${what}${ago}`;
+      }
+      const inFlight = t.runState ? t.runState.llmInFlightMs : null;
+      if (inFlight != null && !isHungRunState(t.runState)) {
+        activity += ` · generating ${formatAgoFine(inFlight)}`;
+      }
     }
     // Second line: the rolling summary (→ description → role, fallback-chained
     // in readThreadMetas). This is what lets the parent see what a thread did
     // without opening its transcript — even weeks later. Collapse whitespace so
     // a multi-line final answer can't break the block; cap the length.
     const summary = t.summary ? String(t.summary).replace(/\s+/g, " ").trim() : "";
-    const sumLine = summary ? `\n      ${summary.slice(0, 100)}` : "";
-    return `  ${label} — ${t.status}${ageTag}${spend}${activity}${sumLine}`;
+    // A turn-limit death must not read like a clean finish: the agent flailed
+    // out mid-task and the work needs a decision, so it gets the ⚠ a clean
+    // summary never carries.
+    const warn = t.status === "idle" && summary.startsWith("reached turn limit") ? "⚠ " : "";
+    const sumLine = summary ? `\n      ${warn}${summary.slice(0, 100)}` : "";
+    // Hung verdict (ADR 0019): the judged line the lead used to derive by
+    // hand from lastActivity timestamps across prompts. Evidence + the
+    // resolving verb, stable phrasing.
+    let alert = "";
+    if (t.status === "running" && t.runState && isHungRunState(t.runState)) {
+      const { llmInFlightMs, medianLlmMs } = t.runState;
+      const median = medianLlmMs != null ? `median ${formatAgoFine(medianLlmMs)}` : "no median yet";
+      const addr = t.name || sid;
+      alert = `\n      ⚠ hung: LLM call running ${formatAgoFine(llmInFlightMs)} (${median}) → agnz interrupt ${addr}`;
+    }
+    return `  ${label} — ${t.status}${ageTag}${spend}${activity}${alert}${sumLine}`;
   });
 
   // Collapsed stale-idle bucket: names only (up to 6, then "+N more"), pointing

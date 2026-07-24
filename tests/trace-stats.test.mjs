@@ -15,6 +15,7 @@ import {
   aggregateTrace,
   aggregateThread,
   aggregateWorkspace,
+  filesTouched,
   formatThread,
   formatWorkspace,
 } from "../lib/trace-stats.mjs";
@@ -91,6 +92,25 @@ test("tool outcomes are counted by category", () => {
   assert.equal(s.toolCalls.error, 1);
   assert.equal(s.toolCalls.denied, 1);
   assert.equal(s.toolCalls.byName.Bash, 2);
+});
+
+test("filesTouched folds successful mutations into a per-path diff pointer", () => {
+  const entries = [
+    { type: "tool_call", name: "Read", target: "lib/a.mjs", outcome: "ok" },
+    { type: "tool_call", name: "Write", target: "lib/a.mjs", outcome: "ok" },
+    { type: "tool_call", name: "Edit", target: "lib/a.mjs", outcome: "ok" },
+    { type: "tool_call", name: "Edit", target: "lib/a.mjs", outcome: "ok" },
+    { type: "tool_call", name: "Edit", target: "lib/b.mjs", outcome: "ok" },
+    // Failed/blocked mutations touched nothing.
+    { type: "tool_call", name: "Write", target: "lib/c.mjs", outcome: "blocked" },
+    { type: "tool_call", name: "Edit", target: "lib/d.mjs", outcome: "error" },
+    // Target-less events pass through silently.
+    { type: "tool_call", name: "Bash", outcome: "ok" },
+    { type: "llm_call", latencyMs: 5 },
+  ];
+  assert.deepEqual(filesTouched(entries), ["lib/a.mjs (1 write, 2 edits)", "lib/b.mjs (1 edit)"]);
+  assert.deepEqual(filesTouched([]), []);
+  assert.deepEqual(filesTouched(null), []);
 });
 
 test("aggregateThread + aggregateWorkspace read real trace files", async () => {

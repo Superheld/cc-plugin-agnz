@@ -24,7 +24,6 @@ import {
   buildShowView,
   decideWaitOutcome,
   resolveTarget,
-  lastToolActivity,
   decideCollect,
   PENDING_RUN_GRACE_MS,
 } from "../bin/agnz.mjs";
@@ -57,13 +56,10 @@ test("buildShowView strips the heavy embedded fields", () => {
   assert.doesNotMatch(json, /x{100}/, "systemPromptSnapshot must be absent");
   assert.doesNotMatch(json, /y{100}/, "agentDef.body must be absent");
   assert.doesNotMatch(json, /z{100}/, "agentDef.prompt must be absent");
-  // agentDef reduced to its policy-relevant identity, description first line only
-  assert.deepEqual(view.thread.agentDef, {
-    name: "dev",
-    description: "Implements features",
-    tools: ["Read", "Grep", "Edit"],
-    disallowedTools: ["Bash"],
-  });
+  // The whole agentDef collapses to the glossary `role` — tool lists and
+  // description were field-tested as per-inspection noise.
+  assert.ok(!("agentDef" in view.thread));
+  assert.equal(view.thread.role, "dev");
 });
 
 test("buildShowView caps each recent message's content with a size-reporting marker", () => {
@@ -72,7 +68,7 @@ test("buildShowView caps each recent message's content with a size-reporting mar
   const view = buildShowView(
     thread,
     [
-      { role: "user", content: "small" },
+      { role: "assistant", content: "small" },
       { role: "tool", tool_call_id: "c1", content: big },
     ],
     null,
@@ -87,11 +83,23 @@ test("buildShowView caps each recent message's content with a size-reporting mar
   assert.equal(capped.tool_call_id, "c1");
 });
 
-test("buildShowView keeps only the last 6 messages", () => {
-  const msgs = Array.from({ length: 10 }, (_, i) => ({ role: "user", content: `m${i}` }));
+test("buildShowView keeps only the last 6 agent-side messages", () => {
+  const msgs = Array.from({ length: 10 }, (_, i) => ({ role: "assistant", content: `m${i}` }));
   const view = buildShowView({ id: "t1", status: "idle" }, msgs, null);
   assert.equal(view.recent.length, 6);
   assert.equal(view.recent[0].content, "m4");
+});
+
+test("buildShowView filters user-role messages out of recent — the lead's own directive must not echo back", () => {
+  const directive = "D".repeat(3600); // the observed 3.6 KB task echo
+  const view = buildShowView({ id: "t1", status: "idle" }, [
+    { role: "user", content: directive },
+    { role: "assistant", content: "on it" },
+    { role: "user", content: "injected mailbox mail" },
+    { role: "tool", tool_call_id: "c1", content: "result" },
+  ], null);
+  assert.deepEqual(view.recent.map((m) => m.role), ["assistant", "tool"]);
+  assert.doesNotMatch(JSON.stringify(view), /D{100}/, "the directive must be absent entirely");
 });
 
 test("buildShowView passes through an assistant message with null content (tool_calls only)", () => {
@@ -121,37 +129,6 @@ test("buildShowView attaches stats only when provided", () => {
 });
 
 // ── decideWaitOutcome (pure) ─────────────────────────────────────────────────
-
-test("lastToolActivity picks the most recent tool_call and computes agoMs", () => {
-  const now = 1_000_000;
-  const a = lastToolActivity(
-    [
-      { ts: 1000, type: "thread_start" },
-      { ts: 2000, type: "tool_call", name: "Read", target: "a.mjs", outcome: "ok" },
-      { ts: 3000, type: "llm_call", usage: { total: 10 } },
-      { ts: 4000, type: "tool_call", name: "Write", target: "b.mjs", outcome: "ok" },
-    ],
-    now,
-  );
-  assert.deepEqual(a, { name: "Write", target: "b.mjs", outcome: "ok", ts: 4000, agoMs: 996_000 });
-});
-
-test("lastToolActivity is null on an empty or tool-less trace", () => {
-  assert.equal(lastToolActivity([]), null);
-  assert.equal(lastToolActivity(null), null);
-  assert.equal(
-    lastToolActivity([
-      { ts: 1, type: "thread_start" },
-      { ts: 2, type: "llm_call", usage: { total: 10 } },
-    ]),
-    null,
-  );
-});
-
-test("lastToolActivity tolerates a target-less tool_call (field simply absent)", () => {
-  const a = lastToolActivity([{ ts: 5, type: "tool_call", name: "SendMessage", outcome: "ok" }], 10);
-  assert.deepEqual(a, { name: "SendMessage", outcome: "ok", ts: 5, agoMs: 5 });
-});
 
 test("decideCollect: running blocks, no marker collects", () => {
   assert.deepEqual(decideCollect({ status: "running" }), { collect: false });
@@ -358,12 +335,8 @@ test("show returns a lean view: heavy fields stripped, recent capped, card kept"
   assert.doesNotMatch(raw, /HEAVY BODY/, "agentDef body must not be in show output");
   const view = JSON.parse(raw);
   assert.equal(view.thread.status, "idle");
-  assert.deepEqual(view.thread.agentDef, {
-    name: "dev",
-    description: "Implements features",
-    tools: ["Read", "Grep", "Edit"],
-    disallowedTools: null,
-  });
+  assert.equal(view.thread.role, "dev");
+  assert.ok(!("agentDef" in view.thread), "the agentDef object collapses to role");
   assert.equal(view.thread.card.task, "do the task");
   // the 40 KB tool result is capped with the elision marker
   const tool = view.recent.find((m) => m.role === "tool");
@@ -384,6 +357,26 @@ test("wait resolves by agent name, not just id", async () => {
   const outcome = runCli(["wait", "dev"]);
   assert.equal(outcome.status, "idle");
   assert.equal(outcome.content, "final answer from the agent");
+});
+
+test("mailbox peeks the message log with filters and capped text, as an interface — not raw file parsing", async () => {
+  const { appendMessage } = await import("../lib/messages-log.mjs");
+  // Agent-to-agent traffic is exactly what the hook never delivers.
+  await appendMessage(cwd, { from: "dev", to: "reviewer", kind: "handoff", text: "T".repeat(2000) });
+  await appendMessage(cwd, { from: "reviewer", to: ["parent", "dev"], kind: "say", text: "done" });
+  const all = runCli(["mailbox"]);
+  assert.equal(all.total, 2);
+  assert.equal(all.shown, 2);
+  assert.deepEqual(all.messages.map((m) => m.kind), ["handoff", "say"]);
+  assert.match(all.messages[0].text, /…\[elided/, "long text is capped like every lean surface");
+  // --from / --to filters (to matches inside an array recipient too)
+  assert.equal(runCli(["mailbox", "--from", "dev"]).total, 1);
+  assert.equal(runCli(["mailbox", "--to", "dev"]).messages[0].kind, "say");
+  // --limit trims but total stays honest
+  const limited = runCli(["mailbox", "--limit", "1"]);
+  assert.equal(limited.total, 2);
+  assert.equal(limited.shown, 1);
+  assert.equal(limited.messages[0].kind, "say", "limit keeps the newest");
 });
 
 // ── resolveTarget wait-inclusive resolution (finding D) ──────────────────────

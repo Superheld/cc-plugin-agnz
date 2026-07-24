@@ -11,6 +11,9 @@
 //   agnz stop   <id|name>             (archive: hide from list, keep transcript)
 //   agnz remove <id|name> | --status stopped|error   (delete files permanently)
 //   agnz show   [<id|name>]           (no target: list all threads; --status <s> filters)
+//   agnz mailbox [--from x] [--to x] [--kind k] [--limit n]   (peek the message log)
+//   agnz config <sub> [...]           (profiles + mappings: list|add|set|remove|use|test|mapping; --project)
+//   agnz info                         (version, config layout, effective profiles/mappings)
 //
 // Every verb prints a JSON object (or array) to stdout so the parent can
 // parse the outcome from a Bash call. Errors print {"error": "..."} and exit 1.
@@ -39,8 +42,13 @@ import {
 } from "../lib/agent-defs.mjs";
 import { createSandbox } from "../lib/sandbox.mjs";
 import { publish } from "../lib/event-bus.mjs";
-import { readTrace, aggregateTrace } from "../lib/trace-stats.mjs";
+import { readTrace, aggregateTrace, filesTouched } from "../lib/trace-stats.mjs";
 import { PLUGIN_ROOT } from "../lib/orchestrate.mjs";
+import { loadConfig, updateConfigLayer, normaliseProfile } from "../lib/config.mjs";
+import { judgeThread, deriveActivity } from "../lib/status.mjs";
+import { readAllMessages } from "../lib/messages-log.mjs";
+import { resolveUserDir, resolveProjectDir } from "../lib/data-dir.mjs";
+import { listModels } from "../lib/llm/openai-compatible.mjs";
 
 const RUNNER = resolve(PLUGIN_ROOT, "lib", "runner.mjs");
 
@@ -56,7 +64,7 @@ function fail(message) {
 // ---- minimal arg parser ----
 // Value-flags always consume the next token (even one starting with "--",
 // e.g. an --inline "---\n..." frontmatter block). Boolean flags never do.
-const BOOLEAN_FLAGS = new Set(["wait", "persist", "all", "new"]);
+const BOOLEAN_FLAGS = new Set(["wait", "persist", "all", "new", "project"]);
 function parseArgs(argv) {
   const positionals = [];
   const flags = {};
@@ -176,6 +184,16 @@ async function recoverIfStale(tm, thread) {
         pending: null,
       })
       .catch(() => {});
+    // ADR 0019 §7: harness incidents go through the one channel. A dead
+    // runner was previously flipped to error in silence — visible only if
+    // the lead happened to run `show`.
+    publish(thread.cwd, {
+      from: "agnz",
+      to: "parent",
+      kind: "error",
+      urgent: false,
+      text: `[${thread.id}] runner process died (pid ${thread.runnerPid ?? "?"}) — thread '${thread.name || thread.id.slice(0, 8)}' marked error; its work up to the crash is persisted`,
+    }).catch(() => {});
     return { ...thread, status: "error" };
   }
   return thread;
@@ -210,27 +228,10 @@ export function decideWaitOutcome(thread, messages) {
 }
 
 // ---- last activity: liveness signal for running threads ----
-// The most recent tool_call in a trace fold: { name, target?, ts?, agoMs?,
-// outcome? }. Pure over the entries array so it is unit-testable; the callers
-// (wait's timeout branch, show, list) do the trace IO. Null when the thread
-// has no tool_call yet.
-export function lastToolActivity(entries, now = Date.now()) {
-  if (!Array.isArray(entries)) return null;
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const e = entries[i];
-    if (e && e.type === "tool_call" && typeof e.name === "string") {
-      const activity = { name: e.name };
-      if (typeof e.target === "string") activity.target = e.target;
-      if (typeof e.outcome === "string") activity.outcome = e.outcome;
-      if (typeof e.ts === "number") {
-        activity.ts = e.ts;
-        activity.agoMs = Math.max(0, now - e.ts);
-      }
-      return activity;
-    }
-  }
-  return null;
-}
+// deriveActivity (lib/status.mjs) folds the trace tail into the phase-labelled
+// liveness triple {phase, since, last_action}. The old tool-call-only fold
+// froze during long LLM generations — "generating" and "hung" were
+// indistinguishable, which cost real field debugging time.
 
 // ---- show: a token-lean structural view (ADR 0015 §2) ----
 // A status check must never forward a full tool result into the lead's
@@ -289,19 +290,6 @@ function capPending(pending) {
   return out;
 }
 
-// Reduce an agentDef to its policy-relevant identity — name, the first line of
-// its description, and its tool allow/deny lists. The heavy body (system-prompt
-// text) is dropped: the lead asks "show" for state, not for the prompt.
-function reduceAgentDef(agentDef) {
-  if (!agentDef) return null;
-  return {
-    name: agentDef.name || null,
-    description: agentDef.description ? String(agentDef.description).split("\n")[0] : null,
-    tools: agentDef.tools || null,
-    disallowedTools: agentDef.disallowedTools || null,
-  };
-}
-
 // Compact the trace fold to the fields a lead reads at a glance. Drops the
 // per-event detail; keeps turns, tokens, latency, tool outcomes, repair rate.
 function compactStats(s) {
@@ -325,8 +313,10 @@ export function buildShowView(thread, messages, stats) {
     thread: {
       thread_id: thread.id,
       name: thread.name,
-      agent: thread.agentDef?.name,
-      agentDef: reduceAgentDef(thread.agentDef),
+      // Glossary `role` (ADR 0019 §6): the def name, nothing more. The full
+      // agentDef (tool lists, description) was field-tested as pure noise —
+      // the lead knows what "dev" is; policy detail lives in the def file.
+      role: thread.agentDef?.name ?? null,
       status: thread.status,
       summary: thread.summary || null,
       description: thread.description,
@@ -334,7 +324,13 @@ export function buildShowView(thread, messages, stats) {
       pending: capPending(thread.pending),
       error: thread.error,
     },
-    recent: (messages || []).slice(-6).map(capMessageContent),
+    // Agent turns only: the lead's own directives (user role — typed prompts
+    // and synthetic mail injections) were observed echoing back kilobytes of
+    // the lead's own words. It wants the agent's moves, not a mirror.
+    recent: (messages || [])
+      .filter((m) => !m || typeof m !== "object" || m.role !== "user")
+      .slice(-6)
+      .map(capMessageContent),
   };
   if (thread.card) view.thread.card = thread.card;
   // A pendingRun marker means a spawned runner has not claimed yet — the
@@ -402,11 +398,11 @@ async function main() {
       createSandbox({ root: thread.cwd, policy: buildToolPolicy(agentDef, registry.list().map((t) => t.name)) });
 
       if (message == null) {
-        out({ thread_id: thread.id, name, agent: agentDef.name, status: "idle" });
+        out({ thread_id: thread.id, name, role: agentDef.name, status: "idle" });
         return;
       }
       await spawnRun(tm, { threadId: thread.id, cwd: thread.cwd, userMessage: message });
-      out({ thread_id: thread.id, name, agent: agentDef.name, status: "started" });
+      out({ thread_id: thread.id, name, role: agentDef.name, status: "started" });
       return;
     }
 
@@ -501,15 +497,16 @@ async function main() {
           return;
         }
         if (Date.now() >= deadline) {
-          // Attach the last tool activity so the waiter can judge liveness at
-          // once: a seconds-old Write means "keep waiting", a minutes-old one
-          // means "look closer" — no transcript read either way.
-          const activity = lastToolActivity(await readTrace(thread.cwd, thread.id));
+          // Attach phase-labelled liveness so the waiter can judge at once:
+          // "generating 84s" means keep waiting, a minutes-old last_action
+          // with no phase progress means look closer — no transcript read
+          // either way.
+          const activity = deriveActivity(await readTrace(thread.cwd, thread.id));
           out({
             thread_id: thread.id,
             status: thread.status,
             timeout: true,
-            ...(activity ? { lastActivity: activity } : {}),
+            ...(activity ? { activity } : {}),
             note:
               thread.status === "running"
                 ? "still running — wait again or rely on the message hook"
@@ -621,25 +618,31 @@ async function main() {
         if (typeof flags.status === "string") threads = threads.filter((t) => t.status === flags.status);
         out(
           await Promise.all(
-            threads.map(async (t) => ({
-              thread_id: t.id,
-              name: t.name,
-              agent: t.agentDef?.name,
-              status: t.status,
-              summary:
-                t.summary ||
-                t.description ||
-                (t.agentDef?.description ? t.agentDef.description.split("\n")[0].slice(0, 140) : null),
-              updatedAt: t.updatedAt,
-              // Liveness for running threads only — everything else is summed up
-              // by its summary, and skipping the trace read keeps the common
-              // all-idle listing cheap.
-              ...(t.status === "running"
-                ? { lastActivity: lastToolActivity(await readTrace(t.cwd, t.id)) }
-                : {}),
-              // A spawned-but-not-yet-claimed run: the idle status is about to flip.
-              ...(t.pendingRun ? { pendingRun: t.pendingRun } : {}),
-            })),
+            threads.map(async (t) => {
+              // Trace only for running threads — the judge needs it for the
+              // in-flight/hung derivation; everything else judges from meta
+              // alone, keeping the common all-idle listing cheap.
+              const entries = t.status === "running" ? await readTrace(t.cwd, t.id) : [];
+              const judged = judgeThread({ thread: t, entries });
+              const activity = t.status === "running" ? deriveActivity(entries) : null;
+              return {
+                thread_id: t.id,
+                name: t.name,
+                role: t.agentDef?.name,
+                status: t.status,
+                verdict: judged.verdict,
+                ...(judged.evidence ? { evidence: judged.evidence } : {}),
+                ...(judged.action ? { action: judged.action } : {}),
+                summary:
+                  t.summary ||
+                  t.description ||
+                  (t.agentDef?.description ? t.agentDef.description.split("\n")[0].slice(0, 140) : null),
+                updatedAt: t.updatedAt,
+                ...(activity ? { activity } : {}),
+                // A spawned-but-not-yet-claimed run: the idle status is about to flip.
+                ...(t.pendingRun ? { pendingRun: t.pendingRun } : {}),
+              };
+            }),
           ),
         );
         return;
@@ -657,15 +660,251 @@ async function main() {
       const view = buildShowView(thread, msgs, stats);
       // Same liveness rule as list: only a running thread needs it.
       if (thread.status === "running") {
-        const activity = lastToolActivity(entries);
-        if (activity) view.thread.lastActivity = activity;
+        const activity = deriveActivity(entries);
+        if (activity) view.thread.activity = activity;
       }
+      // The diff pointer for a reviewing lead: which files this thread
+      // mutated (from the trace), so verification starts at `git diff` on
+      // the right paths instead of a transcript reconstruction.
+      const touched = filesTouched(entries);
+      if (touched.length) view.filesTouched = touched;
+      // The judgment triple (ADR 0019): status is fact, verdict is diagnosis.
+      const judged = judgeThread({ thread, entries });
+      view.thread.verdict = judged.verdict;
+      if (judged.evidence) view.thread.evidence = judged.evidence;
+      if (judged.action) view.thread.action = judged.action;
+      out(view);
+      return;
+    }
+
+    // Peek the workspace message log (ADR 0002) as an interface instead of
+    // raw file parsing. Parent mail arrives via the hook; this verb exists
+    // for everything the hook does NOT deliver — agent-to-agent traffic in a
+    // team, or re-reading already-consumed mail. Read-only: it never touches
+    // the parent cursor, so peeking cannot mark anything as delivered.
+    case "mailbox": {
+      const limit = flags.limit != null ? Number(flags.limit) : 20;
+      if (!Number.isFinite(limit) || limit < 1) fail("mailbox: --limit must be a positive number");
+      const matchesTo = (to, want) =>
+        Array.isArray(to) ? to.includes(want) : to === want;
+      let msgs = await readAllMessages(cwd);
+      if (typeof flags.from === "string") msgs = msgs.filter((m) => m.from === flags.from);
+      if (typeof flags.to === "string") msgs = msgs.filter((m) => matchesTo(m.to, flags.to));
+      if (typeof flags.kind === "string") msgs = msgs.filter((m) => m.kind === flags.kind);
+      const total = msgs.length;
+      msgs = msgs.slice(-limit);
+      out({
+        total,
+        shown: msgs.length,
+        messages: msgs.map((m) => ({
+          id: m.id,
+          at: m.at,
+          from: m.from,
+          to: m.to,
+          kind: m.kind,
+          ...(m.urgent ? { urgent: true } : {}),
+          text: capContent(String(m.text ?? "")),
+        })),
+      });
+      return;
+    }
+
+    // Config management (ADR 0017), folded in from the retired setup
+    // companion script so the lead and the /agnz:setup skill drive the SAME
+    // interface as everything else — one CLI, no side-channel scripts.
+    // Write sub-commands target the user layer; --project writes the
+    // project override instead.
+    case "config": {
+      const scope = flags.project ? "project" : "user";
+      const sub = positionals[0] || "list";
+
+      if (sub === "list") {
+        const { profiles, mappings } = await loadConfig(cwd);
+        out({
+          profiles: Object.values(profiles),
+          mappings: Object.fromEntries(
+            Object.entries(mappings).map(([m, v]) => [m, `${v.profile} (${v.origin})`]),
+          ),
+        });
+        return;
+      }
+
+      if (sub === "add") {
+        const [, name, baseUrl, model, apiKey] = positionals;
+        if (!name || !baseUrl || !model) fail("config add <name> <baseUrl> <model> [apiKey] [--project]");
+        let profile;
+        try {
+          profile = normaliseProfile(name, { baseUrl, model, apiKey: apiKey || null });
+        } catch (err) {
+          fail(err.message);
+        }
+        const { file } = await updateConfigLayer(scope, cwd, (layer) => {
+          const next = { ...layer, profiles: { ...layer.profiles, [name]: profile } };
+          // The first profile of a fresh layer becomes the fallback mapping,
+          // so a new setup works without a separate `mapping set _default`.
+          if (Object.keys(layer.profiles).length === 0 && !layer.mappings._default) {
+            next.mappings = { ...layer.mappings, _default: name };
+          }
+          return next;
+        });
+        out({ added: name, scope, file, ...profile });
+        return;
+      }
+
+      if (sub === "set") {
+        const NUMERIC = ["temperature", "maxTokens", "maxTurns", "llmTimeoutMs", "contextWindow", "compactThreshold"];
+        const STRINGY = ["baseUrl", "model", "apiKey"];
+        const [, name, field, value] = positionals;
+        if (!name || !field || value === undefined) fail("config set <name> <field> <value> [--project]");
+        if (!NUMERIC.includes(field) && !STRINGY.includes(field)) {
+          fail(`unknown profile field '${field}' (known: ${[...STRINGY, ...NUMERIC].join(", ")})`);
+        }
+        const parsed = NUMERIC.includes(field) ? Number(value) : value;
+        if (NUMERIC.includes(field) && !Number.isFinite(parsed)) {
+          fail(`field '${field}' expects a number, got '${value}'`);
+        }
+        try {
+          const { file } = await updateConfigLayer(scope, cwd, (layer) => {
+            const cur = layer.profiles[name];
+            if (!cur) {
+              throw new Error(`no profile '${name}' in the ${scope} layer ('set' edits one layer — pass --project for the project override)`);
+            }
+            const profile = normaliseProfile(name, { ...cur, [field]: parsed });
+            return { ...layer, profiles: { ...layer.profiles, [name]: profile } };
+          });
+          out({ updated: name, [field]: parsed, scope, file });
+        } catch (err) {
+          fail(err.message);
+        }
+        return;
+      }
+
+      if (sub === "remove") {
+        const [, name] = positionals;
+        if (!name) fail("config remove <name> [--project]");
+        try {
+          const { file } = await updateConfigLayer(scope, cwd, (layer) => {
+            if (!layer.profiles[name]) throw new Error(`no profile '${name}' in the ${scope} layer`);
+            const profiles = { ...layer.profiles };
+            delete profiles[name];
+            return { ...layer, profiles };
+          });
+          out({ removed: name, scope, file });
+        } catch (err) {
+          fail(err.message);
+        }
+        return;
+      }
+
+      if (sub === "use") {
+        const [, name] = positionals;
+        if (!name) fail("config use <name> [--project]");
+        const { profiles } = await loadConfig(cwd);
+        if (!profiles[name]) fail(`no such profile '${name}' in the effective config`);
+        await updateConfigLayer(scope, cwd, (layer) => ({
+          ...layer,
+          mappings: { ...layer.mappings, _default: name },
+        }));
+        out({ _default: name, scope });
+        return;
+      }
+
+      if (sub === "test") {
+        const [, name] = positionals;
+        try {
+          const { profiles, mappings } = await loadConfig(cwd);
+          const target = name || mappings._default?.profile;
+          const p = target ? profiles[target] : null;
+          if (!p) throw new Error(`no such profile '${target || "(default)"}'`);
+          const models = await listModels({ baseUrl: p.baseUrl, apiKey: p.apiKey });
+          out({
+            ok: true,
+            name: p.name,
+            baseUrl: p.baseUrl,
+            models,
+            seesConfiguredModel: Boolean(p.model && models.includes(p.model)),
+          });
+        } catch (err) {
+          fail(err.message);
+        }
+        return;
+      }
+
+      if (sub === "mapping") {
+        const msub = positionals[1] || "list";
+        if (msub === "list") {
+          const { mappings } = await loadConfig(cwd);
+          out(
+            Object.fromEntries(
+              Object.entries(mappings).map(([m, v]) => [m, `${v.profile} (${v.origin})`]),
+            ),
+          );
+          return;
+        }
+        if (msub === "set") {
+          const [, , model, profile] = positionals;
+          if (!model || !profile) fail("config mapping set <model> <profile> [--project]");
+          await updateConfigLayer(scope, cwd, (layer) => ({
+            ...layer,
+            mappings: { ...layer.mappings, [model]: profile },
+          }));
+          out({ mapped: { [model]: profile }, scope });
+          return;
+        }
+        if (msub === "remove") {
+          const [, , model] = positionals;
+          if (!model) fail("config mapping remove <model> [--project]");
+          await updateConfigLayer(scope, cwd, (layer) => {
+            const mappings = { ...layer.mappings };
+            delete mappings[model];
+            return { ...layer, mappings };
+          });
+          out({ removedMapping: model, scope });
+          return;
+        }
+        fail(`unknown mapping sub-command '${msub}'. Use: list | set | remove`);
+      }
+
+      fail(`unknown config sub-command '${sub}'. Use: list | add | set | remove | use | test | mapping`);
+      return;
+    }
+
+    // Environment overview: version, config layout, effective profiles and
+    // mappings with origins, per-project counts. The one place that renders
+    // the whole model-resolution picture.
+    case "info": {
+      let version = "unknown";
+      try {
+        version = JSON.parse(
+          await (await import("node:fs/promises")).readFile(resolve(PLUGIN_ROOT, ".claude-plugin", "plugin.json"), "utf8"),
+        ).version || "unknown";
+      } catch {}
+
+      const view = {
+        version,
+        cwd,
+        userConfig: resolve(resolveUserDir(), "config.json"),
+        projectConfig: resolve(resolveProjectDir(cwd), "config.json"),
+      };
+      try {
+        const { profiles, mappings } = await loadConfig(cwd);
+        view.profiles = Object.values(profiles).map(
+          (p) => `${p.name} → ${p.baseUrl} · ${p.model} [${p.origin}]`,
+        );
+        view.mappings = Object.entries(mappings).map(
+          ([m, v]) => `${m} → ${v.profile} [${v.origin}]`,
+        );
+      } catch (err) {
+        view.configError = err.message;
+      }
+      const threads = await tm.reconcileWorkspace(cwd);
+      view.threads = threads.length;
       out(view);
       return;
     }
 
     default:
-      fail(`unknown verb '${verb ?? ""}'. Use: start | send | approve | answer | wait | stop | remove | interrupt | show`);
+      fail(`unknown verb '${verb ?? ""}'. Use: start | send | approve | answer | wait | stop | remove | interrupt | show | mailbox | config | info`);
   }
 }
 

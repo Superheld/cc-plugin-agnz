@@ -17,6 +17,8 @@ import {
   readThreadSpend,
   readThreadMetas,
   readLastActivity,
+  readRunState,
+  isHungRunState,
   formatThreadsDetailed,
   atomicWriteJson,
   readWsFingerprint,
@@ -751,4 +753,118 @@ test("isFencedTranscriptGrep normalizes a relative/dot-segment path against cwd"
     isFencedTranscriptGrep("Grep", { path: ".claude/agnz/threads/x.jsonl", "-A": 5 }, cwd),
     false,
   );
+});
+
+// ── hung detection (ADR 0019): readRunState + the block's alert line ─────────
+
+test("readRunState derives in-flight LLM call and median from the tail", () => {
+  const MIN = 60_000;
+  const NOW = 2_000_000_000_000;
+  writeThread("t1", { status: "running" }, [
+    { ts: NOW - 30 * MIN, type: "turn_start", turn: 0 },
+    { ts: NOW - 28 * MIN, type: "llm_call", turn: 0, latencyMs: 2 * MIN },
+    { ts: NOW - 27 * MIN, type: "tool_call", turn: 0, name: "Read", target: "a.py", outcome: "ok" },
+    { ts: NOW - 26 * MIN, type: "turn_start", turn: 1 },
+    { ts: NOW - 23 * MIN, type: "llm_call", turn: 1, latencyMs: 3 * MIN },
+    { ts: NOW - 22 * MIN, type: "turn_start", turn: 2 }, // never returned
+  ]);
+  const rs = readRunState(ws, "t1", NOW);
+  assert.equal(rs.llmInFlightMs, 22 * MIN);
+  assert.equal(rs.medianLlmMs, 2 * MIN);
+  assert.equal(rs.lastAction.name, "Read");
+});
+
+test("isHungRunState: 10x median (with 10m floor) decides", () => {
+  const MIN = 60_000;
+  assert.equal(isHungRunState({ llmInFlightMs: 22 * MIN, medianLlmMs: 2 * MIN }), true);
+  assert.equal(isHungRunState({ llmInFlightMs: 15 * MIN, medianLlmMs: 2 * MIN }), false); // < 10x
+  assert.equal(isHungRunState({ llmInFlightMs: 11 * MIN, medianLlmMs: null }), true); // floor only
+  assert.equal(isHungRunState({ llmInFlightMs: 9 * MIN, medianLlmMs: null }), false);
+  assert.equal(isHungRunState({ llmInFlightMs: null, medianLlmMs: 2 * MIN }), false);
+});
+
+test("formatThreadsDetailed adds the hung alert with evidence and interrupt verb", () => {
+  const MIN = 60_000;
+  const now = 1782065400570;
+  const out = formatThreadsDetailed(
+    [
+      {
+        id: "e626e9e0aaaa", name: "dash-transcript", status: "running", updatedAt: now,
+        spend: { turns: 32, tokens: 0, lastCtx: 21000 },
+        lastActivity: { name: "Edit", target: "tests/test_transcript.py", ts: now - 43 * MIN, outcome: "ok" },
+        runState: { lastAction: null, llmInFlightMs: 43 * MIN, medianLlmMs: 2.4 * MIN },
+      },
+      {
+        id: "bbbb0000cccc", name: "healthy", status: "running", updatedAt: now,
+        spend: { turns: 2, tokens: 0, lastCtx: 5000 },
+        lastActivity: { name: "Read", target: "a.py", ts: now - 10_000, outcome: "ok" },
+        runState: { lastAction: null, llmInFlightMs: 30_000, medianLlmMs: 2 * MIN },
+      },
+    ],
+    now,
+  );
+  assert.match(out, /⚠ hung: LLM call running 43m \(median 2m\) → agnz interrupt dash-transcript/);
+  // the healthy thread gets no alert line
+  assert.doesNotMatch(out, /interrupt healthy/);
+});
+
+test("formatThreadsDetailed labels an in-flight LLM call as generating — a frozen last: must not read as dead", () => {
+  const MIN = 60_000;
+  const now = 1782065400570;
+  const out = formatThreadsDetailed(
+    [
+      {
+        id: "1a2b3c4d", name: "dev", status: "running", updatedAt: now,
+        spend: { turns: 5, tokens: 0, lastCtx: 9000 },
+        // Two minutes into a CPU generation: last tool call is stale by design.
+        lastActivity: { name: "Edit", target: "web/server.py", ts: now - 2 * MIN, outcome: "ok" },
+        runState: { lastAction: null, llmInFlightMs: 2 * MIN, medianLlmMs: 90_000 },
+      },
+    ],
+    now,
+  );
+  assert.match(out, /last: Edit web\/server\.py \(2m ago\) · generating 2m/);
+});
+
+test("formatThreadsDetailed suppresses the generating tag once the hung alert takes over", () => {
+  const MIN = 60_000;
+  const now = 1782065400570;
+  const out = formatThreadsDetailed(
+    [
+      {
+        id: "1a2b3c4d", name: "dev", status: "running", updatedAt: now,
+        spend: { turns: 5, tokens: 0, lastCtx: 9000 },
+        lastActivity: null,
+        runState: { lastAction: null, llmInFlightMs: 43 * MIN, medianLlmMs: 2 * MIN },
+      },
+    ],
+    now,
+  );
+  assert.doesNotMatch(out, /generating/);
+  assert.match(out, /⚠ hung/);
+});
+
+test("formatThreadsDetailed marks a turn-limit finish with ⚠ — it must not read like a clean done", () => {
+  const now = 1782065400570;
+  const out = formatThreadsDetailed(
+    [
+      { id: "1a2b3c4d", name: "dev", status: "idle", updatedAt: now, spend: { turns: 40, tokens: 0, lastCtx: 9000 }, summary: "reached turn limit (40)" },
+      { id: "9f8e7d6c", name: "ok-dev", status: "idle", updatedAt: now, spend: { turns: 3, tokens: 0, lastCtx: 2000 }, summary: "task complete" },
+    ],
+    now,
+  );
+  assert.match(out, /⚠ reached turn limit \(40\)/);
+  assert.doesNotMatch(out, /⚠ task complete/);
+});
+
+test("fingerprint changes when a running thread tips hung — the tip itself is the delta", () => {
+  const MIN = 60_000;
+  const base = [{ id: "aaa", status: "running", runState: { llmInFlightMs: 2 * MIN, medianLlmMs: 2 * MIN } }];
+  const hung = [{ id: "aaa", status: "running", runState: { llmInFlightMs: 43 * MIN, medianLlmMs: 2 * MIN } }];
+  const healthyFp = computeThreadFingerprint(base);
+  const hungFp = computeThreadFingerprint(hung);
+  assert.notEqual(healthyFp, hungFp, "hung transition must re-push the block");
+  assert.match(hungFp, /aaa:running:hung/);
+  // Recovery flips it back — one push each way, silence in between.
+  assert.equal(computeThreadFingerprint(base), healthyFp);
 });
