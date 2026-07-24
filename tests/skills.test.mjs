@@ -11,7 +11,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { parseSkillMd } from "../lib/skills.mjs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { parseSkillMd, discoverSkills } from "../lib/skills.mjs";
 
 test("plain key: value scalars parse unchanged", () => {
   const src = [
@@ -145,4 +149,36 @@ test("value containing a '>' mid-line is not treated as a block scalar", () => {
   const src = ["---", "description: use a > b for greater-than", "---"].join("\n");
   const out = parseSkillMd(src, "d");
   assert.equal(out.description, "use a > b for greater-than");
+});
+
+test("audience: lead keeps a skill out of the sub-agent catalog", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "agnz-aud-"));
+  const mk = (root, name, front) => {
+    mkdirSync(join(dir, root, "skills", name), { recursive: true });
+    writeFileSync(join(dir, root, "skills", name, "SKILL.md"), `---\nname: ${name}\ndescription: d\n${front}\n---\nbody`);
+  };
+  mk("plugin", "lead-only", "audience: lead");
+  mk("plugin", "for-agents", "audience: agent");
+  mk("plugin", "unmarked", "");
+
+  // Discovery also scans ~/.claude/skills, so assert on our fixtures only
+  // rather than on an exact catalog that depends on the developer's machine.
+  const catalog = await discoverSkills(join(dir, "proj"), join(dir, "plugin"));
+  assert.ok(!catalog.has("lead-only"), "orchestration docs must not reach a worker");
+  assert.ok(catalog.has("for-agents"), "an explicit agent audience stays available");
+  assert.ok(catalog.has("unmarked"), "an absent audience field must not change anything");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("agnz's own skills are marked lead-only", async () => {
+  const root = new URL("..", import.meta.url).pathname;
+  const catalog = await discoverSkills(join(root, "no-such-project"), root);
+  assert.ok(!catalog.has("agnz"), "'delegate this to an agent' must not be in a worker's prompt");
+  assert.ok(!catalog.has("agnz-setup"), "a worker has no business configuring profiles");
+});
+
+test("parseSkillMd surfaces the audience field, defaulting to null", () => {
+  assert.equal(parseSkillMd("---\nname: a\ndescription: d\naudience: LEAD\n---\nb", "a").audience, "lead");
+  assert.equal(parseSkillMd("---\nname: a\ndescription: d\n---\nb", "a").audience, null);
+  assert.equal(parseSkillMd("no frontmatter", "a").audience, null);
 });

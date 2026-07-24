@@ -71,7 +71,7 @@ lib/runner.mjs → lib/loop.mjs   ← LLM ↔ tool loop, persists transcript, th
 | `agents/` | Plugin-bundled agent definitions (dev, researcher, reviewer, general). Loaded at lowest priority — project and user agents shadow them. |
 | `skills/agnz-setup/` | Skill for `/agnz:setup` — profiles, model→profile mappings, and `info` sub-command (version, data paths, current state). |
 | `skills/agnz/` | Progressive-disclosure skill for ADR 0003 agent definitions and the `agent_*` lifecycle. `SKILL.md` covers when to delegate + quick define-and-spawn path; `references/defining.md` is the frontmatter field reference; `references/lifecycle.md` is the full CLI lifecycle reference. |
-| `lib/skills.mjs` | Shared skill discovery (project + user + plugin roots), used by both `lib/tools/Skill.mjs` and the loop's catalog injection so the two never drift. |
+| `lib/skills.mjs` | Shared skill discovery (project + user + plugin roots), used by both `lib/tools/Skill.mjs` and the loop's catalog injection so the two never drift. Frontmatter `audience: lead` **excludes** a skill from sub-agent discovery entirely (2026-07-25): agnz ships its own orchestration docs as plugin skills, so every worker's frozen prompt used to advertise "agnz: delegate this to an agent" and "agnz-setup: configure profiles". Absent field = available, so nothing else changes. |
 | `.claude-plugin/plugin.json` | Plugin manifest. |
 
 `lib/memory.mjs` **was deleted** as part of the 0.4.0 refactor. There is no project-memory or global-memory `.md` scope any more. If a future design needs persistent cross-run context for a workspace, it goes into `workspace.json` (per ADR 0001) or into board item notes (per ADR 0004), not into a parallel memory store.
