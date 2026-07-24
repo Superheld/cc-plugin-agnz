@@ -202,3 +202,72 @@ test("a plain prose final is untouched by the catcher", async () => {
   const history = await threadMgr.readMessages(thread.id);
   assert.equal(history.filter((m) => m.content === TEXTUAL_TOOL_CALL_NUDGE).length, 0);
 });
+
+// --- field-observed leaks (dashboard project, devstral-2 under Ollama) ------
+//
+// These three strings are verbatim `content` values from runs that died
+// silently: 3 of 16 completed runs (19 %). Kept as literal fixtures so a
+// regression is caught against real bytes, not a reconstruction.
+
+test("recovers the Tekken leak with the [ARGS] marker dropped (dash-jsfix2)", () => {
+  const rec = recoverTextualToolCalls(
+    'Grep{"pattern": "main\\\\.js", "path": "frontend/js"}',
+    KNOWN,
+  );
+  assert.equal(rec.toolCalls.length, 1);
+  assert.equal(rec.toolCalls[0].function.name, "Grep");
+  assert.deepEqual(JSON.parse(rec.toolCalls[0].function.arguments), {
+    pattern: "main\\.js",
+    path: "frontend/js",
+  });
+});
+
+test("recovers a documentation-echo call with a JS object literal (dash-endpoints)", () => {
+  const rec = recoverTextualToolCalls(
+    'Skill({action: "load", name: "testing"})',
+    [...KNOWN, "Skill"],
+  );
+  assert.equal(rec.toolCalls.length, 1);
+  assert.equal(rec.toolCalls[0].function.name, "Skill");
+  assert.deepEqual(JSON.parse(rec.toolCalls[0].function.arguments), {
+    action: "load",
+    name: "testing",
+  });
+});
+
+test("normalises single quotes in an echoed object literal", () => {
+  const rec = recoverTextualToolCalls("Grep({pattern: 'foo', literal: true})", KNOWN);
+  assert.deepEqual(JSON.parse(rec.toolCalls[0].function.arguments), {
+    pattern: "foo",
+    literal: true,
+  });
+});
+
+// --- the guards must still hold -------------------------------------------
+
+test("a genuine final answer is never treated as a call", () => {
+  assert.equal(
+    recoverTextualToolCalls("Fertig. 3 Treffer gefunden, alle in lib/loop.mjs.", KNOWN),
+    null,
+  );
+});
+
+test("a long report that merely mentions call syntax is left alone", () => {
+  const report =
+    "Summary of the migration.\n" +
+    "I located the entry point with Grep{\"pattern\":\"main\"} and then rewrote it. " +
+    "The bracket checker is green, the suite passes, and the indentation fix is in place. " +
+    "Remaining work: the serializer still needs its own test, and the endpoint list " +
+    "should be regenerated once the schema settles. Nothing else outstanding.";
+  assert.equal(recoverTextualToolCalls(report, KNOWN), null);
+});
+
+test("an unknown tool name is never recovered", () => {
+  assert.equal(recoverTextualToolCalls('Frobnicate{"x":1}', KNOWN), null);
+});
+
+test("an unparseable call shape nudges instead of dying silently", () => {
+  const rec = recoverTextualToolCalls('Grep(pattern="foo", path="lib")', KNOWN);
+  assert.equal(rec.toolCalls.length, 0);
+  assert.equal(rec.attempted, true);
+});
