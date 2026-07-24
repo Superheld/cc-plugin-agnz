@@ -31,7 +31,7 @@ Optional `--description "…"`. Without a `"task"`, the thread starts `idle`.
 
 ```bash
 agnz start researcher-1 "Summarise how request logging works." --agent researcher
-→ {"thread_id":"abc…","name":"researcher-1","agent":"researcher","status":"started"}
+→ {"thread_id":"abc…","name":"researcher-1","role":"researcher","status":"started"}
 ```
 
 ### `send <name|id> "message"`
@@ -69,8 +69,15 @@ underneath keeps going:
 
 ```bash
 agnz wait researcher-1 --timeout 5
-→ {"thread_id":"abc…","status":"running","timeout":true}
+→ {"thread_id":"abc…","status":"running","timeout":true,
+   "activity":{"phase":"generating","since":"84s","last_action":"Write lib/foo.mjs · 2m"}}
 ```
+
+The `activity` triple is the liveness signal: `phase` labels what the thread is
+doing right now (`generating` = an LLM call is in flight — on slow local
+inference a stale `last_action` during a long generation is normal, not a
+hang), `since` is how long the current step has run, `last_action` is the last
+completed tool call.
 
 Call `wait` again, or let the `UserPromptSubmit` hook deliver the result
 passively at your next prompt. Calling `wait` on a thread that's already left
@@ -117,34 +124,57 @@ End a thread (SIGTERM to its runner; the transcript is kept).
 agnz stop abc → {"thread_id":"abc","status":"stopped"}
 ```
 
-### `list [--status <s>] [--all]`
+### `show` (no target) `[--status <s>]`
 
-List threads in this workspace (`--all` = every workspace; `--status idle`
-filters). Each entry carries `name`, `status`, a rolling `summary`, and
-`updatedAt`. Opportunistically marks threads whose runner has died as `error`.
+List threads in this workspace (`--status idle` filters; `list` survives as an
+undocumented alias). Each entry carries `name`, `role`, `status`, the judged
+`verdict` (plus `evidence`/`action` when the verdict warrants it — e.g. a hung
+LLM call with the `interrupt` command attached), a rolling `summary`,
+`updatedAt`, and for running threads the `activity` liveness triple.
+Opportunistically marks threads whose runner has died as `error`.
 
 ```bash
 agnz show
-→ [{"thread_id":"abc…","name":"researcher-1","agent":"researcher",
-    "status":"idle","summary":"Summarised request logging; auth uses JWT","updatedAt":…}]
+→ [{"thread_id":"abc…","name":"researcher-1","role":"researcher","status":"idle",
+    "verdict":"done","summary":"Summarised request logging; auth uses JWT","updatedAt":…}]
 ```
 
 ### `show <id>`
 
 The lean structural view of a thread (ADR 0015) — the default first-reach
-inspection tool. Returns `meta.json`'s content minus its two heavy embedded
-fields (`systemPromptSnapshot`, the agent def's full body), plus status,
-pending, error, summary, cwd, and spend. Each recent-message excerpt is
-capped (~500 chars) with an elision marker reporting the original size, so a
-routine status check can never forward a full tool result. It also folds in
-the thread's aggregated trace stats — turns, tokens, latency, tool outcomes,
-repair rate, the same fold `lib/trace-stats.mjs` computes — so one call
-answers "what is this thread, what did it do, how heavy is it."
+inspection tool. Returns the thread's structural state — status, `role` (the
+def name; the full agent def is deliberately absent), pending, error, summary,
+cwd, spend — plus `filesTouched`, the per-path fold of the thread's successful
+Write/Edit calls ("lib/foo.mjs (1 write, 3 edits)"): the pointer that tells a
+reviewing lead where to aim `git diff`. `recent` carries the last agent-side
+turns only (the lead's own user-role directives are filtered out — they were
+observed echoing kilobytes back), each excerpt capped (~500 chars) with an
+elision marker reporting the original size, so a routine status check can
+never forward a full tool result. It also folds in the thread's aggregated
+trace stats — turns, tokens, latency, tool outcomes, repair rate, the same
+fold `lib/trace-stats.mjs` computes — so one call answers "what is this
+thread, what did it do, how heavy is it."
 
 Deliberately **not** included: the raw transcript. For that, ask the thread
 (`agnz send <name> "…"`) — direct `Read` of the transcript/trace `.jsonl` files is blocked
 by a `PreToolUse` hook (see
 [ADR 0015](./adr/0015-lead-context-discipline.md)).
+
+### `mailbox [--from x] [--to x] [--kind k] [--limit n]`
+
+Read-only peek into the workspace message log (`messages.jsonl`) as an
+interface instead of raw file parsing. Parent mail arrives via the hook; this
+verb covers what the hook does **not** deliver — agent-to-agent traffic in a
+team, or re-reading already-consumed mail. Never touches the parent cursor, so
+peeking cannot mark anything as delivered. Long texts are capped like every
+lean surface; `--to` matches array recipients too. Default `--limit 20`
+(newest kept), with an honest `total` alongside.
+
+```bash
+agnz mailbox --from dev --kind handoff
+→ {"total":3,"shown":3,"messages":[{"id":"m000041","at":"…","from":"dev",
+    "to":"reviewer","kind":"handoff","text":"…"}]}
+```
 
 ## How results reach the parent
 

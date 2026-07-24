@@ -808,6 +808,55 @@ test("formatThreadsDetailed adds the hung alert with evidence and interrupt verb
   assert.doesNotMatch(out, /interrupt healthy/);
 });
 
+test("formatThreadsDetailed labels an in-flight LLM call as generating — a frozen last: must not read as dead", () => {
+  const MIN = 60_000;
+  const now = 1782065400570;
+  const out = formatThreadsDetailed(
+    [
+      {
+        id: "1a2b3c4d", name: "dev", status: "running", updatedAt: now,
+        spend: { turns: 5, tokens: 0, lastCtx: 9000 },
+        // Two minutes into a CPU generation: last tool call is stale by design.
+        lastActivity: { name: "Edit", target: "web/server.py", ts: now - 2 * MIN, outcome: "ok" },
+        runState: { lastAction: null, llmInFlightMs: 2 * MIN, medianLlmMs: 90_000 },
+      },
+    ],
+    now,
+  );
+  assert.match(out, /last: Edit web\/server\.py \(2m ago\) · generating 2m/);
+});
+
+test("formatThreadsDetailed suppresses the generating tag once the hung alert takes over", () => {
+  const MIN = 60_000;
+  const now = 1782065400570;
+  const out = formatThreadsDetailed(
+    [
+      {
+        id: "1a2b3c4d", name: "dev", status: "running", updatedAt: now,
+        spend: { turns: 5, tokens: 0, lastCtx: 9000 },
+        lastActivity: null,
+        runState: { lastAction: null, llmInFlightMs: 43 * MIN, medianLlmMs: 2 * MIN },
+      },
+    ],
+    now,
+  );
+  assert.doesNotMatch(out, /generating/);
+  assert.match(out, /⚠ hung/);
+});
+
+test("formatThreadsDetailed marks a turn-limit finish with ⚠ — it must not read like a clean done", () => {
+  const now = 1782065400570;
+  const out = formatThreadsDetailed(
+    [
+      { id: "1a2b3c4d", name: "dev", status: "idle", updatedAt: now, spend: { turns: 40, tokens: 0, lastCtx: 9000 }, summary: "reached turn limit (40)" },
+      { id: "9f8e7d6c", name: "ok-dev", status: "idle", updatedAt: now, spend: { turns: 3, tokens: 0, lastCtx: 2000 }, summary: "task complete" },
+    ],
+    now,
+  );
+  assert.match(out, /⚠ reached turn limit \(40\)/);
+  assert.doesNotMatch(out, /⚠ task complete/);
+});
+
 test("fingerprint changes when a running thread tips hung — the tip itself is the delta", () => {
   const MIN = 60_000;
   const base = [{ id: "aaa", status: "running", runState: { llmInFlightMs: 2 * MIN, medianLlmMs: 2 * MIN } }];

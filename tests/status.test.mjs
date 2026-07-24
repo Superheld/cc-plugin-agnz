@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 
 import {
   deriveInFlight,
+  deriveActivity,
   judgeThread,
   fmtDur,
   HUNG_FLOOR_MS,
@@ -73,6 +74,57 @@ test("judge: a slow-but-not-hung call gets verdict slow with no paging action", 
   const j = judgeThread({ thread: { id: "a", name: "s", status: "running" }, entries, now: NOW });
   assert.equal(j.verdict, "slow");
   assert.equal(j.action, null);
+});
+
+test("deriveActivity: a trailing turn_start is phase generating — a frozen last_action must not read as hung", () => {
+  const a = deriveActivity(
+    [
+      { ts: NOW - 5 * MIN, type: "turn_start" },
+      { ts: NOW - 4 * MIN, type: "llm_call", latencyMs: MIN },
+      { ts: NOW - 3 * MIN, type: "tool_call", name: "Write", target: "lib/foo.mjs", outcome: "ok" },
+      { ts: NOW - 2 * MIN, type: "turn_start" }, // the long CPU generation
+    ],
+    NOW,
+  );
+  assert.equal(a.phase, "generating");
+  assert.equal(a.since, "2m");
+  assert.equal(a.last_action, "Write lib/foo.mjs · 3m");
+});
+
+test("deriveActivity: trailing tool_call/llm_call are phase tool; pause is idle; empty trace is null", () => {
+  const tool = deriveActivity([{ ts: NOW - 12 * 1000, type: "tool_call", name: "Read", target: "a.mjs", outcome: "ok" }], NOW);
+  assert.deepEqual(tool, { phase: "tool", since: "12s", last_action: "Read a.mjs · 12s" });
+
+  const between = deriveActivity(
+    [
+      { ts: NOW - MIN, type: "turn_start" },
+      { ts: NOW - 30 * 1000, type: "llm_call", latencyMs: 30 * 1000 },
+    ],
+    NOW,
+  );
+  assert.equal(between.phase, "tool");
+  assert.equal(between.last_action, null, "no completed tool call yet");
+
+  assert.equal(deriveActivity([{ ts: NOW, type: "pause", kind: "question" }], NOW).phase, "idle");
+  assert.equal(deriveActivity([], NOW), null);
+  assert.equal(deriveActivity(null, NOW), null);
+});
+
+test("judge: idle after a turn limit is verdict turn-limit, not a quiet done", () => {
+  const j = judgeThread({
+    thread: { id: "abc12345", name: "dev", status: "idle", summary: "reached turn limit (40)", updatedAt: NOW - MIN },
+    now: NOW,
+  });
+  assert.equal(j.verdict, "turn-limit");
+  assert.equal(j.evidence, "reached turn limit (40)");
+  assert.match(j.action, /agnz send dev/);
+
+  // A clean finish stays a quiet done.
+  const clean = judgeThread({
+    thread: { id: "abc12345", name: "dev", status: "idle", summary: "task complete", updatedAt: NOW - MIN },
+    now: NOW,
+  });
+  assert.equal(clean.verdict, "done");
 });
 
 test("judge: awaiting question and approval carry their resolving verbs", () => {
