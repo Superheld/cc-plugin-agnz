@@ -827,22 +827,35 @@ export function formatThreadsDetailed(threads, now = Date.now()) {
     } else if (s.turns) {
       spend = ` · ${s.turns} turns`;
     }
-    // Liveness for running threads: the last tool call from the trace tail.
-    // "last: Write lib/foo.mjs (12s ago)" answers "is it still working?"
-    // without anyone opening a transcript.
+    // Liveness for running threads: the last tool call from the trace tail,
+    // plus the phase label. "last:" alone freezes during a long LLM
+    // generation — a 2-minute CPU generation and a hung runner looked
+    // identical (field lesson, cost a night of PID-watching). "· generating
+    // 84s" disambiguates; past the hung threshold the alert line below takes
+    // over instead.
     let activity = "";
-    if (t.status === "running" && t.lastActivity && t.lastActivity.name) {
-      const a = t.lastActivity;
-      const what = a.target ? `${a.name} ${String(a.target).slice(0, 60)}` : a.name;
-      const ago = a.ts != null ? ` (${formatAgoFine(now - a.ts)} ago)` : "";
-      activity = ` · last: ${what}${ago}`;
+    if (t.status === "running") {
+      if (t.lastActivity && t.lastActivity.name) {
+        const a = t.lastActivity;
+        const what = a.target ? `${a.name} ${String(a.target).slice(0, 60)}` : a.name;
+        const ago = a.ts != null ? ` (${formatAgoFine(now - a.ts)} ago)` : "";
+        activity = ` · last: ${what}${ago}`;
+      }
+      const inFlight = t.runState ? t.runState.llmInFlightMs : null;
+      if (inFlight != null && !isHungRunState(t.runState)) {
+        activity += ` · generating ${formatAgoFine(inFlight)}`;
+      }
     }
     // Second line: the rolling summary (→ description → role, fallback-chained
     // in readThreadMetas). This is what lets the parent see what a thread did
     // without opening its transcript — even weeks later. Collapse whitespace so
     // a multi-line final answer can't break the block; cap the length.
     const summary = t.summary ? String(t.summary).replace(/\s+/g, " ").trim() : "";
-    const sumLine = summary ? `\n      ${summary.slice(0, 100)}` : "";
+    // A turn-limit death must not read like a clean finish: the agent flailed
+    // out mid-task and the work needs a decision, so it gets the ⚠ a clean
+    // summary never carries.
+    const warn = t.status === "idle" && summary.startsWith("reached turn limit") ? "⚠ " : "";
+    const sumLine = summary ? `\n      ${warn}${summary.slice(0, 100)}` : "";
     // Hung verdict (ADR 0019): the judged line the lead used to derive by
     // hand from lastActivity timestamps across prompts. Evidence + the
     // resolving verb, stable phrasing.

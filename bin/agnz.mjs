@@ -11,6 +11,7 @@
 //   agnz stop   <id|name>             (archive: hide from list, keep transcript)
 //   agnz remove <id|name> | --status stopped|error   (delete files permanently)
 //   agnz show   [<id|name>]           (no target: list all threads; --status <s> filters)
+//   agnz mailbox [--from x] [--to x] [--kind k] [--limit n]   (peek the message log)
 //   agnz config <sub> [...]           (profiles + mappings: list|add|set|remove|use|test|mapping; --project)
 //   agnz info                         (version, config layout, effective profiles/mappings)
 //
@@ -41,10 +42,11 @@ import {
 } from "../lib/agent-defs.mjs";
 import { createSandbox } from "../lib/sandbox.mjs";
 import { publish } from "../lib/event-bus.mjs";
-import { readTrace, aggregateTrace } from "../lib/trace-stats.mjs";
+import { readTrace, aggregateTrace, filesTouched } from "../lib/trace-stats.mjs";
 import { PLUGIN_ROOT } from "../lib/orchestrate.mjs";
 import { loadConfig, updateConfigLayer, normaliseProfile } from "../lib/config.mjs";
-import { judgeThread } from "../lib/status.mjs";
+import { judgeThread, deriveActivity } from "../lib/status.mjs";
+import { readAllMessages } from "../lib/messages-log.mjs";
 import { resolveUserDir, resolveProjectDir } from "../lib/data-dir.mjs";
 import { listModels } from "../lib/llm/openai-compatible.mjs";
 
@@ -226,27 +228,10 @@ export function decideWaitOutcome(thread, messages) {
 }
 
 // ---- last activity: liveness signal for running threads ----
-// The most recent tool_call in a trace fold: { name, target?, ts?, agoMs?,
-// outcome? }. Pure over the entries array so it is unit-testable; the callers
-// (wait's timeout branch, show, list) do the trace IO. Null when the thread
-// has no tool_call yet.
-export function lastToolActivity(entries, now = Date.now()) {
-  if (!Array.isArray(entries)) return null;
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const e = entries[i];
-    if (e && e.type === "tool_call" && typeof e.name === "string") {
-      const activity = { name: e.name };
-      if (typeof e.target === "string") activity.target = e.target;
-      if (typeof e.outcome === "string") activity.outcome = e.outcome;
-      if (typeof e.ts === "number") {
-        activity.ts = e.ts;
-        activity.agoMs = Math.max(0, now - e.ts);
-      }
-      return activity;
-    }
-  }
-  return null;
-}
+// deriveActivity (lib/status.mjs) folds the trace tail into the phase-labelled
+// liveness triple {phase, since, last_action}. The old tool-call-only fold
+// froze during long LLM generations — "generating" and "hung" were
+// indistinguishable, which cost real field debugging time.
 
 // ---- show: a token-lean structural view (ADR 0015 §2) ----
 // A status check must never forward a full tool result into the lead's
@@ -305,19 +290,6 @@ function capPending(pending) {
   return out;
 }
 
-// Reduce an agentDef to its policy-relevant identity — name, the first line of
-// its description, and its tool allow/deny lists. The heavy body (system-prompt
-// text) is dropped: the lead asks "show" for state, not for the prompt.
-function reduceAgentDef(agentDef) {
-  if (!agentDef) return null;
-  return {
-    name: agentDef.name || null,
-    description: agentDef.description ? String(agentDef.description).split("\n")[0] : null,
-    tools: agentDef.tools || null,
-    disallowedTools: agentDef.disallowedTools || null,
-  };
-}
-
 // Compact the trace fold to the fields a lead reads at a glance. Drops the
 // per-event detail; keeps turns, tokens, latency, tool outcomes, repair rate.
 function compactStats(s) {
@@ -341,8 +313,10 @@ export function buildShowView(thread, messages, stats) {
     thread: {
       thread_id: thread.id,
       name: thread.name,
-      agent: thread.agentDef?.name,
-      agentDef: reduceAgentDef(thread.agentDef),
+      // Glossary `role` (ADR 0019 §6): the def name, nothing more. The full
+      // agentDef (tool lists, description) was field-tested as pure noise —
+      // the lead knows what "dev" is; policy detail lives in the def file.
+      role: thread.agentDef?.name ?? null,
       status: thread.status,
       summary: thread.summary || null,
       description: thread.description,
@@ -350,7 +324,13 @@ export function buildShowView(thread, messages, stats) {
       pending: capPending(thread.pending),
       error: thread.error,
     },
-    recent: (messages || []).slice(-6).map(capMessageContent),
+    // Agent turns only: the lead's own directives (user role — typed prompts
+    // and synthetic mail injections) were observed echoing back kilobytes of
+    // the lead's own words. It wants the agent's moves, not a mirror.
+    recent: (messages || [])
+      .filter((m) => !m || typeof m !== "object" || m.role !== "user")
+      .slice(-6)
+      .map(capMessageContent),
   };
   if (thread.card) view.thread.card = thread.card;
   // A pendingRun marker means a spawned runner has not claimed yet — the
@@ -418,11 +398,11 @@ async function main() {
       createSandbox({ root: thread.cwd, policy: buildToolPolicy(agentDef, registry.list().map((t) => t.name)) });
 
       if (message == null) {
-        out({ thread_id: thread.id, name, agent: agentDef.name, status: "idle" });
+        out({ thread_id: thread.id, name, role: agentDef.name, status: "idle" });
         return;
       }
       await spawnRun(tm, { threadId: thread.id, cwd: thread.cwd, userMessage: message });
-      out({ thread_id: thread.id, name, agent: agentDef.name, status: "started" });
+      out({ thread_id: thread.id, name, role: agentDef.name, status: "started" });
       return;
     }
 
@@ -517,15 +497,16 @@ async function main() {
           return;
         }
         if (Date.now() >= deadline) {
-          // Attach the last tool activity so the waiter can judge liveness at
-          // once: a seconds-old Write means "keep waiting", a minutes-old one
-          // means "look closer" — no transcript read either way.
-          const activity = lastToolActivity(await readTrace(thread.cwd, thread.id));
+          // Attach phase-labelled liveness so the waiter can judge at once:
+          // "generating 84s" means keep waiting, a minutes-old last_action
+          // with no phase progress means look closer — no transcript read
+          // either way.
+          const activity = deriveActivity(await readTrace(thread.cwd, thread.id));
           out({
             thread_id: thread.id,
             status: thread.status,
             timeout: true,
-            ...(activity ? { lastActivity: activity } : {}),
+            ...(activity ? { activity } : {}),
             note:
               thread.status === "running"
                 ? "still running — wait again or rely on the message hook"
@@ -643,10 +624,11 @@ async function main() {
               // alone, keeping the common all-idle listing cheap.
               const entries = t.status === "running" ? await readTrace(t.cwd, t.id) : [];
               const judged = judgeThread({ thread: t, entries });
+              const activity = t.status === "running" ? deriveActivity(entries) : null;
               return {
                 thread_id: t.id,
                 name: t.name,
-                agent: t.agentDef?.name,
+                role: t.agentDef?.name,
                 status: t.status,
                 verdict: judged.verdict,
                 ...(judged.evidence ? { evidence: judged.evidence } : {}),
@@ -656,7 +638,7 @@ async function main() {
                   t.description ||
                   (t.agentDef?.description ? t.agentDef.description.split("\n")[0].slice(0, 140) : null),
                 updatedAt: t.updatedAt,
-                ...(t.status === "running" ? { lastActivity: lastToolActivity(entries) } : {}),
+                ...(activity ? { activity } : {}),
                 // A spawned-but-not-yet-claimed run: the idle status is about to flip.
                 ...(t.pendingRun ? { pendingRun: t.pendingRun } : {}),
               };
@@ -678,15 +660,52 @@ async function main() {
       const view = buildShowView(thread, msgs, stats);
       // Same liveness rule as list: only a running thread needs it.
       if (thread.status === "running") {
-        const activity = lastToolActivity(entries);
-        if (activity) view.thread.lastActivity = activity;
+        const activity = deriveActivity(entries);
+        if (activity) view.thread.activity = activity;
       }
+      // The diff pointer for a reviewing lead: which files this thread
+      // mutated (from the trace), so verification starts at `git diff` on
+      // the right paths instead of a transcript reconstruction.
+      const touched = filesTouched(entries);
+      if (touched.length) view.filesTouched = touched;
       // The judgment triple (ADR 0019): status is fact, verdict is diagnosis.
       const judged = judgeThread({ thread, entries });
       view.thread.verdict = judged.verdict;
       if (judged.evidence) view.thread.evidence = judged.evidence;
       if (judged.action) view.thread.action = judged.action;
       out(view);
+      return;
+    }
+
+    // Peek the workspace message log (ADR 0002) as an interface instead of
+    // raw file parsing. Parent mail arrives via the hook; this verb exists
+    // for everything the hook does NOT deliver — agent-to-agent traffic in a
+    // team, or re-reading already-consumed mail. Read-only: it never touches
+    // the parent cursor, so peeking cannot mark anything as delivered.
+    case "mailbox": {
+      const limit = flags.limit != null ? Number(flags.limit) : 20;
+      if (!Number.isFinite(limit) || limit < 1) fail("mailbox: --limit must be a positive number");
+      const matchesTo = (to, want) =>
+        Array.isArray(to) ? to.includes(want) : to === want;
+      let msgs = await readAllMessages(cwd);
+      if (typeof flags.from === "string") msgs = msgs.filter((m) => m.from === flags.from);
+      if (typeof flags.to === "string") msgs = msgs.filter((m) => matchesTo(m.to, flags.to));
+      if (typeof flags.kind === "string") msgs = msgs.filter((m) => m.kind === flags.kind);
+      const total = msgs.length;
+      msgs = msgs.slice(-limit);
+      out({
+        total,
+        shown: msgs.length,
+        messages: msgs.map((m) => ({
+          id: m.id,
+          at: m.at,
+          from: m.from,
+          to: m.to,
+          kind: m.kind,
+          ...(m.urgent ? { urgent: true } : {}),
+          text: capContent(String(m.text ?? "")),
+        })),
+      });
       return;
     }
 
@@ -885,7 +904,7 @@ async function main() {
     }
 
     default:
-      fail(`unknown verb '${verb ?? ""}'. Use: start | send | approve | answer | wait | stop | remove | interrupt | show | config | info`);
+      fail(`unknown verb '${verb ?? ""}'. Use: start | send | approve | answer | wait | stop | remove | interrupt | show | mailbox | config | info`);
   }
 }
 

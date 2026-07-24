@@ -40,7 +40,7 @@ agnz wait researcher-1 --timeout 120
 → {"thread_id":"abc…","status":"idle","content":"…"}
 ```
 
-Default timeout is 300s. On timeout it prints `{..., timeout:true}` plus a `lastActivity` field — the agent's most recent tool call (`{name, target, agoMs}`) — and exits 0. Read `lastActivity` as a liveness check: an `agoMs` of a few seconds means "still working, keep waiting"; minutes of silence mean "look closer" (`agnz show`, or `interrupt` if it ran amok). The underlying detached runner is untouched either way; call `wait` again, or just let the `UserPromptSubmit` hook deliver the result at your next prompt. Calling `wait` on a thread that's already left `running` (idle, awaiting_input, stopped, error) returns its outcome immediately — a **collect** call, useful right after you already know the run finished.
+Default timeout is 300s. On timeout it prints `{..., timeout:true}` plus an `activity` field — the phase-labelled liveness triple `{phase, since, last_action}`. `phase: "generating"` with a growing `since` means the model is mid-generation (slow local inference is normal — a frozen `last_action` alone does NOT mean the run is dead); `phase: "tool"` means it is between tool work. Minutes of `generating` far past the thread's usual pace mean "look closer" (`agnz show` renders the hung verdict, `interrupt` if it ran amok). The underlying detached runner is untouched either way; call `wait` again, or just let the `UserPromptSubmit` hook deliver the result at your next prompt. Calling `wait` on a thread that's already left `running` (idle, awaiting_input, stopped, error) returns its outcome immediately — a **collect** call, useful right after you already know the run finished.
 
 This is what replaces `--wait`: start several agents detached, do your own work, then collect each with `wait` — parallel instead of serial.
 
@@ -52,7 +52,7 @@ agnz wait auth
 agnz wait billing
 ```
 
-**Long runs: put `wait` in the background.** If your harness's Bash tool supports background execution (Claude Code: `run_in_background`), run `agnz wait <id> --timeout 600` as a background task and go on with other work — the harness notifies you the moment the wait exits, i.e. when the agent finishes, pauses, or the timeout fires. That turns "agent finished" into an event you're woken up for instead of a state you have to remember to poll, and it costs nothing while you're busy elsewhere. On a `timeout:true` notification, check `lastActivity` and decide: re-arm another background `wait`, or intervene.
+**Long runs: put `wait` in the background.** If your harness's Bash tool supports background execution (Claude Code: `run_in_background`), run `agnz wait <id> --timeout 600` as a background task and go on with other work — the harness notifies you the moment the wait exits, i.e. when the agent finishes, pauses, or the timeout fires. That turns "agent finished" into an event you're woken up for instead of a state you have to remember to poll, and it costs nothing while you're busy elsewhere. On a `timeout:true` notification, check `activity` (`phase`/`since`/`last_action`) and decide: re-arm another background `wait`, or intervene.
 
 ### `approve`
 
@@ -110,13 +110,21 @@ All thread-addressing verbs (`send`, `wait`, `approve`, `answer`, `stop`, `remov
 ### `show` — the one inspection verb
 
 ```bash
-agnz show                 # no target: all threads — name, status, summary, last activity
-agnz show abc1            # one thread: lean structural view — status, pending, spend, trace stats
+agnz show                 # no target: all threads — name, role, status, verdict, summary, activity
+agnz show abc1            # one thread: lean structural view — status, pending, spend, trace stats, filesTouched
 ```
 
-With a target, `show` strips the two heavy embedded fields (`systemPromptSnapshot`, the agent def's full body) that live in `meta.json`, and caps each recent-message excerpt at ~500 chars with an elision marker reporting the original size — a routine status check can never forward a full tool result. It also folds in the thread's trace stats (turns/tokens/latency/tool outcomes) so one call answers "what is this thread, what did it do, how heavy is it" without a second lookup.
+With a target, `show` returns structural state only: the agent def collapses to `role` (the def name — its body and tool lists never reach your context), `recent` carries the last agent-side turns (your own user-role directives are filtered out), and each excerpt is capped at ~500 chars with an elision marker reporting the original size — a routine status check can never forward a full tool result. It also folds in the thread's trace stats (turns/tokens/latency/tool outcomes) and `filesTouched` — the per-path list of the thread's successful Write/Edit calls, i.e. where to point `git diff` when you review the work.
 
-Without a target it lists the workspace (`--status <s>` filters) and opportunistically recovers threads whose runner died (a crash leaves no daemon to clean up) by marking them `error`. Deeper analysis — per-model comparisons, cost breakdowns — is log territory (`<id>.trace.jsonl`), not a CLI concern.
+Without a target it lists the workspace (`--status <s>` filters) and opportunistically recovers threads whose runner died (a crash leaves no daemon to clean up) by marking them `error`. Each entry carries the judged `verdict` (ADR 0019): a healthy `working` thread stays quiet, while a `hung` LLM call or a `turn-limit` finish comes with `evidence` and the resolving command in `action`. Deeper analysis — per-model comparisons, cost breakdowns — is log territory (`<id>.trace.jsonl`), not a CLI concern.
+
+### `mailbox` — peek the message log
+
+```bash
+agnz mailbox --from dev --kind handoff --limit 10
+```
+
+Read-only view into `messages.jsonl` — for what the hook does NOT deliver: agent-to-agent traffic between your team members, or re-reading mail you already consumed. Never touches your delivery cursor. Text capped like every lean surface; `--to` matches array recipients.
 
 ## How results arrive
 
