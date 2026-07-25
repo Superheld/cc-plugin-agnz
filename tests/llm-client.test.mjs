@@ -134,3 +134,49 @@ test("listModels returns ids and keeps its default deadline behaviour", async ()
   });
   assert.deepEqual(await listModels({ baseUrl }), ["m1", "m2"]);
 });
+
+// --- structured error detail ------------------------------------------------
+// Every failure below used to exist only as prose inside err.message. The
+// trace could record the sentence but not the endpoint, the syscall code or
+// the server's own body, which is what a diagnosis actually needs.
+
+test("an HTTP error carries status, endpoint and the server's body as fields", async () => {
+  const baseUrl = await listen((req, res) => {
+    res.writeHead(422, { "content-type": "application/json" });
+    res.end('{"error":{"message":"context length exceeded"}}');
+  });
+  const err = await chat(baseReq(baseUrl)).then(
+    () => null,
+    (e) => e,
+  );
+  assert.ok(err, "the call rejects");
+  assert.equal(err.detail.kind, "http");
+  assert.equal(err.detail.status, 422);
+  assert.match(err.detail.url, /\/v1\/chat\/completions$/);
+  assert.match(err.detail.body, /context length exceeded/);
+});
+
+test("a network error carries its syscall code as a field", async () => {
+  // Port 1 on loopback: nothing listens, so the connect fails at the syscall.
+  const err = await chat(baseReq("http://127.0.0.1:1/v1")).then(
+    () => null,
+    (e) => e,
+  );
+  assert.ok(err, "the call rejects");
+  assert.equal(err.detail.kind, "network");
+  assert.ok(err.detail.code, `a syscall code is present (got ${err.detail.code})`);
+  assert.match(err.detail.url, /127\.0\.0\.1:1/);
+});
+
+test("a non-JSON response carries the body that failed to parse", async () => {
+  const baseUrl = await listen((req, res) => {
+    res.writeHead(200, { "content-type": "text/html" });
+    res.end("<html>proxy error</html>");
+  });
+  const err = await chat(baseReq(baseUrl)).then(
+    () => null,
+    (e) => e,
+  );
+  assert.equal(err.detail.kind, "bad_json");
+  assert.match(err.detail.body, /proxy error/);
+});

@@ -136,3 +136,15 @@ test("aggregateThread + aggregateWorkspace read real trace files", async () => {
   assert.equal(ws.byAgent.dev.tokens, 260);
   assert.match(formatWorkspace(ws), /Workspace trace stats/);
 });
+
+test("a failed llm_call is counted but kept out of the latency mean", () => {
+  const s = aggregateTrace([
+    { type: "thread_start", turn: 0, model: "m", agent: "dev" },
+    { type: "llm_call", turn: 0, outcome: "ok", latencyMs: 1000, usage: { prompt: 10, completion: 2, total: 12 } },
+    { type: "llm_call", turn: 1, outcome: "error", latencyMs: 3, error: { message: "EHOSTUNREACH" } },
+    { type: "thread_end", reason: "error" },
+  ]);
+  assert.equal(s.llmCalls, 1, "only answered calls count as calls");
+  assert.equal(s.llmErrors, 1);
+  assert.equal(s.avgLlmLatencyMs, 1000, "a 3 ms connect refusal does not halve the average");
+});
