@@ -42,6 +42,8 @@ import {
 import { createSandbox } from "../lib/sandbox.mjs";
 import { publish } from "../lib/event-bus.mjs";
 import { PLUGIN_ROOT } from "../lib/orchestrate.mjs";
+import { readPluginVersion } from "../lib/plugin-version.mjs";
+import { promptFingerprint } from "../lib/prompts.mjs";
 import { loadConfig, updateConfigLayer, normaliseProfile } from "../lib/config.mjs";
 import { resolveUserDir, resolveProjectDir } from "../lib/data-dir.mjs";
 import { listModels } from "../lib/llm/openai-compatible.mjs";
@@ -271,8 +273,29 @@ function capPending(pending) {
 // `show` a dashboard, and a lead reading a dashboard is a lead babysitting.
 // Analysis belongs on a surface you open when you want it — the trace and
 // transcript files are still written, and the dashboard still reads them.
-export function buildShowView(thread) {
+export function buildShowView(thread, running = null) {
+  // The system prompt is frozen write-once, so a long-lived thread keeps the
+  // prompt (and skill catalog) it was born with while agnz moves on. Surfaced
+  // ONLY on a mismatch: a current thread says nothing, a drifted one tells the
+  // lead that the fix it just installed will not reach this thread.
+  //
+  // Two signals, because neither suffices alone. The version is what a human
+  // recognises; the template digest is what actually catches same-version
+  // drift, which is the common case (agnz bumps the version only at release).
+  const drifted =
+    running &&
+    ((thread.promptTemplates && thread.promptTemplates !== running.promptTemplates) ||
+      (thread.promptVersion && thread.promptVersion !== running.version))
+      ? {
+          bornAt: `${thread.promptVersion ?? "?"} (${thread.promptTemplates ?? "?"})`,
+          running: `${running.version} (${running.promptTemplates})`,
+          evidence: "the frozen system prompt predates this build — prompt fixes do not reach this thread",
+          action: `agnz start <name> --agent ${thread.agentDef?.name ?? "<def>"}`,
+        }
+      : null;
+
   return {
+    ...(drifted ? { promptDrift: drifted } : {}),
     thread: {
       thread_id: thread.id,
       name: thread.name,
@@ -603,7 +626,12 @@ async function main() {
       // `summary` (the agent's own report line) to decide what comes next.
       // The trace files still exist and still feed the dashboard — they just
       // stop being a lead-facing surface.
-      out(buildShowView(thread));
+      out(
+        buildShowView(thread, {
+          version: await readPluginVersion(PLUGIN_ROOT),
+          promptTemplates: promptFingerprint(),
+        }),
+      );
       return;
     }
 
@@ -771,12 +799,7 @@ async function main() {
     // mappings with origins, per-project counts. The one place that renders
     // the whole model-resolution picture.
     case "info": {
-      let version = "unknown";
-      try {
-        version = JSON.parse(
-          await (await import("node:fs/promises")).readFile(resolve(PLUGIN_ROOT, ".claude-plugin", "plugin.json"), "utf8"),
-        ).version || "unknown";
-      } catch {}
+      const version = await readPluginVersion(PLUGIN_ROOT);
 
       const view = {
         version,
