@@ -1,91 +1,119 @@
-# ADR 0020 — Diagnostics: one record per run, instead of four partial ones
+# ADR 0020 — One log per thread: every view is a projection
 
-- **Status:** Proposed — discussion draft. Phase 0 (additive, non-breaking) already shipped in `5be7622`; everything below the line marked *breaking* is the open question.
+- **Status:** Accepted — implementation in progress. Phase 0 (additive diagnostics) shipped in 0.23.0; the unified log is the current work.
 - **Date:** 2026-07-25
-- **Relates to:** ADR 0011 (observability — this revisits its trace schema), ADR 0015 (lead context discipline — why the lead must not read raw files), ADR 0017 (config and state consolidation — the precedent for a breaking consolidation), ADR 0019 (the lead dashboard — the consumer)
+- **Relates to:** ADR 0011 (observability — this replaces its trace file), ADR 0012 (context management — the frozen prefix is what makes request logging cheap), ADR 0015 (lead context discipline — the lead still reads none of this), ADR 0019 (the lead dashboard — a consumer)
 
 ## Context
 
-The trigger was a field incident: a run against the LAN inference box died with `EHOSTUNREACH`, and the question "what happened" turned out to be surprisingly expensive to answer.
+The trigger was a field incident: a run against the LAN inference box answered `EHOSTUNREACH`, and "what happened" turned out to be expensive to answer — the error reached the user and was written down **nowhere**. A search across every agnz workspace on the machine found zero occurrences, including in the append-only `messages.jsonl`.
 
-### What one failure leaves behind today
+The path was `agnz config test` (`bin/agnz.mjs:753`): it catches, calls `fail(err.message)`, prints to stderr and exits. The one command with server contact that a user runs *because the model is not answering* is the one command that logs nothing.
 
-The same error is written to three files, in three shapes:
+That is a symptom. The disease is that agnz records what happens in four places organised by **file kind** rather than by **event**:
 
-| File | Shape | Survives |
+| File | Holds | Problem |
 |---|---|---|
-| `<id>.meta.json` | `error: {message, stack}` | message + stack, overwritten by the next run |
-| `messages.jsonl` | `"[<id>] Agent error: <message>"`, urgent, to parent | message only, append-only |
-| `<id>.trace.jsonl` | `thread_end reason:"error" error:"<message>"` | message only, append-only |
+| `<id>.jsonl` | the wire transcript | model-facing state, no timing, no errors |
+| `<id>.trace.jsonl` | timing + outcomes | no content — you see *that* a tool ran, not what it returned |
+| `<id>.meta.json` | status, pending, `error` | last error only; overwritten by the next run |
+| `messages.jsonl` | inter-agent delivery | one line per agent error, message text only |
 
-Three records, no shared identifier beyond the thread id, no agreement on shape, and the union of them still omits most of what a diagnosis needs. That was the observation behind Bruce's "das geht sicherlich aufgeräumter und muss nicht über so viele Dateien teils redundant verteilt werden".
+Answering "why did this run fail" means opening three of them and joining by timestamp. Nothing carries a run id, so even the join is approximate — and `thread_start` fires only on a thread's first-ever run, so the endpoint and invocation data recorded there describes the *first* run of a thread that may have been resumed a dozen times against a changed profile.
 
-### What phase 0 already fixed (shipped, additive)
+Bruce's framing, which this ADR adopts:
 
-`5be7622` closed the worst of the *missing* data without touching any existing field:
+> am liebsten wäre mir ja ein langes protokoll in dem alle api aufrufe alle inhalte, der komplette chatverlauf, alle toolcalls und antworten (inkl. fehler wenn was nicht geklappt hat wie eine datei die nicht existiert etc) sowie alle serverantworten stehen. je nachdem wer die datei öffnet kann daraus die chat historie bauen oder die api logs.
 
-- `llm_call` is written on failure too (`outcome: "error"`), carrying the latency spent before failing, the endpoint, and structured detail from the client (`kind`, `url`, syscall `code`, HTTP `status`, up to 2 KiB of the server's body). Before this the trace went `turn_start` → *nothing* → `thread_end`: neither the duration nor the address survived.
-- `thread_start` records `endpoint` and an `invocation` block (cwd, profile + config layer, agent def, prompt stamp).
-- The consumers were adjusted so the new events do not degrade what they measure (`trace-stats` counts `llmErrors` separately; `status.mjs` clears the in-flight marker on an error but keeps its latency out of the hung-threshold median).
+## Decision
 
-That is the cheap half. It does not address redundancy, and it exposed a structural problem it cannot fix from inside.
+**One append-only log per thread. Every other view is a projection of it.**
 
-### The structural problem: there is no run
+`<cwd>/.claude/agnz/threads/<id>.log.jsonl` replaces `<id>.jsonl` and `<id>.trace.jsonl`.
 
-agnz's unit of execution is the **run** — one detached `lib/runner.mjs` process advancing the loop one segment, spawned per `start`/`send`/`approve`/`answer`. A thread has many runs over its life.
+### Envelope
 
-The trace has no concept of it:
+Every entry: `{seq, ts, run, turn, type, ...}`
 
-- There is no run id. Nothing in `lib/trace.mjs` or the event set (`thread_start`, `turn_start`, `llm_call`, `tool_call`, `repair`, `pause`, `compaction`, `thread_end`) identifies which run an event belongs to.
-- `thread_end` is misnamed: it fires at the end of every **run**, not at the end of the thread. A thread with eight resumes has eight `thread_end` events.
-- `thread_start` fires only on a thread's first-ever run (`firstEverRun && turn === 0`). Everything it carries is therefore recorded **once, for the first run only** — including the `endpoint` and `invocation` block phase 0 just added. Change a profile mapping and resume, and the trace still names the old endpoint. The freshly-added diagnostic is accurate exactly until the first thing worth diagnosing changes.
-- The runner's pid is on the meta, transiently, and nowhere in the trace. After the fact you cannot tell which OS process produced which events.
+- `seq` — monotonic per thread. Ordering is explicit rather than implied by file position, so a reader survives a partial write and a merger can order across sources.
+- `run` — the run id (§2). Every event belongs to exactly one run.
+- `turn` — loop turn within the run, or `null` for events outside the loop.
 
-So "what happened in the run that failed" cannot be asked. Only "what happened in this thread, ever" can, and the answer has to be re-segmented by hand at each `thread_end`.
+### 1. Event types
 
-This is also why the redundancy is hard to remove by simply deleting two of the three records: they are not redundant *copies*, they are three different scopes (thread state / delivery to the lead / event history) that happen to overlap on one string. Collapsing them needs the missing scope — the run — to exist first.
+| Type | Carries |
+|---|---|
+| `run_start` | pid, trigger (`start`/`send`/`approve`/`answer`), cwd, resolved profile (name, origin, model, endpoint), agent def, prompt ref (version, template digest), turn offset |
+| `run_end` | reason, per-run totals |
+| `message` | the wire truth: `role` (user/assistant/tool), `content`, `tool_calls`, `tool_call_id`. **This is the transcript.** |
+| `api_request` | model, params, `prefix` (digest of the frozen system prompt), `messages: {fromSeq, toSeq}` — see §3 |
+| `api_response` | latency, finishReason, usage, HTTP status |
+| `api_error` | latency, endpoint, and the client's structured detail: kind (`network`/`timeout`/`http`/`bad_json`/`no_choices`), syscall code, HTTP status, response body |
+| `tool_exec` | `refSeq` (the `message` holding the result), name, outcome (`ok`/`error`/`denied`/`blocked`/`deduped`), latency, target |
+| `harness` | what the harness did on its own: workflow block, dedup, repetition nudge, compaction, arg repair, pause |
 
-## Decision (proposed)
+### 2. The run becomes a first-class entity
 
-### 1. The run becomes a first-class entity — *non-breaking*
+A run id (uuid, minted by the runner before it claims the thread) on every event. agnz's unit of execution has always been the run — one detached `runner.mjs` process advancing the loop one segment — but nothing named it. `thread_end` was in fact a *run* end; a thread with eight resumes emitted eight of them.
 
-Introduce a run id (uuid, minted by the runner before it claims the thread) and two events:
+`run_start` records everything that can differ between runs of the same thread. This is what makes "the endpoint this run actually used" answerable, which phase 0 could not do.
 
-- `run_start` — run id, pid, trigger (`start`/`send`/`approve`/`answer`), cwd, resolved profile + origin, endpoint, model, agent def, prompt stamp, turn offset. Everything `thread_start` carries today that can change between runs, recorded **every** run.
-- `run_end` — run id, reason, per-run totals. Replaces `thread_end` in meaning.
+### 3. Content is stored once — requests reference, they do not copy
 
-`thread_start` keeps its first-run-only role for what is genuinely thread-scoped and immutable (the frozen system prompt, the tool list). Every event gains a `run` field.
+The naive reading of "alle api aufrufe alle inhalte" is to log each request body in full. That is quadratic: the request *is* the whole conversation, so turn 40 rewrites everything turns 1–39 already wrote. A 40-turn run would spend tens of MB on one conversation held ~40 times.
 
-`thread_end` stays emitted, unchanged, for one release so the dashboard adapter keeps working, then goes. That deprecation window is the only reason this item is separable from the breaking part.
+Instead, `api_request` carries **no message content at all**. It names a range:
 
-**Open:** whether `run` on every event is worth its bytes versus deriving membership from ordering between `run_start`/`run_end`. Ordering is sufficient for a well-formed file; the explicit field survives a truncated or interleaved one. Leaning explicit — these files are appended by concurrent processes.
+```json
+{"seq": 118, "type": "api_request", "run": "…", "turn": 12,
+ "model": "devstral-2:64k", "prefix": "a3f1c9d2",
+ "messages": {"fromSeq": 4, "toSeq": 117},
+ "params": {"temperature": 0.2, "maxTokens": 4096}}
+```
 
-### 2. One error record, three views — *breaking*
+Reconstruction is exact: take the `message` events in `[fromSeq, toSeq]`, prepend the system prompt named by `prefix` (`<id>.system.txt`, write-once), and you have the byte-identical request that went out. Nothing is lost, nothing is stored twice, and growth is linear.
 
-The error becomes a trace event (`error`, carrying the run id and the structured detail phase 0 introduced), and the other two stop being independent records:
+This falls out of ADR 0012: the prefix is frozen precisely so it does not change per turn, and `fromSeq` naturally expresses compaction — after a `_compact` marker the loop sends from the marker on, so `fromSeq` points at it.
 
-- `meta.error` shrinks to a pointer: `{runId, at}` plus the one-line message that `show` needs to render. It is state ("this thread is broken, here is the handle"), not history.
-- The `messages.jsonl` entry stays — it is the **delivery channel** to the lead, not a record — but references the run id instead of restating the error.
+The same rule applies everywhere. `tool_exec` does not restate the tool's output; it references the `message` that holds it. **One fact, one place** is the whole point — restating it in a second event would recreate, inside one file, exactly the redundancy this ADR exists to remove.
 
-This is the part that breaks the dashboard's `TraceAnalysisAdapter` and anything else reading `meta.error.stack`.
+### 4. What the projections are
 
-**Counter-model worth taking seriously:** leave all three, and add only the run id to each so they can be joined. Cheaper, no breakage, and the redundancy costs bytes rather than correctness. The argument against is that three writers of one fact drift — we already have the shapes disagreeing — but "drift" has not actually cost us anything yet, whereas a breaking change costs a day of dashboard work immediately. This should not be decided on tidiness.
+- **Chat history** — `type:"message"`, in `seq` order. What `buildMessages` needs.
+- **API log** — `api_request` + `api_response`/`api_error`, with §3 reconstruction for full bodies.
+- **Tool log** — `tool_exec` joined to its `message` by `refSeq`.
+- **Stats** — the existing `trace-stats` fold, over the same events.
 
-### 3. What does *not* change
+### 5. What does not move
 
-- **File-per-kind stays.** The transcript (`<id>.jsonl`), the trace (`<id>.trace.jsonl`) and the frozen prompt (`<id>.system.txt`) have different lifetimes, different write patterns and different readers. Merging them into one file would trade a clear boundary for a smaller `ls`. "Fewer files" is not the goal; "one place per fact" is.
-- **The lead still does not read any of them.** ADR 0015's fence holds. This ADR is about what the *dashboard* and a human debugging a failure can reconstruct, not about what enters the lead's context.
-- **OpenTelemetry-mappability** (ADR 0011 §6) stays a design constraint. A run maps to a span; `run` is a parent span id in all but name. Getting this right now is most of the work an exporter would otherwise need later.
+- **`meta.json`** stays: status, pending, card, runner pid. That is *state* — the current answer to "what is this thread doing" — not history. `error` shrinks to a pointer (`{run, seq}`) plus the one line `show` renders.
+- **`<id>.system.txt`** stays: write-once, large, referenced by digest from every `api_request`.
+- **`messages.jsonl`** stays: it is the inter-agent **delivery channel**, workspace-scoped and cross-thread. Not a per-thread record.
+- **The lead still reads none of these** (ADR 0015). This is for the dashboard, for `show`, and for a human debugging a failure.
+
+### 6. Events without a thread
+
+`config test` — the incident path — has no thread to log to. Workspace-scoped events (server contact, config failures, preflight) go to `<cwd>/.claude/agnz/workspace.log.jsonl`, same envelope, `run`/`turn` null. Without this the failure that motivated the ADR would still go unrecorded.
+
+### 7. Migration
+
+Switch directly, per Bruce: "wir können auch per git zurück, insofern ruhig sofort switchen."
+
+With one caveat that decision does not cover: **git reverts code, not data.** A revert would leave threads whose history exists only in a file the reverted code cannot read. So during the switch `<id>.jsonl` keeps being **written and never read** — a write-only shadow, a few lines, deleted once the log has proven itself. That is what makes the rollback real rather than notional.
+
+`<id>.trace.jsonl` gets no shadow: it is pure observability, and losing it on a revert costs diagnosis, not correctness.
+
+Old threads have no log. Readers fall back to the old pair when `<id>.log.jsonl` is absent, rather than rejecting them.
 
 ## Consequences
 
-- A failure becomes answerable in one query: *give me every event with this run id*. Today that is a manual re-segmentation of the thread's history.
-- The `endpoint`/`invocation` data phase 0 added stops being first-run-only, which is the difference between a diagnostic that is usually right and one that is right when it matters.
-- `trace-stats` can report per run rather than per thread, which is what "why was this resume slow" needs.
-- Cost: a schema migration for the dashboard, and old traces that have no run id. Old traces should degrade to one implicit run rather than being rejected.
+- A failure is answerable in one file, in order, without timestamp arithmetic across three.
+- The log is **correctness-critical** once the transcript is a projection of it: a bug in `projectMessages` breaks running threads, where before it would only have broken a report. This is the real cost of the decision and the reason for the shadow write.
+- OpenTelemetry mapping (ADR 0011 §6) gets easier, not harder: a run is a span, `run` is its id, `api_*` and `tool_exec` are child spans.
+- Retention becomes a real question. Nothing prunes these files, and this one holds content. Out of scope here — but it stops being ignorable now that a single file holds everything.
 
-## Open questions
+## Open
 
-1. **Breaking or joined?** §2 versus its counter-model. This is Bruce's call and should be made on whether the dashboard work is wanted now, not on how the file layout reads.
-2. **Does the transcript need the run id too?** It would let "which resume produced this message" be answered without timestamp arithmetic. Cheap, but it changes the message shape that `buildMessages` round-trips — needs checking that a stray field cannot reach the wire.
-3. **Retention.** Nothing prunes trace files. A long-lived thread's trace grows without bound, and this ADR adds events. Out of scope here, but it stops being ignorable once runs are individually addressable.
+1. **Redaction.** Requests are logged, so the apiKey must never enter one. Today it is safe only because requests are not logged at all. Needs an explicit deny-list and a test, not care.
+2. **Dashboard adapter.** `TraceAnalysisAdapter` reads `<id>.trace.jsonl`. It needs the projection instead. That is the dashboard project's work, and this ADR is its spec.
+3. **Size caps on tool results.** A 512 KiB Read result currently lands in the transcript verbatim and now lands in the log verbatim. Same bytes as today, but now they are also the diagnostic record — capping them costs fidelity where it was previously free.
