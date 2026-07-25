@@ -43,7 +43,7 @@ afterEach(() => {
 });
 
 function readTrace(cwd, id) {
-  const f = join(cwd, ".claude", "agnz", "threads", `${id}.trace.jsonl`);
+  const f = join(cwd, ".claude", "agnz", "threads", `${id}.log.jsonl`);
   if (!existsSync(f)) return [];
   return readFileSync(f, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
 }
@@ -198,7 +198,7 @@ test("crossing the window threshold summarizes, marks, resets, and restarts the 
   assert.equal(postCall.messages[1]._compact, undefined);
 
   // Traced with sizes.
-  const compactions = readTrace(projectCwd, thread.id).filter((e) => e.type === "compaction");
+  const compactions = readTrace(projectCwd, thread.id).filter((e) => e.type === "harness" && e.kind === "compaction");
   assert.equal(compactions.length, 1);
   assert.equal(compactions[0].outcome, "ok");
   assert.ok(compactions[0].inputChars > 0);
@@ -260,7 +260,7 @@ test("a failed summarize call degrades to no compaction and does not retry this 
 
   const history = await threadMgr.readMessages(thread.id);
   assert.equal(history.filter((m) => m._compact).length, 0, "no marker on failure");
-  const compactions = readTrace(projectCwd, thread.id).filter((e) => e.type === "compaction");
+  const compactions = readTrace(projectCwd, thread.id).filter((e) => e.type === "harness" && e.kind === "compaction");
   assert.equal(compactions.length, 1, "exactly one attempt per run after a failure");
   assert.equal(compactions[0].outcome, "error");
   // 4 calls total: turn, failed summarize, turn, final — no second summarize.

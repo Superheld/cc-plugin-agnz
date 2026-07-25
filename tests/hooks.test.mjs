@@ -47,7 +47,7 @@ function writeThread(id, meta, traceLines) {
   writeFileSync(join(ws, "threads", `${id}.meta.json`), JSON.stringify({ id, ...meta }));
   if (traceLines) {
     writeFileSync(
-      join(ws, "threads", `${id}.trace.jsonl`),
+      join(ws, "threads", `${id}.log.jsonl`),
       traceLines.map((e) => JSON.stringify(e)).join("\n") + "\n",
     );
   }
@@ -55,11 +55,11 @@ function writeThread(id, meta, traceLines) {
 
 test("readThreadSpend folds turns, cumulative tokens, and the last call's ctx", () => {
   writeThread("t1", { status: "idle" }, [
-    { ts: 1, type: "thread_start", turn: 0 },
-    { ts: 2, type: "llm_call", turn: 0, usage: { total: 120 } },
-    { ts: 3, type: "turn_start", turn: 1 },
-    { ts: 4, type: "llm_call", turn: 1, usage: { total: 140 } },
-    { ts: 5, type: "thread_end", reason: "final" },
+    { ts: 1, type: "run_start", turn: 0 },
+    { ts: 2, type: "api_response", turn: 0, usage: { total: 120 } },
+    { ts: 3, type: "api_request", turn: 1 },
+    { ts: 4, type: "api_response", turn: 1, usage: { total: 140 } },
+    { ts: 5, type: "run_end", reason: "final" },
   ]);
   // lastCtx is the LAST call's total (the real context size a resume re-sends),
   // NOT the cumulative sum — the sum re-counts the transcript every turn.
@@ -73,8 +73,8 @@ test("readThreadSpend is a safe zero for a thread with no trace", () => {
 
 test("readThreadMetas attaches spend and skips stopped threads", () => {
   writeThread("t1", { status: "running", name: "dev" }, [
-    { ts: 1, type: "thread_start", turn: 0 },
-    { ts: 2, type: "llm_call", turn: 0, usage: { total: 50 } },
+    { ts: 1, type: "run_start", turn: 0 },
+    { ts: 2, type: "api_response", turn: 0, usage: { total: 50 } },
   ]);
   writeThread("t2", { status: "stopped", name: "old" }, null);
 
@@ -86,11 +86,11 @@ test("readThreadMetas attaches spend and skips stopped threads", () => {
 
 test("readLastActivity returns the most recent tool_call with name/target/ts", () => {
   writeThread("t1", { status: "running" }, [
-    { ts: 1, type: "thread_start", turn: 0 },
-    { ts: 2, type: "tool_call", turn: 0, name: "Read", target: "lib/a.mjs", outcome: "ok" },
-    { ts: 3, type: "llm_call", turn: 0, usage: { total: 50 } },
-    { ts: 4, type: "tool_call", turn: 1, name: "Write", target: "lib/b.mjs", outcome: "ok" },
-    { ts: 5, type: "llm_call", turn: 1, usage: { total: 60 } },
+    { ts: 1, type: "run_start", turn: 0 },
+    { ts: 2, type: "tool_exec", turn: 0, name: "Read", target: "lib/a.mjs", outcome: "ok" },
+    { ts: 3, type: "api_response", turn: 0, usage: { total: 50 } },
+    { ts: 4, type: "tool_exec", turn: 1, name: "Write", target: "lib/b.mjs", outcome: "ok" },
+    { ts: 5, type: "api_response", turn: 1, usage: { total: 60 } },
   ]);
   assert.deepEqual(readLastActivity(ws, "t1"), {
     name: "Write",
@@ -105,9 +105,9 @@ test("readLastActivity tail-reads a large trace (partial first line is harmless)
   // line is a fragment — the backwards scan must still find the last call.
   const lines = [];
   for (let i = 0; i < 500; i++) {
-    lines.push({ ts: i, type: "tool_call", turn: i, name: "Read", target: `pad/${"x".repeat(40)}/${i}.txt`, outcome: "ok" });
+    lines.push({ ts: i, type: "tool_exec", turn: i, name: "Read", target: `pad/${"x".repeat(40)}/${i}.txt`, outcome: "ok" });
   }
-  lines.push({ ts: 9999, type: "tool_call", turn: 500, name: "Edit", target: "lib/final.mjs", outcome: "ok" });
+  lines.push({ ts: 9999, type: "tool_exec", turn: 500, name: "Edit", target: "lib/final.mjs", outcome: "ok" });
   writeThread("t1", { status: "running" }, lines);
   const a = readLastActivity(ws, "t1");
   assert.equal(a.name, "Edit");
@@ -119,16 +119,16 @@ test("readLastActivity is null without a trace or without any tool_call", () => 
   writeThread("t1", { status: "running" }, null);
   assert.equal(readLastActivity(ws, "t1"), null);
   writeThread("t2", { status: "running" }, [
-    { ts: 1, type: "thread_start", turn: 0 },
-    { ts: 2, type: "llm_call", turn: 0, usage: { total: 10 } },
+    { ts: 1, type: "run_start", turn: 0 },
+    { ts: 2, type: "api_response", turn: 0, usage: { total: 10 } },
   ]);
   assert.equal(readLastActivity(ws, "t2"), null);
 });
 
 test("readThreadMetas attaches lastActivity only to running threads", () => {
   const trace = [
-    { ts: 1, type: "thread_start", turn: 0 },
-    { ts: 2, type: "tool_call", turn: 0, name: "Bash", target: "node --test", outcome: "ok" },
+    { ts: 1, type: "run_start", turn: 0 },
+    { ts: 2, type: "tool_exec", turn: 0, name: "Bash", target: "node --test", outcome: "ok" },
   ];
   writeThread("t1", { status: "running", name: "dev" }, trace);
   writeThread("t2", { status: "idle", name: "done" }, trace);
@@ -354,8 +354,8 @@ test("readThreadMetas reads a card and short-circuits the trace fold", () => {
 
 test("readThreadMetas falls back to the trace fold for a legacy (card-less) meta", () => {
   writeThread("t1", { status: "idle", name: "dev" }, [
-    { ts: 1, type: "thread_start", turn: 0 },
-    { ts: 2, type: "llm_call", turn: 0, usage: { total: 70 } },
+    { ts: 1, type: "run_start", turn: 0 },
+    { ts: 2, type: "api_response", turn: 0, usage: { total: 70 } },
   ]);
   const metas = readThreadMetas(ws);
   assert.deepEqual(metas[0].spend, { turns: 1, tokens: 70, lastCtx: 70 });
@@ -378,7 +378,7 @@ test("isFencedTranscriptRead blocks a Read of a thread transcript", () => {
 
 test("isFencedTranscriptRead blocks a Read of a thread trace", () => {
   assert.equal(
-    isFencedTranscriptRead("Read", "/home/u/proj/.claude/agnz/threads/abc123.trace.jsonl"),
+    isFencedTranscriptRead("Read", "/home/u/proj/.claude/agnz/threads/abc123.log.jsonl"),
     true,
   );
 });
@@ -640,12 +640,12 @@ test("readRunState derives in-flight LLM call and median from the tail", () => {
   const MIN = 60_000;
   const NOW = 2_000_000_000_000;
   writeThread("t1", { status: "running" }, [
-    { ts: NOW - 30 * MIN, type: "turn_start", turn: 0 },
-    { ts: NOW - 28 * MIN, type: "llm_call", turn: 0, latencyMs: 2 * MIN },
-    { ts: NOW - 27 * MIN, type: "tool_call", turn: 0, name: "Read", target: "a.py", outcome: "ok" },
-    { ts: NOW - 26 * MIN, type: "turn_start", turn: 1 },
-    { ts: NOW - 23 * MIN, type: "llm_call", turn: 1, latencyMs: 3 * MIN },
-    { ts: NOW - 22 * MIN, type: "turn_start", turn: 2 }, // never returned
+    { ts: NOW - 30 * MIN, type: "api_request", turn: 0 },
+    { ts: NOW - 28 * MIN, type: "api_response", turn: 0, latencyMs: 2 * MIN },
+    { ts: NOW - 27 * MIN, type: "tool_exec", turn: 0, name: "Read", target: "a.py", outcome: "ok" },
+    { ts: NOW - 26 * MIN, type: "api_request", turn: 1 },
+    { ts: NOW - 23 * MIN, type: "api_response", turn: 1, latencyMs: 3 * MIN },
+    { ts: NOW - 22 * MIN, type: "api_request", turn: 2 }, // never returned
   ]);
   const rs = readRunState(ws, "t1", NOW);
   assert.equal(rs.llmInFlightMs, 22 * MIN);

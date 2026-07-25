@@ -394,7 +394,7 @@ function addressesParent(to) {
  * Fence decision for the PreToolUse hook (ADR 0015 §4): should the lead's Read
  * of this path be blocked? True only for a `Read` of an agnz thread transcript
  * or trace — a path under `.claude/agnz/threads/` ending in `.jsonl`. This
- * covers both `<id>.jsonl` (transcript) and `<id>.trace.jsonl` (trace); a
+ * covers the unified `<id>.log.jsonl` (ADR 0020) and the legacy pair; a
  * single read of either can carry verbatim tool results up to 512 KiB and blow
  * the very context budget agnz exists to protect.
  *
@@ -491,7 +491,7 @@ export function decideInjection({ unreadCount, changed }) {
 }
 
 /**
- * Fold a thread's trace.jsonl into a tiny spend summary (ADR 0011 §3):
+ * Fold a thread's log into a tiny spend summary (ADR 0011 §3, ADR 0020):
  * turns, cumulative tokens, and `lastCtx` — the total of the LAST llm_call,
  * i.e. the thread's real context size, which is what a resume re-sends.
  * The cumulative sum re-counts the whole history every turn (each prompt
@@ -502,7 +502,7 @@ export function decideInjection({ unreadCount, changed }) {
  * Missing/garbled trace → { turns: 0, tokens: 0, lastCtx: null }.
  */
 export function readThreadSpend(wsDir, threadId) {
-  const path = join(wsDir, "threads", `${threadId}.trace.jsonl`);
+  const path = join(wsDir, "threads", `${threadId}.log.jsonl`);
   const empty = { turns: 0, tokens: 0, lastCtx: null };
   if (!existsSync(path)) return empty;
   let raw;
@@ -522,8 +522,8 @@ export function readThreadSpend(wsDir, threadId) {
     } catch {
       continue;
     }
-    if (e.type === "thread_start" || e.type === "turn_start") turns += 1;
-    else if (e.type === "llm_call" && e.usage && typeof e.usage.total === "number") {
+    if (e.type === "run_start" || e.type === "api_request") turns += 1;
+    else if (e.type === "api_response" && e.usage && typeof e.usage.total === "number") {
       tokens += e.usage.total;
       lastCtx = e.usage.total;
     }
@@ -532,7 +532,7 @@ export function readThreadSpend(wsDir, threadId) {
 }
 
 /**
- * Last tool activity of a thread, from the tail of its trace.jsonl: the most
+ * Last tool activity of a thread, from the tail of its log: the most
  * recent tool_call event's { name, target, ts, outcome }. This is what makes a
  * long-running thread legible at a glance ("last: Write lib/foo.mjs 12s ago" =
  * alive and working; a stale timestamp = probably hung). Tail-read only (last
@@ -561,7 +561,7 @@ const HUNG_MEDIAN_FACTOR = 10;
  */
 export function readRunState(wsDir, threadId, now = Date.now()) {
   const none = { lastAction: null, llmInFlightMs: null, medianLlmMs: null };
-  const path = join(wsDir, "threads", `${threadId}.trace.jsonl`);
+  const path = join(wsDir, "threads", `${threadId}.log.jsonl`);
   let size;
   try {
     size = statSync(path).size;
@@ -597,16 +597,16 @@ export function readRunState(wsDir, threadId, now = Date.now()) {
       continue; // partial or garbled line (tail may cut mid-line)
     }
     if (!e || typeof e.type !== "string") continue;
-    if (e.type === "tool_call" && typeof e.name === "string") {
+    if (e.type === "tool_exec" && typeof e.name === "string") {
       lastAction = {
         name: e.name,
         target: typeof e.target === "string" ? e.target : null,
         ts: typeof e.ts === "number" ? e.ts : null,
         outcome: typeof e.outcome === "string" ? e.outcome : null,
       };
-    } else if (e.type === "turn_start" || e.type === "thread_start") {
+    } else if (e.type === "api_request" || e.type === "run_start") {
       pendingStartTs = typeof e.ts === "number" ? e.ts : null;
-    } else if (e.type === "llm_call") {
+    } else if (e.type === "api_response") {
       pendingStartTs = null;
       if (typeof e.latencyMs === "number") latencies.push(e.latencyMs);
     }
@@ -648,7 +648,7 @@ export function isListedThread(status) {
  * present it carries turns/tokens/ctxTokens/task directly, so we read it as a
  * plain field and SKIP the trace fold entirely — even with withSpend:true, the
  * fold is what we are trying to avoid. Legacy threads (no card) fall back to
- * folding trace.jsonl, with ctxTokens/task null.
+ * folding the log, with ctxTokens/task null.
  */
 export function readThreadMetas(wsDir, { withSpend = true } = {}) {
   const threadsDir = join(wsDir, "threads");
@@ -660,7 +660,7 @@ export function readThreadMetas(wsDir, { withSpend = true } = {}) {
         if (!isListedThread(meta.status)) return [];
         const card = meta.card || null;
         // Card path: cheap meta read, no trace fold. Legacy path: fold
-        // trace.jsonl (the expensive part — a real workspace carries hundreds of
+        // the log (the expensive part — a real workspace carries hundreds of
         // KB of traces), and only when the caller actually needs spend.
         const spend = card
           ? { turns: card.turns || 0, tokens: card.tokens || 0 }
