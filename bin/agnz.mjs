@@ -44,6 +44,7 @@ import { publish } from "../lib/event-bus.mjs";
 import { PLUGIN_ROOT } from "../lib/orchestrate.mjs";
 import { readPluginVersion } from "../lib/plugin-version.mjs";
 import { promptFingerprint } from "../lib/prompts.mjs";
+import { appendWorkspaceLog } from "../lib/run-log.mjs";
 import { loadConfig, updateConfigLayer, normaliseProfile } from "../lib/config.mjs";
 import { resolveUserDir, resolveProjectDir } from "../lib/data-dir.mjs";
 import { listModels } from "../lib/llm/openai-compatible.mjs";
@@ -742,7 +743,17 @@ async function main() {
           const target = name || mappings._default?.profile;
           const p = target ? profiles[target] : null;
           if (!p) throw new Error(`no such profile '${target || "(default)"}'`);
+          const started = Date.now();
           const models = await listModels({ baseUrl: p.baseUrl, apiKey: p.apiKey });
+          await appendWorkspaceLog(cwd, {
+            type: "server_contact",
+            verb: "config test",
+            profile: p.name,
+            endpoint: p.baseUrl,
+            outcome: "ok",
+            latencyMs: Date.now() - started,
+            seesConfiguredModel: Boolean(p.model && models.includes(p.model)),
+          });
           out({
             ok: true,
             name: p.name,
@@ -751,6 +762,17 @@ async function main() {
             seesConfiguredModel: Boolean(p.model && models.includes(p.model)),
           });
         } catch (err) {
+          // ADR 0020 §6. This catch is the incident: it used to print to
+          // stderr and exit, so the one command you run *because* the model is
+          // not answering was the only one with server contact that recorded
+          // nothing. An EHOSTUNREACH reached the user and existed in no file
+          // on the machine.
+          await appendWorkspaceLog(cwd, {
+            type: "server_contact",
+            verb: "config test",
+            outcome: "error",
+            error: { message: err.message, ...(err.detail ? { detail: err.detail } : {}) },
+          });
           fail(err.message);
         }
         return;
