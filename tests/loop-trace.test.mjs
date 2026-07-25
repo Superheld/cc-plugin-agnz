@@ -220,3 +220,80 @@ test("a thread that hits max_turns emits a max_turns thread_end", async () => {
   assert.equal(ends[0].reason, "max_turns");
   assert.equal(ends[0].turns, 2);
 });
+
+// --- diagnosing a run that never reached the model --------------------------
+
+test("thread_start records the endpoint and how the run was wired up", async () => {
+  const threadMgr = createThreadManager();
+  const thread = await threadMgr.createThread({
+    cwd: projectCwd,
+    name: "dev",
+    agentDef: { name: "dev", tools: ["Read"] },
+  });
+  const sandbox = createSandbox({ root: projectCwd, policy: { Read: "allow" } });
+
+  await runThread({
+    thread,
+    threadMgr,
+    sandbox,
+    registry: createRegistry(),
+    profile: {
+      baseUrl: "http://192.168.0.9:11434/v1",
+      apiKey: "secret-value",
+      model: "fake",
+      name: "lanbox",
+      origin: "user",
+    },
+    userMessage: "hi",
+    chat: fakeChat([{ message: { role: "assistant", content: "done" } }]),
+  });
+
+  const trace = await waitForTrace(projectCwd, thread.id, (t) =>
+    t.some((e) => e.type === "thread_start"));
+  const start = trace.find((e) => e.type === "thread_start");
+  assert.equal(start.endpoint, "http://192.168.0.9:11434/v1");
+  assert.equal(start.invocation.profile, "lanbox");
+  assert.equal(start.invocation.profileOrigin, "user");
+  assert.equal(start.invocation.agentDef, "dev");
+  assert.equal(start.invocation.cwd, projectCwd);
+  assert.doesNotMatch(JSON.stringify(start), /secret-value/, "the api key never reaches the trace");
+});
+
+test("a failed LLM call is traced as llm_call outcome=error, not as a gap", async () => {
+  const threadMgr = createThreadManager();
+  const thread = await threadMgr.createThread({
+    cwd: projectCwd,
+    name: "dev",
+    agentDef: { name: "dev", tools: ["Read"] },
+  });
+  const sandbox = createSandbox({ root: projectCwd, policy: { Read: "allow" } });
+
+  // What an unreachable LAN box actually throws, detail and all.
+  const unreachable = async () => {
+    const err = new Error("llm: request to http://192.168.0.9:11434/v1 failed: connect EHOSTUNREACH");
+    err.detail = { kind: "network", url: "http://192.168.0.9:11434/v1", code: "EHOSTUNREACH" };
+    throw err;
+  };
+
+  await assert.rejects(
+    runThread({
+      thread,
+      threadMgr,
+      sandbox,
+      registry: createRegistry(),
+      profile: { baseUrl: "http://192.168.0.9:11434/v1", model: "fake", name: "lanbox" },
+      userMessage: "hi",
+      chat: unreachable,
+    }),
+    /EHOSTUNREACH/,
+  );
+
+  const trace = await waitForTrace(projectCwd, thread.id, (t) =>
+    t.some((e) => e.type === "thread_end"));
+  const calls = trace.filter((e) => e.type === "llm_call");
+  assert.equal(calls.length, 1, "the failed call is on the timeline, not missing from it");
+  assert.equal(calls[0].outcome, "error");
+  assert.equal(calls[0].endpoint, "http://192.168.0.9:11434/v1");
+  assert.equal(calls[0].error.detail.code, "EHOSTUNREACH");
+  assert.ok(typeof calls[0].latencyMs === "number", "how long it tried before failing");
+});
