@@ -174,3 +174,70 @@ test("workspace-scoped events have a home of their own", async () => {
   assert.equal(entries[0].detail.code, "EHOSTUNREACH");
   assert.equal(entries[0].run, null, "workspace events belong to no run");
 });
+
+// --- the loop actually writes it -------------------------------------------
+
+test("a real run records its messages, its API calls and its boundaries", async () => {
+  const { createThreadManager } = await import("../lib/threads.mjs");
+  const { createSandbox } = await import("../lib/sandbox.mjs");
+  const { createRegistry } = await import("../lib/tools/registry.mjs");
+  const { runThread } = await import("../lib/loop.mjs");
+  const { fakeChat, toolCall, finalMessage } = await import("./_fake-llm.mjs");
+  const { writeFileSync } = await import("node:fs");
+
+  const userDir = mkdtempSync(join(tmpdir(), "agnz-runlog-user-"));
+  process.env.AGNZ_DATA_DIR = userDir;
+  writeFileSync(resolve(cwd, "data.txt"), "payload");
+
+  try {
+    const threadMgr = createThreadManager();
+    const thread = await threadMgr.createThread({
+      cwd,
+      name: "dev",
+      agentDef: { name: "dev", tools: ["Read"] },
+    });
+    await runThread({
+      thread,
+      threadMgr,
+      sandbox: createSandbox({ root: cwd, policy: { Read: "allow" } }),
+      registry: createRegistry(),
+      profile: { baseUrl: "http://192.168.0.9:11434/v1", model: "fake", name: "lanbox" },
+      userMessage: "read the file",
+      chat: fakeChat([toolCall("c1", "Read", { path: "data.txt" }), finalMessage("done")]),
+    });
+
+    const entries = await readThreadLog(cwd, thread.id);
+    const types = entries.map((e) => e.type);
+    assert.ok(types.includes("run_start"), "the run announces itself");
+    assert.ok(types.includes("run_end"), "and closes itself");
+    assert.ok(types.filter((t) => t === "api_request").length >= 2);
+    assert.ok(types.filter((t) => t === "api_response").length >= 2);
+
+    // Every entry belongs to exactly one run.
+    const runs = new Set(entries.map((e) => e.run));
+    assert.equal(runs.size, 1, "one run, one id on every entry");
+
+    // The conversation is in there, and the requests do not duplicate it.
+    const msgs = projectMessages(entries);
+    assert.equal(msgs[0].role, "user");
+    assert.equal(msgs[0].content, "read the file");
+    assert.ok(msgs.some((m) => m.role === "tool"), "tool results are part of the history");
+    assert.equal(msgs[msgs.length - 1].content, "done");
+
+    const req = entries.find((e) => e.type === "api_request");
+    assert.doesNotMatch(JSON.stringify(req), /read the file/, "requests name a range, not content");
+
+    // The last request replays to exactly what the model was sent.
+    const lastReq = entries.filter((e) => e.type === "api_request").pop();
+    const replayed = reconstructRequest(entries, lastReq);
+    assert.equal(replayed[0].content, "read the file");
+    assert.ok(replayed.length >= 3, "user + assistant tool_calls + tool result");
+
+    // The shadow transcript is still written, so a revert finds its data.
+    const shadow = await threadMgr.readMessages(thread.id);
+    assert.equal(shadow.length, msgs.length, "shadow and log hold the same conversation");
+  } finally {
+    delete process.env.AGNZ_DATA_DIR;
+    rmSync(userDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});
