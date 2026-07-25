@@ -39,16 +39,19 @@ afterEach(() => {
   rmSync(userDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
+// The conversation now comes out of the one log (ADR 0020).
 function readTranscript(cwd, id) {
-  const f = join(cwd, ".claude", "agnz", "threads", `${id}.jsonl`);
+  const f = join(cwd, ".claude", "agnz", "threads", `${id}.log.jsonl`);
   if (!existsSync(f)) return [];
-  return readFileSync(f, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  const entries = readFileSync(f, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  return entries.filter((e) => e.type === "message");
 }
 
+// The frozen prefix is stored once, in its own write-once file, and referenced
+// from the log by digest — it is no longer copied into an event.
 function frozenPrompt(cwd, id) {
-  const f = join(cwd, ".claude", "agnz", "threads", `${id}.trace.jsonl`);
-  const events = readFileSync(f, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
-  return events.find((e) => e.type === "thread_start")?.systemPrompt ?? "";
+  const f = join(cwd, ".claude", "agnz", "threads", `${id}.system.txt`);
+  return existsSync(f) ? readFileSync(f, "utf8") : "";
 }
 
 test("the agent is told its remaining turns at the budget marks", async () => {

@@ -41,7 +41,7 @@ afterEach(() => {
 });
 
 function readTrace(cwd, id) {
-  const f = join(cwd, ".claude", "agnz", "threads", `${id}.trace.jsonl`);
+  const f = join(cwd, ".claude", "agnz", "threads", `${id}.log.jsonl`);
   if (!existsSync(f)) return [];
   return readFileSync(f, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
 }
@@ -62,18 +62,24 @@ test("system prompt is byte-stable across turns and excludes subdir CLAUDE.md", 
   const outcome = await runThread({ thread, threadMgr, sandbox, registry, profile, chat, userMessage: "read it" });
   assert.equal(outcome.status, "final");
 
-  // thread_start carries the one canonical system-prompt copy; turn_start no
-  // longer duplicates it (the prefix is frozen — see ADR 0012 phase 1 — so a
-  // per-turn copy would just be identical ballast, ADR 0011 amendment).
-  const trace = readTrace(projectCwd, thread.id);
-  const starts = trace.filter((e) => e.type === "thread_start");
-  const turnStarts = trace.filter((e) => e.type === "turn_start");
-  assert.equal(starts.length, 1, "expected exactly one thread_start");
-  assert.ok(turnStarts.length >= 1, "expected at least one turn_start");
-  for (const e of turnStarts) assert.equal(e.systemPrompt, undefined, "turn_start must not carry systemPrompt");
+  // The frozen prefix is stored exactly once, in its own write-once file, and
+  // every request references it by digest (ADR 0020 §3). Under the old two-file
+  // scheme this was "one thread_start carries it, turn_start must not repeat
+  // it"; the guarantee is the same and now structural — there is no event a
+  // copy could hide in.
+  const log = readTrace(projectCwd, thread.id);
+  const requests = log.filter((e) => e.type === "api_request");
+  assert.ok(requests.length >= 1, "expected at least one api_request");
+  const prefixes = new Set(requests.map((e) => e.prefix));
+  assert.equal(prefixes.size, 1, "every turn references the same frozen prefix");
+  for (const e of log) {
+    assert.doesNotMatch(JSON.stringify(e), /You are '.*coding sub-agent/, "no event copies the prompt");
+  }
 
   // The subdir CLAUDE.md must NOT be in the (frozen) system prompt...
-  assert.doesNotMatch(starts[0].systemPrompt, /SUBDIR RULES/);
+  const frozen = readFileSync(
+    join(projectCwd, ".claude", "agnz", "threads", `${thread.id}.system.txt`), "utf8");
+  assert.doesNotMatch(frozen, /SUBDIR RULES/);
 
   // ...it must be injected once into history as a user message instead.
   const history = await threadMgr.readMessages(thread.id);

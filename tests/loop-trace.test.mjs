@@ -40,9 +40,9 @@ afterEach(() => {
   rmSync(userDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
-/** Read and parse the thread's trace.jsonl into an array of entries. */
+/** Read and parse the thread's unified log into an array of entries. */
 function readTrace(cwd, threadId) {
-  const file = join(cwd, ".claude", "agnz", "threads", `${threadId}.trace.jsonl`);
+  const file = join(cwd, ".claude", "agnz", "threads", `${threadId}.log.jsonl`);
   if (!existsSync(file)) return [];
   return readFileSync(file, "utf8")
     .split("\n")
@@ -60,7 +60,7 @@ function readTrace(cwd, threadId) {
  * rare post-git-merge flake (see docs/next.md → Watch). Polling exits as
  * soon as the predicate matches, so a large ceiling costs nothing when green.
  */
-async function waitForTrace(cwd, threadId, predicate, timeoutMs = 10000) {
+async function waitForLog(cwd, threadId, predicate, timeoutMs = 10000) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const trace = readTrace(cwd, threadId);
@@ -134,29 +134,25 @@ test("a complete run emits thread_start, llm_call, tool_call, thread_end", async
 
   assert.equal(outcome.status, "final");
 
-  const trace = await waitForTrace(projectCwd, thread.id, (t) => t.some((e) => e.type === "thread_end"));
+  const trace = await waitForLog(projectCwd, thread.id, (t) => t.some((e) => e.type === "run_end"));
   const byType = (t) => trace.filter((e) => e.type === t);
 
-  // Exactly one thread_start, carrying the enriched metadata (incl. the one
-  // canonical systemPrompt copy).
-  const starts = byType("thread_start");
-  assert.equal(starts.length, 1, "exactly one thread_start");
+  // Exactly one run_start, carrying how the run was wired up. It does NOT
+  // carry the system prompt: that lives once in <id>.system.txt and is
+  // referenced by digest from every request (ADR 0020 §3).
+  const starts = byType("run_start");
+  assert.equal(starts.length, 1, "exactly one run_start");
   assert.equal(starts[0].model, "fake-model");
-  assert.equal(starts[0].agent, "tracer");
+  assert.equal(starts[0].agentDef, "tracer");
   assert.equal(starts[0].profile, "fake-profile");
   assert.ok(Array.isArray(starts[0].tools) && starts[0].tools.length > 0);
-  assert.equal(typeof starts[0].systemPrompt, "string");
-  assert.ok(starts[0].systemPrompt.length > 0);
+  assert.doesNotMatch(JSON.stringify(starts[0]), /coding sub-agent/, "no prompt copy");
 
-  // turn_start must NOT duplicate the (frozen, byte-identical) system prompt
-  // into every trace line — ADR 0012 phase 1 made that guaranteed ballast.
-  const turnStarts = byType("turn_start");
-  assert.ok(turnStarts.length >= 1, "expected at least one turn_start");
-  for (const t of turnStarts) assert.equal(t.systemPrompt, undefined);
-
-  // One llm_call per turn, with latency and normalized usage.
-  const llmCalls = byType("llm_call");
-  assert.equal(llmCalls.length, 2, "two llm_call events");
+  // One request/response pair per turn, with latency and normalized usage.
+  const requests = byType("api_request");
+  assert.equal(requests.length, 2, "two api_request events");
+  const llmCalls = byType("api_response");
+  assert.equal(llmCalls.length, 2, "two api_response events");
   for (const c of llmCalls) {
     assert.equal(typeof c.latencyMs, "number");
     assert.equal(c.finishReason, "stop");
@@ -164,8 +160,8 @@ test("a complete run emits thread_start, llm_call, tool_call, thread_end", async
   assert.deepEqual(llmCalls[0].usage, { prompt: 10, completion: 4, total: 14 });
 
   // The tool ran and was recorded ok with a latency.
-  const toolCalls = byType("tool_call");
-  assert.equal(toolCalls.length, 1, "one tool_call event");
+  const toolCalls = byType("tool_exec");
+  assert.equal(toolCalls.length, 1, "one tool_exec event");
   assert.equal(toolCalls[0].name, "LS");
   assert.equal(toolCalls[0].outcome, "ok");
   assert.equal(typeof toolCalls[0].latencyMs, "number");
@@ -174,10 +170,9 @@ test("a complete run emits thread_start, llm_call, tool_call, thread_end", async
   assert.equal(toolCalls[0].target, ".");
 
   // Exactly one thread_end with the final reason and accumulated totals.
-  const ends = byType("thread_end");
-  assert.equal(ends.length, 1, "exactly one thread_end");
+  const ends = byType("run_end");
+  assert.equal(ends.length, 1, "exactly one run_end");
   assert.equal(ends[0].reason, "final");
-  assert.equal(ends[0].turns, 2);
   assert.equal(ends[0].totals.llmCalls, 2);
   assert.equal(ends[0].totals.toolCalls, 1);
   assert.equal(ends[0].totals.totalTokens, 40); // 14 + 26
@@ -214,11 +209,10 @@ test("a thread that hits max_turns emits a max_turns thread_end", async () => {
   });
 
   assert.equal(outcome.status, "max_turns");
-  const trace = await waitForTrace(projectCwd, thread.id, (t) => t.some((e) => e.type === "thread_end"));
-  const ends = trace.filter((e) => e.type === "thread_end");
+  const trace = await waitForLog(projectCwd, thread.id, (t) => t.some((e) => e.type === "run_end"));
+  const ends = trace.filter((e) => e.type === "run_end");
   assert.equal(ends.length, 1);
   assert.equal(ends[0].reason, "max_turns");
-  assert.equal(ends[0].turns, 2);
 });
 
 // --- diagnosing a run that never reached the model --------------------------
@@ -248,14 +242,14 @@ test("thread_start records the endpoint and how the run was wired up", async () 
     chat: fakeChat([{ message: { role: "assistant", content: "done" } }]),
   });
 
-  const trace = await waitForTrace(projectCwd, thread.id, (t) =>
-    t.some((e) => e.type === "thread_start"));
-  const start = trace.find((e) => e.type === "thread_start");
+  const trace = await waitForLog(projectCwd, thread.id, (t) =>
+    t.some((e) => e.type === "run_start"));
+  const start = trace.find((e) => e.type === "run_start");
   assert.equal(start.endpoint, "http://192.168.0.9:11434/v1");
-  assert.equal(start.invocation.profile, "lanbox");
-  assert.equal(start.invocation.profileOrigin, "user");
-  assert.equal(start.invocation.agentDef, "dev");
-  assert.equal(start.invocation.cwd, projectCwd);
+  assert.equal(start.profile, "lanbox");
+  assert.equal(start.profileOrigin, "user");
+  assert.equal(start.agentDef, "dev");
+  assert.equal(start.cwd, projectCwd);
   assert.doesNotMatch(JSON.stringify(start), /secret-value/, "the api key never reaches the trace");
 });
 
@@ -288,12 +282,14 @@ test("a failed LLM call is traced as llm_call outcome=error, not as a gap", asyn
     /EHOSTUNREACH/,
   );
 
-  const trace = await waitForTrace(projectCwd, thread.id, (t) =>
-    t.some((e) => e.type === "thread_end"));
-  const calls = trace.filter((e) => e.type === "llm_call");
+  const trace = await waitForLog(projectCwd, thread.id, (t) =>
+    t.some((e) => e.type === "run_end"));
+  const calls = trace.filter((e) => e.type === "api_error");
   assert.equal(calls.length, 1, "the failed call is on the timeline, not missing from it");
-  assert.equal(calls[0].outcome, "error");
   assert.equal(calls[0].endpoint, "http://192.168.0.9:11434/v1");
-  assert.equal(calls[0].error.detail.code, "EHOSTUNREACH");
+  assert.equal(calls[0].detail.code, "EHOSTUNREACH");
   assert.ok(typeof calls[0].latencyMs === "number", "how long it tried before failing");
+  // ...and the request that went unanswered is still there, so the pair reads
+  // as "asked, never answered" instead of as a gap.
+  assert.equal(trace.filter((e) => e.type === "api_request").length, 1);
 });

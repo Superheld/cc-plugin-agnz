@@ -33,13 +33,14 @@ afterEach(() => {
 /** Sample trace for one finished thread: 2 turns, 1 tool call, 1 repair. */
 function sampleTrace() {
   return [
-    { ts: 1000, type: "thread_start", turn: 0, agent: "dev", model: "devstral", profile: "lm", maxTurns: 40 },
-    { ts: 1010, type: "llm_call", turn: 0, latencyMs: 500, finishReason: "tool_calls", usage: { prompt: 100, completion: 20, total: 120 } },
-    { ts: 1020, type: "repair", turn: 0, tool: "Edit", recovered: true },
-    { ts: 1030, type: "tool_call", turn: 0, name: "Edit", latencyMs: 5, outcome: "ok" },
-    { ts: 1500, type: "turn_start", turn: 1 },
-    { ts: 1510, type: "llm_call", turn: 1, latencyMs: 300, finishReason: "stop", usage: { prompt: 130, completion: 10, total: 140 } },
-    { ts: 1520, type: "thread_end", reason: "final", turns: 2, totals: {} },
+    { ts: 1000, type: "run_start", turn: 0, agentDef: "dev", model: "devstral", profile: "lm", maxTurns: 40 },
+    { ts: 1005, type: "api_request", turn: 0 },
+    { ts: 1010, type: "api_response", turn: 0, latencyMs: 500, finishReason: "tool_calls", usage: { prompt: 100, completion: 20, total: 120 } },
+    { ts: 1020, type: "harness", kind: "repair", turn: 0, tool: "Edit", recovered: true },
+    { ts: 1030, type: "tool_exec", turn: 0, name: "Edit", latencyMs: 5, outcome: "ok" },
+    { ts: 1500, type: "api_request", turn: 1 },
+    { ts: 1510, type: "api_response", turn: 1, latencyMs: 300, finishReason: "stop", usage: { prompt: 130, completion: 10, total: 140 } },
+    { ts: 1520, type: "run_end", reason: "final", turns: 2, totals: {} },
   ];
 }
 
@@ -51,7 +52,7 @@ test("aggregateTrace folds events into a correct summary", () => {
   assert.equal(s.profile, "lm");
   assert.equal(s.maxTurns, 40);
 
-  // 1 thread_start + 1 turn_start = 2 turns, matching the 2 llm_calls.
+  // Turns are counted from api_request: two asked, two answered.
   assert.equal(s.turns, 2);
   assert.equal(s.llmCalls, 2);
   assert.equal(s.llmLatencyMs, 800);
@@ -83,9 +84,9 @@ test("aggregateTrace handles an empty/running thread without throwing", () => {
 
 test("tool outcomes are counted by category", () => {
   const s = aggregateTrace([
-    { ts: 1, type: "tool_call", name: "Bash", outcome: "ok" },
-    { ts: 2, type: "tool_call", name: "Bash", outcome: "error" },
-    { ts: 3, type: "tool_call", name: "Write", outcome: "denied" },
+    { ts: 1, type: "tool_exec", name: "Bash", outcome: "ok" },
+    { ts: 2, type: "tool_exec", name: "Bash", outcome: "error" },
+    { ts: 3, type: "tool_exec", name: "Write", outcome: "denied" },
   ]);
   assert.equal(s.toolCalls.total, 3);
   assert.equal(s.toolCalls.ok, 1);
@@ -96,17 +97,17 @@ test("tool outcomes are counted by category", () => {
 
 test("filesTouched folds successful mutations into a per-path diff pointer", () => {
   const entries = [
-    { type: "tool_call", name: "Read", target: "lib/a.mjs", outcome: "ok" },
-    { type: "tool_call", name: "Write", target: "lib/a.mjs", outcome: "ok" },
-    { type: "tool_call", name: "Edit", target: "lib/a.mjs", outcome: "ok" },
-    { type: "tool_call", name: "Edit", target: "lib/a.mjs", outcome: "ok" },
-    { type: "tool_call", name: "Edit", target: "lib/b.mjs", outcome: "ok" },
+    { type: "tool_exec", name: "Read", target: "lib/a.mjs", outcome: "ok" },
+    { type: "tool_exec", name: "Write", target: "lib/a.mjs", outcome: "ok" },
+    { type: "tool_exec", name: "Edit", target: "lib/a.mjs", outcome: "ok" },
+    { type: "tool_exec", name: "Edit", target: "lib/a.mjs", outcome: "ok" },
+    { type: "tool_exec", name: "Edit", target: "lib/b.mjs", outcome: "ok" },
     // Failed/blocked mutations touched nothing.
-    { type: "tool_call", name: "Write", target: "lib/c.mjs", outcome: "blocked" },
-    { type: "tool_call", name: "Edit", target: "lib/d.mjs", outcome: "error" },
+    { type: "tool_exec", name: "Write", target: "lib/c.mjs", outcome: "blocked" },
+    { type: "tool_exec", name: "Edit", target: "lib/d.mjs", outcome: "error" },
     // Target-less events pass through silently.
-    { type: "tool_call", name: "Bash", outcome: "ok" },
-    { type: "llm_call", latencyMs: 5 },
+    { type: "tool_exec", name: "Bash", outcome: "ok" },
+    { type: "api_response", latencyMs: 5 },
   ];
   assert.deepEqual(filesTouched(entries), ["lib/a.mjs (1 write, 2 edits)", "lib/b.mjs (1 edit)"]);
   assert.deepEqual(filesTouched([]), []);
@@ -118,10 +119,10 @@ test("aggregateThread + aggregateWorkspace read real trace files", async () => {
   mkdirSync(threadsDir, { recursive: true });
   const id = "11111111-2222-3333-4444-555555555555";
   const jsonl = sampleTrace().map((e) => JSON.stringify(e)).join("\n") + "\n";
-  writeFileSync(join(threadsDir, `${id}.trace.jsonl`), jsonl);
+  writeFileSync(join(threadsDir, `${id}.log.jsonl`), jsonl);
   // a torn final line must not break parsing
   writeFileSync(
-    join(threadsDir, `${id}.trace.jsonl`),
+    join(threadsDir, `${id}.log.jsonl`),
     jsonl + '{"ts":9999,"type":"llm_ca',
   );
 
@@ -139,10 +140,10 @@ test("aggregateThread + aggregateWorkspace read real trace files", async () => {
 
 test("a failed llm_call is counted but kept out of the latency mean", () => {
   const s = aggregateTrace([
-    { type: "thread_start", turn: 0, model: "m", agent: "dev" },
-    { type: "llm_call", turn: 0, outcome: "ok", latencyMs: 1000, usage: { prompt: 10, completion: 2, total: 12 } },
-    { type: "llm_call", turn: 1, outcome: "error", latencyMs: 3, error: { message: "EHOSTUNREACH" } },
-    { type: "thread_end", reason: "error" },
+    { type: "run_start", turn: 0, model: "m", agentDef: "dev" },
+    { type: "api_response", turn: 0, latencyMs: 1000, usage: { prompt: 10, completion: 2, total: 12 } },
+    { type: "api_error", turn: 1, latencyMs: 3, message: "EHOSTUNREACH" },
+    { type: "run_end", reason: "error" },
   ]);
   assert.equal(s.llmCalls, 1, "only answered calls count as calls");
   assert.equal(s.llmErrors, 1);
