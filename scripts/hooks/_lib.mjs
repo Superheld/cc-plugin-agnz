@@ -706,12 +706,6 @@ export function readThreadMetas(wsDir, { withSpend = true } = {}) {
  * "~0k"). This is the number that tells the lead how heavy a `send` to this
  * thread will be (a resume re-sends the whole transcript to the local model).
  */
-function formatCtx(n) {
-  if (typeof n !== "number" || !Number.isFinite(n) || n < 0) return "0";
-  if (n < 1000) return String(n);
-  return `~${Math.round(n / 1000)}k`;
-}
-
 // Sort priority for the thread block: live work first, then paused-for-input,
 // then idle (finished but resumable), errors last. Within a status group the
 // most-recently-touched thread comes first, so stale threads sink toward the
@@ -813,39 +807,19 @@ export function formatThreadsDetailed(threads, now = Date.now()) {
       : sid;
     const age = formatAge(t.updatedAt, now);
     const ageTag = age ? ` · ${age}` : "";
-    const s = t.spend || { turns: 0, tokens: 0 };
-    // Always show turns + the resume-relevant context size — what a `send`
-    // re-sends to the model. Card-bearing threads carry it directly; legacy
-    // threads derive it from the last llm_call in the trace. The cumulative
-    // token sum is deliberately NOT shown here: it re-counts the transcript
-    // every turn and read as "the thread's size" when it is not (it stays
-    // available in `agnz show`). No usable figure → turns only.
-    let spend = "";
-    const ctx = t.ctxTokens != null ? t.ctxTokens : s.lastCtx;
-    if (ctx != null) {
-      spend = ` · ${s.turns} turns · ctx ${formatCtx(ctx)}`;
-    } else if (s.turns) {
-      spend = ` · ${s.turns} turns`;
-    }
-    // Liveness for running threads: the last tool call from the trace tail,
-    // plus the phase label. "last:" alone freezes during a long LLM
-    // generation — a 2-minute CPU generation and a hung runner looked
-    // identical (field lesson, cost a night of PID-watching). "· generating
-    // 84s" disambiguates; past the hung threshold the alert line below takes
-    // over instead.
-    let activity = "";
-    if (t.status === "running") {
-      if (t.lastActivity && t.lastActivity.name) {
-        const a = t.lastActivity;
-        const what = a.target ? `${a.name} ${String(a.target).slice(0, 60)}` : a.name;
-        const ago = a.ts != null ? ` (${formatAgoFine(now - a.ts)} ago)` : "";
-        activity = ` · last: ${what}${ago}`;
-      }
-      const inFlight = t.runState ? t.runState.llmInFlightMs : null;
-      if (inFlight != null && !isHungRunState(t.runState)) {
-        activity += ` · generating ${formatAgoFine(inFlight)}`;
-      }
-    }
+    // No spend, no liveness. Turns, context size and the last tool call were
+    // all telemetry the lead had to read and interpret on EVERY prompt — and
+    // reading a thread's vital signs is how orchestrating turns into
+    // babysitting. The lead's job is to start, answer, stop and remove; none
+    // of those needs a token count. Both figures still exist in the trace
+    // files for the dashboard, which costs the parent's context nothing.
+    //
+    // The one exception stays below: a HUNG thread still gets its alert.
+    // That is not analysis the lead went looking for — it is an exception
+    // reaching it unbidden, which is the only shape of information this
+    // block should carry.
+    const spend = "";
+    const activity = "";
     // Second line: the rolling summary (→ description → role, fallback-chained
     // in readThreadMetas). This is what lets the parent see what a thread did
     // without opening its transcript — even weeks later. Collapse whitespace so

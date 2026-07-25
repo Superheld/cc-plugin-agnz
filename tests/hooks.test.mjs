@@ -141,78 +141,11 @@ test("readThreadMetas attaches lastActivity only to running threads", () => {
   assert.equal(idle.lastActivity, null);
 });
 
-test("formatThreadsDetailed renders short-id, status, and spend", () => {
-  const now = 1782065400570;
-  const out = formatThreadsDetailed(
-    [
-      { id: "1a2b3c4d5e6f", name: "dev", status: "running", spend: { turns: 5, tokens: 91234, lastCtx: 1234 } },
-      // fresh idle (updatedAt = now) so it stays in the full-format section
-      { id: "9f8e7d6c", name: null, status: "idle", updatedAt: now, spend: { turns: 0, tokens: 0, lastCtx: null } },
-    ],
-    now,
-  );
-  // header is honest: N open, and how many of those are merely idle
-  assert.match(out, /threads \(2 open · 1 idle\):/);
-  // the block shows the resume-relevant ctx (last call), never the cumulative sum
-  assert.match(out, /dev:1a2b3c4d — running · 5 turns · ctx ~1k/);
-  assert.doesNotMatch(out, /91,?234/);
-  // a zero-spend fresh idle thread shows the age tag but omits the spend suffix
-  assert.match(out, /9f8e7d6c — idle · now$/m);
-});
-
-test("formatThreadsDetailed shows a last-activity line for running threads", () => {
-  const now = 1782065400570;
-  const out = formatThreadsDetailed(
-    [
-      {
-        id: "1a2b3c4d5e6f",
-        name: "dev",
-        status: "running",
-        spend: { turns: 5, tokens: 9000, lastCtx: 1234 },
-        lastActivity: { name: "Write", target: "lib/runner.mjs", ts: now - 12_000, outcome: "ok" },
-      },
-    ],
-    now,
-  );
-  assert.match(out, /dev:1a2b3c4d — running · 5 turns · ctx ~1k · last: Write lib\/runner\.mjs \(12s ago\)/);
-});
-
-test("formatThreadsDetailed omits the activity tag for non-running threads and null activity", () => {
-  const now = 1782065400570;
-  const out = formatThreadsDetailed(
-    [
-      // idle thread carrying a (stale-by-design) lastActivity must not show it
-      { id: "9f8e7d6c", name: "done", status: "idle", updatedAt: now, spend: { turns: 2, tokens: 40, lastCtx: 40 }, lastActivity: { name: "Read", target: "x", ts: now } },
-      // running thread without any recorded tool call yet
-      { id: "1a2b3c4d", name: "dev", status: "running", spend: { turns: 1, tokens: 10, lastCtx: 10 }, lastActivity: null },
-    ],
-    now,
-  );
-  assert.doesNotMatch(out, /last:/);
-});
-
 test("formatThreadsDetailed header drops the idle breakdown when none are idle", () => {
   const out = formatThreadsDetailed([
     { id: "1a2b3c4d", name: "dev", status: "running", spend: { turns: 1, tokens: 10 } },
   ]);
   assert.match(out, /threads \(1 open\):/);
-});
-
-test("formatThreadsDetailed renders a compact age tag from updatedAt", () => {
-  const now = Date.parse("2026-07-20T12:00:00Z");
-  const out = formatThreadsDetailed(
-    [
-      {
-        id: "1a2b3c4d",
-        name: "dev",
-        status: "idle",
-        updatedAt: "2026-07-20T09:00:00Z", // 3 hours earlier — still fresh (<24h)
-        spend: { turns: 2, tokens: 40, lastCtx: 40 },
-      },
-    ],
-    now,
-  );
-  assert.match(out, /dev:1a2b3c4d — idle · 3h · 2 turns · ctx 40/);
 });
 
 test("formatThreadsDetailed accepts epoch-millis timestamps (real meta format)", () => {
@@ -263,25 +196,6 @@ test("formatThreadsDetailed appends a close-nudge only above the idle threshold"
   ];
   const out = formatThreadsDetailed(fiveIdle);
   assert.match(out, /tip: 5 idle threads finished\? close with 'agnz stop <id>'/);
-});
-
-test("formatThreadsDetailed renders the summary as an indented second line", () => {
-  const now = 1782065400570;
-  const out = formatThreadsDetailed(
-    [
-      {
-        id: "1a2b3c4d5e6f",
-        name: "cleanup",
-        status: "idle",
-        updatedAt: now, // fresh idle → full format with its summary
-        spend: { turns: 6, tokens: 100, lastCtx: 100 },
-        summary: "Deleted 5 error-state threads and their files",
-      },
-    ],
-    now,
-  );
-  assert.match(out, /cleanup:1a2b3c4d — idle · now · 6 turns · ctx 100/);
-  assert.match(out, /\n {6}Deleted 5 error-state threads and their files/);
 });
 
 test("formatThreadsDetailed collapses whitespace and caps the summary", () => {
@@ -454,41 +368,6 @@ test("readThreadMetas uses card.task in the summary fallback chain", () => {
   writeThread("t1", { status: "idle", card: { task: "my mission", turns: 1, tokens: 10, ctxTokens: 5 } }, null);
   assert.equal(readThreadMetas(ws)[0].summary, "my mission");
 });
-
-test("formatThreadsDetailed renders ctx from a card and drops the token sum", () => {
-  const out = formatThreadsDetailed([
-    { id: "1a2b3c4d", name: "dev", status: "running", spend: { turns: 5, tokens: 999999 }, ctxTokens: 12345 },
-  ]);
-  // resume-relevant context, rounded, and NO misleading cumulative token count
-  assert.match(out, /dev:1a2b3c4d — running · 5 turns · ctx ~12k/);
-  assert.doesNotMatch(out, /tok/);
-});
-
-test("formatThreadsDetailed renders a sub-1000 ctx exactly, no k suffix", () => {
-  const out = formatThreadsDetailed([
-    { id: "1a2b3c4d", name: "dev", status: "running", spend: { turns: 2, tokens: 0 }, ctxTokens: 500 },
-  ]);
-  assert.match(out, /dev:1a2b3c4d — running · 2 turns · ctx 500/);
-});
-
-test("formatThreadsDetailed derives ctx from the trace's last call for card-less threads", () => {
-  // Legacy thread (no card → no ctxTokens): the trace fold's lastCtx stands in.
-  const out = formatThreadsDetailed([
-    { id: "1a2b3c4d", name: "dev", status: "running", spend: { turns: 5, tokens: 91234, lastCtx: 4200 } },
-  ]);
-  assert.match(out, /dev:1a2b3c4d — running · 5 turns · ctx ~4k/);
-  assert.doesNotMatch(out, /tok\b/);
-});
-
-test("formatThreadsDetailed shows turns only when no ctx figure exists at all", () => {
-  // No card AND no usable trace: never invent a number, never show the sum.
-  const out = formatThreadsDetailed([
-    { id: "1a2b3c4d", name: "dev", status: "running", spend: { turns: 5, tokens: 1234, lastCtx: null } },
-  ]);
-  assert.match(out, /dev:1a2b3c4d — running · 5 turns$/m);
-});
-
-// ── ADR 0015 §4: the PreToolUse fence decision ───────────────────────────────
 
 test("isFencedTranscriptRead blocks a Read of a thread transcript", () => {
   assert.equal(
@@ -806,24 +685,6 @@ test("formatThreadsDetailed adds the hung alert with evidence and interrupt verb
   assert.match(out, /⚠ hung: LLM call running 43m \(median 2m\) → agnz interrupt dash-transcript/);
   // the healthy thread gets no alert line
   assert.doesNotMatch(out, /interrupt healthy/);
-});
-
-test("formatThreadsDetailed labels an in-flight LLM call as generating — a frozen last: must not read as dead", () => {
-  const MIN = 60_000;
-  const now = 1782065400570;
-  const out = formatThreadsDetailed(
-    [
-      {
-        id: "1a2b3c4d", name: "dev", status: "running", updatedAt: now,
-        spend: { turns: 5, tokens: 0, lastCtx: 9000 },
-        // Two minutes into a CPU generation: last tool call is stale by design.
-        lastActivity: { name: "Edit", target: "web/server.py", ts: now - 2 * MIN, outcome: "ok" },
-        runState: { lastAction: null, llmInFlightMs: 2 * MIN, medianLlmMs: 90_000 },
-      },
-    ],
-    now,
-  );
-  assert.match(out, /last: Edit web\/server\.py \(2m ago\) · generating 2m/);
 });
 
 test("formatThreadsDetailed suppresses the generating tag once the hung alert takes over", () => {

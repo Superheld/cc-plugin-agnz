@@ -11,7 +11,6 @@
 //   agnz stop   <id|name>             (archive: hide from list, keep transcript)
 //   agnz remove <id|name> | --status stopped|error   (delete files permanently)
 //   agnz show   [<id|name>]           (no target: list all threads; --status <s> filters)
-//   agnz mailbox [--from x] [--to x] [--kind k] [--limit n]   (peek the message log)
 //   agnz config <sub> [...]           (profiles + mappings: list|add|set|remove|use|test|mapping; --project)
 //   agnz info                         (version, config layout, effective profiles/mappings)
 //
@@ -42,11 +41,10 @@ import {
 } from "../lib/agent-defs.mjs";
 import { createSandbox } from "../lib/sandbox.mjs";
 import { publish } from "../lib/event-bus.mjs";
-import { readTrace, aggregateTrace, filesTouched } from "../lib/trace-stats.mjs";
 import { PLUGIN_ROOT } from "../lib/orchestrate.mjs";
+import { readPluginVersion } from "../lib/plugin-version.mjs";
+import { promptFingerprint } from "../lib/prompts.mjs";
 import { loadConfig, updateConfigLayer, normaliseProfile } from "../lib/config.mjs";
-import { judgeThread, deriveActivity } from "../lib/status.mjs";
-import { readAllMessages } from "../lib/messages-log.mjs";
 import { resolveUserDir, resolveProjectDir } from "../lib/data-dir.mjs";
 import { listModels } from "../lib/llm/openai-compatible.mjs";
 
@@ -245,29 +243,6 @@ function capContent(content) {
   return `${content.slice(0, RECENT_CONTENT_CAP)}…[elided, ${kb} KB total]`;
 }
 
-// Cap a transcript message's content field, preserving every other field
-// (role, tool_call_id, tool_calls, ts). Assistant messages that carry only
-// tool_calls (null content) pass through untouched.
-function capMessageContent(m) {
-  if (!m || typeof m !== "object") return m;
-  if (typeof m.content === "string") return { ...m, content: capContent(m.content) };
-  // OpenAI content-parts array (e.g. [{type:"text", text:"…"}]): cap each
-  // part's `text` — the only unbounded string a part carries — so a big tool
-  // result delivered as parts can't slip past the cap. Non-text parts and
-  // unknown shapes pass through untouched.
-  if (Array.isArray(m.content)) {
-    return {
-      ...m,
-      content: m.content.map((part) =>
-        part && typeof part === "object" && typeof part.text === "string"
-          ? { ...part, text: capContent(part.text) }
-          : part,
-      ),
-    };
-  }
-  return m;
-}
-
 // Cap an approval/question pause before it is promoted into a lean surface
 // (`show` and `wait`). `pending.args` carries the FULL tool arguments — a
 // Write's whole `content`, an Edit's old/new strings (100 KB is realistic) —
@@ -290,54 +265,54 @@ function capPending(pending) {
   return out;
 }
 
-// Compact the trace fold to the fields a lead reads at a glance. Drops the
-// per-event detail; keeps turns, tokens, latency, tool outcomes, repair rate.
-function compactStats(s) {
-  return {
-    turns: s.turns,
-    llmCalls: s.llmCalls,
-    tokens: s.tokens,
-    avgLlmLatencyMs: s.avgLlmLatencyMs,
-    durationMs: s.durationMs,
-    toolCalls: s.toolCalls,
-    repairs: s.repairs,
-    terminalReason: s.terminalReason,
-  };
-}
+// Build the `show` view — the state a lead needs to act on a thread, and
+// nothing that invites it to observe one. Pure, so it stays unit-testable.
+//
+// Removed on purpose (see the call site): the trace fold, the resume card,
+// filesTouched, the liveness triple and the last agent turns. Those made
+// `show` a dashboard, and a lead reading a dashboard is a lead babysitting.
+// Analysis belongs on a surface you open when you want it — the trace and
+// transcript files are still written, and the dashboard still reads them.
+export function buildShowView(thread, running = null) {
+  // The system prompt is frozen write-once, so a long-lived thread keeps the
+  // prompt (and skill catalog) it was born with while agnz moves on. Surfaced
+  // ONLY on a mismatch: a current thread says nothing, a drifted one tells the
+  // lead that the fix it just installed will not reach this thread.
+  //
+  // Two signals, because neither suffices alone. The version is what a human
+  // recognises; the template digest is what actually catches same-version
+  // drift, which is the common case (agnz bumps the version only at release).
+  const drifted =
+    running &&
+    ((thread.promptTemplates && thread.promptTemplates !== running.promptTemplates) ||
+      (thread.promptVersion && thread.promptVersion !== running.version))
+      ? {
+          bornAt: `${thread.promptVersion ?? "?"} (${thread.promptTemplates ?? "?"})`,
+          running: `${running.version} (${running.promptTemplates})`,
+          evidence: "the frozen system prompt predates this build — prompt fixes do not reach this thread",
+          action: `agnz start <name> --agent ${thread.agentDef?.name ?? "<def>"}`,
+        }
+      : null;
 
-// Build the `show` view. Pure: the caller does the IO (readMessages, readTrace)
-// and passes the results in, so this is directly unit-testable. `stats` is the
-// compacted trace fold or null when the thread has no trace file yet.
-export function buildShowView(thread, messages, stats) {
-  const view = {
+  return {
+    ...(drifted ? { promptDrift: drifted } : {}),
     thread: {
       thread_id: thread.id,
       name: thread.name,
-      // Glossary `role` (ADR 0019 §6): the def name, nothing more. The full
-      // agentDef (tool lists, description) was field-tested as pure noise —
-      // the lead knows what "dev" is; policy detail lives in the def file.
       role: thread.agentDef?.name ?? null,
       status: thread.status,
       summary: thread.summary || null,
       description: thread.description,
       cwd: thread.cwd,
+      // The one field the action verbs cannot do without: `answer` and
+      // `approve` need to know what is being asked.
       pending: capPending(thread.pending),
       error: thread.error,
+      // A spawned-but-not-yet-claimed run: the "idle" status is about to
+      // flip, so surfacing it keeps `show` from being misread as finished.
+      ...(thread.pendingRun ? { pendingRun: thread.pendingRun } : {}),
     },
-    // Agent turns only: the lead's own directives (user role — typed prompts
-    // and synthetic mail injections) were observed echoing back kilobytes of
-    // the lead's own words. It wants the agent's moves, not a mirror.
-    recent: (messages || [])
-      .filter((m) => !m || typeof m !== "object" || m.role !== "user")
-      .slice(-6)
-      .map(capMessageContent),
   };
-  if (thread.card) view.thread.card = thread.card;
-  // A pendingRun marker means a spawned runner has not claimed yet — the
-  // "idle" status above is about to flip; surface it so show isn't misread.
-  if (thread.pendingRun) view.thread.pendingRun = thread.pendingRun;
-  if (stats) view.stats = stats;
-  return view;
 }
 
 // ---- verbs ----
@@ -497,16 +472,13 @@ async function main() {
           return;
         }
         if (Date.now() >= deadline) {
-          // Attach phase-labelled liveness so the waiter can judge at once:
-          // "generating 84s" means keep waiting, a minutes-old last_action
-          // with no phase progress means look closer — no transcript read
-          // either way.
-          const activity = deriveActivity(await readTrace(thread.cwd, thread.id));
+          // No liveness triple any more: it read the trace tail and handed
+          // the lead a tool call to interpret. A timeout says one thing —
+          // still running, wait again or let the message find you.
           out({
             thread_id: thread.id,
             status: thread.status,
             timeout: true,
-            ...(activity ? { activity } : {}),
             note:
               thread.status === "running"
                 ? "still running — wait again or rely on the message hook"
@@ -619,27 +591,21 @@ async function main() {
         out(
           await Promise.all(
             threads.map(async (t) => {
-              // Trace only for running threads — the judge needs it for the
-              // in-flight/hung derivation; everything else judges from meta
-              // alone, keeping the common all-idle listing cheap.
-              const entries = t.status === "running" ? await readTrace(t.cwd, t.id) : [];
-              const judged = judgeThread({ thread: t, entries });
-              const activity = t.status === "running" ? deriveActivity(entries) : null;
+              // No trace read here any more. The verdict/evidence/action
+              // triple and the liveness triple both came from folding the
+              // trace, and both were analysis the lead had to interpret.
+              // Exception reporting (a hung thread) is pushed by the hook
+              // instead, so it reaches the lead without being looked up.
               return {
                 thread_id: t.id,
                 name: t.name,
                 role: t.agentDef?.name,
                 status: t.status,
-                verdict: judged.verdict,
-                ...(judged.evidence ? { evidence: judged.evidence } : {}),
-                ...(judged.action ? { action: judged.action } : {}),
                 summary:
                   t.summary ||
                   t.description ||
                   (t.agentDef?.description ? t.agentDef.description.split("\n")[0].slice(0, 140) : null),
                 updatedAt: t.updatedAt,
-                ...(activity ? { activity } : {}),
-                // A spawned-but-not-yet-claimed run: the idle status is about to flip.
                 ...(t.pendingRun ? { pendingRun: t.pendingRun } : {}),
               };
             }),
@@ -651,61 +617,21 @@ async function main() {
       if (!thread) fail(`no thread '${target}'`);
       const id = thread.id;
       thread = await recoverIfStale(tm, thread);
-      const msgs = await tm.readMessages(id);
-      // Surface the trace fold when the thread has a trace file — makes `show`
-      // the one-call structural view (state + spend), so the lead never reaches
-      // for the raw transcript. readTrace returns [] when there is no trace yet.
-      const entries = await readTrace(thread.cwd, thread.id);
-      const stats = entries.length ? compactStats(aggregateTrace(entries)) : null;
-      const view = buildShowView(thread, msgs, stats);
-      // Same liveness rule as list: only a running thread needs it.
-      if (thread.status === "running") {
-        const activity = deriveActivity(entries);
-        if (activity) view.thread.activity = activity;
-      }
-      // The diff pointer for a reviewing lead: which files this thread
-      // mutated (from the trace), so verification starts at `git diff` on
-      // the right paths instead of a transcript reconstruction.
-      const touched = filesTouched(entries);
-      if (touched.length) view.filesTouched = touched;
-      // The judgment triple (ADR 0019): status is fact, verdict is diagnosis.
-      const judged = judgeThread({ thread, entries });
-      view.thread.verdict = judged.verdict;
-      if (judged.evidence) view.thread.evidence = judged.evidence;
-      if (judged.action) view.thread.action = judged.action;
-      out(view);
-      return;
-    }
-
-    // Peek the workspace message log (ADR 0002) as an interface instead of
-    // raw file parsing. Parent mail arrives via the hook; this verb exists
-    // for everything the hook does NOT deliver — agent-to-agent traffic in a
-    // team, or re-reading already-consumed mail. Read-only: it never touches
-    // the parent cursor, so peeking cannot mark anything as delivered.
-    case "mailbox": {
-      const limit = flags.limit != null ? Number(flags.limit) : 20;
-      if (!Number.isFinite(limit) || limit < 1) fail("mailbox: --limit must be a positive number");
-      const matchesTo = (to, want) =>
-        Array.isArray(to) ? to.includes(want) : to === want;
-      let msgs = await readAllMessages(cwd);
-      if (typeof flags.from === "string") msgs = msgs.filter((m) => m.from === flags.from);
-      if (typeof flags.to === "string") msgs = msgs.filter((m) => matchesTo(m.to, flags.to));
-      if (typeof flags.kind === "string") msgs = msgs.filter((m) => m.kind === flags.kind);
-      const total = msgs.length;
-      msgs = msgs.slice(-limit);
-      out({
-        total,
-        shown: msgs.length,
-        messages: msgs.map((m) => ({
-          id: m.id,
-          at: m.at,
-          from: m.from,
-          to: m.to,
-          kind: m.kind,
-          ...(m.urgent ? { urgent: true } : {}),
-          text: capContent(String(m.text ?? "")),
-        })),
-      });
+      // Deliberately thin. The lead's job is to assign, answer, stop and
+      // remove — not to analyse. Spend, trace stats, filesTouched, liveness
+      // and recent turns were all removed: every one of them invited the lead
+      // to watch a thread instead of running it, and watching is what the
+      // parent's context window is supposed to be spared. What survives is
+      // exactly what the action verbs need: `pending` to answer or approve,
+      // `summary` (the agent's own report line) to decide what comes next.
+      // The trace files still exist and still feed the dashboard — they just
+      // stop being a lead-facing surface.
+      out(
+        buildShowView(thread, {
+          version: await readPluginVersion(PLUGIN_ROOT),
+          promptTemplates: promptFingerprint(),
+        }),
+      );
       return;
     }
 
@@ -873,12 +799,7 @@ async function main() {
     // mappings with origins, per-project counts. The one place that renders
     // the whole model-resolution picture.
     case "info": {
-      let version = "unknown";
-      try {
-        version = JSON.parse(
-          await (await import("node:fs/promises")).readFile(resolve(PLUGIN_ROOT, ".claude-plugin", "plugin.json"), "utf8"),
-        ).version || "unknown";
-      } catch {}
+      const version = await readPluginVersion(PLUGIN_ROOT);
 
       const view = {
         version,

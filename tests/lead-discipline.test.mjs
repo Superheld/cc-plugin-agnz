@@ -34,102 +34,6 @@ const CLI = resolve(HERE, "..", "bin", "agnz.mjs");
 
 // ── buildShowView (pure) ─────────────────────────────────────────────────────
 
-test("buildShowView strips the heavy embedded fields", () => {
-  const thread = {
-    id: "t1",
-    name: "dev",
-    status: "idle",
-    cwd: "/proj",
-    // These two are exactly what must NOT reach the lead's context.
-    systemPromptSnapshot: "x".repeat(50000),
-    agentDef: {
-      name: "dev",
-      description: "Implements features\nand fixes bugs",
-      tools: ["Read", "Grep", "Edit"],
-      disallowedTools: ["Bash"],
-      body: "y".repeat(50000),
-      prompt: "z".repeat(50000),
-    },
-  };
-  const view = buildShowView(thread, [], null);
-  const json = JSON.stringify(view);
-  assert.doesNotMatch(json, /x{100}/, "systemPromptSnapshot must be absent");
-  assert.doesNotMatch(json, /y{100}/, "agentDef.body must be absent");
-  assert.doesNotMatch(json, /z{100}/, "agentDef.prompt must be absent");
-  // The whole agentDef collapses to the glossary `role` — tool lists and
-  // description were field-tested as per-inspection noise.
-  assert.ok(!("agentDef" in view.thread));
-  assert.equal(view.thread.role, "dev");
-});
-
-test("buildShowView caps each recent message's content with a size-reporting marker", () => {
-  const big = "A".repeat(48 * 1024); // 48 KiB tool result
-  const thread = { id: "t1", name: "dev", status: "idle", cwd: "/proj", agentDef: null };
-  const view = buildShowView(
-    thread,
-    [
-      { role: "assistant", content: "small" },
-      { role: "tool", tool_call_id: "c1", content: big },
-    ],
-    null,
-  );
-  const small = view.recent[0];
-  const capped = view.recent[1];
-  assert.equal(small.content, "small", "a short message is untouched");
-  assert.ok(capped.content.length < big.length, "the big message is truncated");
-  assert.match(capped.content, /…\[elided, 48\.0 KB total\]$/);
-  // structural fields survive the cap
-  assert.equal(capped.role, "tool");
-  assert.equal(capped.tool_call_id, "c1");
-});
-
-test("buildShowView keeps only the last 6 agent-side messages", () => {
-  const msgs = Array.from({ length: 10 }, (_, i) => ({ role: "assistant", content: `m${i}` }));
-  const view = buildShowView({ id: "t1", status: "idle" }, msgs, null);
-  assert.equal(view.recent.length, 6);
-  assert.equal(view.recent[0].content, "m4");
-});
-
-test("buildShowView filters user-role messages out of recent — the lead's own directive must not echo back", () => {
-  const directive = "D".repeat(3600); // the observed 3.6 KB task echo
-  const view = buildShowView({ id: "t1", status: "idle" }, [
-    { role: "user", content: directive },
-    { role: "assistant", content: "on it" },
-    { role: "user", content: "injected mailbox mail" },
-    { role: "tool", tool_call_id: "c1", content: "result" },
-  ], null);
-  assert.deepEqual(view.recent.map((m) => m.role), ["assistant", "tool"]);
-  assert.doesNotMatch(JSON.stringify(view), /D{100}/, "the directive must be absent entirely");
-});
-
-test("buildShowView passes through an assistant message with null content (tool_calls only)", () => {
-  const view = buildShowView({ id: "t1", status: "running" }, [
-    { role: "assistant", content: null, tool_calls: [{ id: "c1" }] },
-  ], null);
-  assert.equal(view.recent[0].content, null);
-  assert.deepEqual(view.recent[0].tool_calls, [{ id: "c1" }]);
-});
-
-test("buildShowView surfaces the resume card when present, omits it otherwise", () => {
-  const withCard = buildShowView(
-    { id: "t1", status: "idle", card: { task: "do a thing", turns: 3, tokens: 900, ctxTokens: 12345 } },
-    [],
-    null,
-  );
-  assert.deepEqual(withCard.thread.card, { task: "do a thing", turns: 3, tokens: 900, ctxTokens: 12345 });
-
-  const noCard = buildShowView({ id: "t2", status: "idle" }, [], null);
-  assert.ok(!("card" in noCard.thread));
-});
-
-test("buildShowView attaches stats only when provided", () => {
-  const stats = { turns: 5, tokens: { total: 100 } };
-  assert.deepEqual(buildShowView({ id: "t1", status: "idle" }, [], stats).stats, stats);
-  assert.ok(!("stats" in buildShowView({ id: "t1", status: "idle" }, [], null)));
-});
-
-// ── decideWaitOutcome (pure) ─────────────────────────────────────────────────
-
 test("decideCollect: running blocks, no marker collects", () => {
   assert.deepEqual(decideCollect({ status: "running" }), { collect: false });
   assert.deepEqual(decideCollect({ status: "idle" }), { collect: true });
@@ -324,25 +228,6 @@ async function seedIdleThread(id_out) {
   return thread.id;
 }
 
-test("show returns a lean view: heavy fields stripped, recent capped, card kept", async () => {
-  const id = await seedIdleThread();
-  const raw = execFileSync(process.execPath, [CLI, "show", id, "--cwd", cwd], {
-    env: { ...process.env, AGNZ_DATA_DIR: userDir },
-    encoding: "utf8",
-  });
-  // Parseable JSON contract, and the heavy fields never appear in the bytes.
-  assert.doesNotMatch(raw, /SSSSSSSSSS/, "systemPromptSnapshot must not be in show output");
-  assert.doesNotMatch(raw, /HEAVY BODY/, "agentDef body must not be in show output");
-  const view = JSON.parse(raw);
-  assert.equal(view.thread.status, "idle");
-  assert.equal(view.thread.role, "dev");
-  assert.ok(!("agentDef" in view.thread), "the agentDef object collapses to role");
-  assert.equal(view.thread.card.task, "do the task");
-  // the 40 KB tool result is capped with the elision marker
-  const tool = view.recent.find((m) => m.role === "tool");
-  assert.match(tool.content, /…\[elided, [\d.]+ KB total\]$/);
-});
-
 test("wait collects a finished thread's answer immediately (no runner)", async () => {
   const id = await seedIdleThread();
   const outcome = runCli(["wait", id]);
@@ -358,30 +243,6 @@ test("wait resolves by agent name, not just id", async () => {
   assert.equal(outcome.status, "idle");
   assert.equal(outcome.content, "final answer from the agent");
 });
-
-test("mailbox peeks the message log with filters and capped text, as an interface — not raw file parsing", async () => {
-  const { appendMessage } = await import("../lib/messages-log.mjs");
-  // Agent-to-agent traffic is exactly what the hook never delivers.
-  await appendMessage(cwd, { from: "dev", to: "reviewer", kind: "handoff", text: "T".repeat(2000) });
-  await appendMessage(cwd, { from: "reviewer", to: ["parent", "dev"], kind: "say", text: "done" });
-  const all = runCli(["mailbox"]);
-  assert.equal(all.total, 2);
-  assert.equal(all.shown, 2);
-  assert.deepEqual(all.messages.map((m) => m.kind), ["handoff", "say"]);
-  assert.match(all.messages[0].text, /…\[elided/, "long text is capped like every lean surface");
-  // --from / --to filters (to matches inside an array recipient too)
-  assert.equal(runCli(["mailbox", "--from", "dev"]).total, 1);
-  assert.equal(runCli(["mailbox", "--to", "dev"]).messages[0].kind, "say");
-  // --limit trims but total stays honest
-  const limited = runCli(["mailbox", "--limit", "1"]);
-  assert.equal(limited.total, 2);
-  assert.equal(limited.shown, 1);
-  assert.equal(limited.messages[0].kind, "say", "limit keeps the newest");
-});
-
-// ── resolveTarget wait-inclusive resolution (finding D) ──────────────────────
-// Placed inside the wiring section so the beforeEach fixture (cwd + AGNZ_DATA_DIR)
-// is active — these hit the real thread manager.
 
 test("resolveTarget with includeError resolves an errored thread by name; default excludes it", async () => {
   const tm = createThreadManager();
@@ -416,24 +277,6 @@ test("wait <name> collects a crashed thread that only exists in error state (fin
 });
 
 // ── capMessageContent handles content-parts arrays (finding E) ───────────────
-
-test("buildShowView caps a big text part inside an array content message", () => {
-  const big = "P".repeat(48 * 1024);
-  const view = buildShowView({ id: "t1", status: "idle" }, [
-    {
-      role: "tool",
-      tool_call_id: "c1",
-      content: [
-        { type: "text", text: big },
-        { type: "text", text: "short tail" },
-      ],
-    },
-  ], null);
-  const parts = view.recent[0].content;
-  assert.match(parts[0].text, /…\[elided, 48\.0 KB total\]$/);
-  assert.equal(parts[1].text, "short tail");
-  assert.equal(view.recent[0].role, "tool");
-});
 
 test("--wait on start/send fails with a pointer to the wait verb", () => {
   // execFileSync throws on a non-zero exit; the error carries stdout.

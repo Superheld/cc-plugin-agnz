@@ -3,6 +3,7 @@ name: agnz
 version: 0.5.0
 user-invocable: false
 description: "This skill should be used when the user asks to 'use agnz', 'delegate this to an agent', 'run this on the local model', 'spawn an agent', 'resume a thread', 'continue with the agent', 'create an agent definition', 'write an agent file', 'define a role for the sub-agent', mentions delegating to LM Studio or Ollama, when agents should communicate or hand off work to each other, or when a task involves reading many files, bulk grep sweeps, or mechanical edits across multiple files where a local model can do the work. Also load when an agnz thread is paused and needs resolution via `agnz approve` or `agnz answer`, or when the user asks about running two agents in parallel."
+audience: lead
 ---
 
 # agnz agents
@@ -40,11 +41,10 @@ Avoid delegation for work needing deep reasoning — local models are limited.
 | `interrupt <id\|name> ["directive"]` | Hard interrupt a runaway/working agent: aborts the current step, leaves it resumable, optionally queues a directive. |
 | `stop <id\|name>` | End and archive a thread (kills its runner; transcript persists on disk). |
 | `remove <id\|name>` / `remove --status stopped\|error` | Delete a thread permanently — meta, transcript, trace, index entry. Live threads must be stopped first. |
-| `show [<id\|name>] [--status <s>]` | The one inspection verb. No target: list all threads with judged `verdict`s. With a target: lean structural view — status, pending, spend, trace stats, `filesTouched`, no raw transcript. |
-| `wait <id\|name> [--timeout <s>]` | Poll a detached run until it leaves `running`; prints the outcome (default timeout 300s; on timeout the phase-labelled `activity` triple tells generating from hung). |
-| `mailbox [--from x] [--to x] [--kind k] [--limit n]` | Read-only peek into the message log — agent-to-agent traffic, consumed mail. Never advances your cursor. |
+| `show [<id\|name>] [--status <s>]` | The overview verb. No target: list all threads (id, name, role, status, summary). With a target: `status`, `pending`, `summary`, `error` — what you need to answer, approve or stop. Deliberately not analytical. |
+| `wait <id\|name> [--timeout <s>]` | Poll a detached run until it leaves `running`; prints the outcome (default timeout 300s; a timeout just says "still running" — the runner keeps going). |
 
-Runs are always detached — there is no `--wait` flag any more. To collect a result in the same call, poll with `agnz wait`; for long runs, launch it as a **background** Bash task (Claude Code: `run_in_background`) so the harness wakes you when the agent finishes. Timeout semantics, the phase-labelled `activity` liveness signal, and collect mode are covered in `references/lifecycle.md`.
+Runs are always detached — there is no `--wait` flag any more. To collect a result in the same call, poll with `agnz wait`; for long runs, launch it as a **background** Bash task (Claude Code: `run_in_background`) so the harness wakes you when the agent finishes. Timeout semantics and collect mode are covered in `references/lifecycle.md`.
 
 ## Resume, don't recreate
 

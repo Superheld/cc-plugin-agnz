@@ -78,7 +78,7 @@ agnz start billing "Investigate how billing works" --agent researcher
 # or collect them explicitly once your own work is done:
 agnz wait auth
 agnz wait billing
-agnz show          # see status/spend of both; a pause on one does not block the other
+agnz show          # see status of both; a pause on one does not block the other
 ```
 
 Each run is its own OS process — genuine parallelism, nothing resident between runs. `wait` is a watcher, not a worker: if you don't call it (or the timeout hits), the runner keeps working underneath and the hook still delivers the result when you next prompt.
